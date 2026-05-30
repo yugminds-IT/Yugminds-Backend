@@ -116,7 +116,7 @@ export class AdminTeachersService {
   ): TeacherDetailResponse {
     const profile = u.profile;
     const assignments = u.teacherSectionAssignments ?? [];
-    const schoolIds = [
+    const _schoolIds = [
       ...new Set((u.teacherSchools ?? []).map((ts) => ts.schoolId)),
     ];
     const assignedSchools = (u.teacherSchools ?? []).map((ts) => ({

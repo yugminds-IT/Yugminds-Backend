@@ -19,7 +19,6 @@ export interface CreateUserOptions {
   isSuperAdmin?: boolean;
 }
 import * as bcrypt from 'bcrypt';
-import * as crypto from 'crypto';
 import { tenantContext } from '../tenants/tenant-context';
 import { tenantScopedQuery } from '../tenants/tenant-scoped-query';
 import { RealtimeGateway } from '../common/realtime/realtime.gateway';

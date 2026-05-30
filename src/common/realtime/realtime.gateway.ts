@@ -419,7 +419,7 @@ export class RealtimeGateway
       this.logger.debug(`Socket connected: ${client.id} -> ${room}`);
       const stats = await this.buildDashboardStatsForUser(userId);
       client.emit('dashboard:stats', stats);
-    } catch (err) {
+    } catch (_err) {
       this.logger.warn(`Socket rejected: ${client.id}`);
       client.emit('socket:error', {
         message: 'Unauthorized socket connection',
