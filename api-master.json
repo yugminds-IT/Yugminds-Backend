@@ -1,0 +1,782 @@
+[
+  {
+    "method": "GET",
+    "path": "/admin/analytics"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/cache-monitor"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/certificates/batch-generate"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/certificates/generate-all-eligible"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/courses"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/courses"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/courses/:courseId"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/courses/:courseId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/courses/:courseId"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/courses/:courseId/access"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/courses/:courseId/chapters"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/courses/:courseId/chapters"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/courses/:courseId/publish"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/courses/:courseId/versions"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/courses/:courseId/versions"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/create-account"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/joining-codes"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/joining-codes"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/joining-codes"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/leaves"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/leaves"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/logos"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/logos"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/logos/:id"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/logos/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/logos/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/materialized-view-stats"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/monitoring-dashboard"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/notifications"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/notifications"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/notifications/recipients"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/password-reset-requests"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/password-reset-requests"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/password-reset-requests"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/profile"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/profile"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/refresh-dashboard-views"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/reports"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/restore-all-data"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/school-admins"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/school-admins"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/school-admins"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/school-admins"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/schools"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/schools"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/schools"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/schools"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/schools/:id"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/schools/:id/init-academic-structure"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/schools/:id/teacher-assignments"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/security"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/security/mfa"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/security/mfa"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/settings"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/settings"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/settings"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/settings/backup"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/settings/cleanup"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/settings/export"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/settings/export"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/settings/notifications"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/stats"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/student-progress"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/students"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/students"
+  },
+  {
+    "method": "PATCH",
+    "path": "/admin/students/:studentId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/students/:studentId"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/success-stories"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/success-stories"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/success-stories/:id"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/success-stories/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/success-stories/:id"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/success-stories/:id/revert"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/success-stories/:id/versions"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/teacher-attendance"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/teacher-attendance/mark-missing"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/teacher-attendance/monthly"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/teacher-reports"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/teachers"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/teachers"
+  },
+  {
+    "method": "GET",
+    "path": "/admin/teachers/:id"
+  },
+  {
+    "method": "PUT",
+    "path": "/admin/teachers/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/admin/teachers/:id"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/upload"
+  },
+  {
+    "method": "POST",
+    "path": "/admin/warm-cache"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/logout"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/reset-password"
+  },
+  {
+    "method": "GET",
+    "path": "/api/csrf-token"
+  },
+  {
+    "method": "GET",
+    "path": "/api/logos"
+  },
+  {
+    "method": "GET",
+    "path": "/api/schools"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/activity"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/activity"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/login"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/logout"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/password-reset-request"
+  },
+  {
+    "method": "GET",
+    "path": "/auth/redirect"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/refresh"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/signup"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/track-login"
+  },
+  {
+    "method": "POST",
+    "path": "/auth/update-password"
+  },
+  {
+    "method": "GET",
+    "path": "/cache/status"
+  },
+  {
+    "method": "POST",
+    "path": "/contact"
+  },
+  {
+    "method": "GET",
+    "path": "/get-role"
+  },
+  {
+    "method": "GET",
+    "path": "/health"
+  },
+  {
+    "method": "GET",
+    "path": "/metrics"
+  },
+  {
+    "method": "GET",
+    "path": "/notifications/reply"
+  },
+  {
+    "method": "POST",
+    "path": "/notifications/reply"
+  },
+  {
+    "method": "GET",
+    "path": "/notifications/unread-count"
+  },
+  {
+    "method": "GET",
+    "path": "/notifications/user"
+  },
+  {
+    "method": "PATCH",
+    "path": "/notifications/user"
+  },
+  {
+    "method": "GET",
+    "path": "/profile"
+  },
+  {
+    "method": "PATCH",
+    "path": "/profile"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/courses"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/courses/progress"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/courses/progress/students"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/courses/progress/students/detail"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/data/export"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/data/import"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/leaves"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/leaves/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/leaves/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/notifications"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/notifications"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/notifications/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/notifications/recipients"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/password-reset-requests"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/password-reset-requests"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/periods"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/periods"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/periods/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/periods/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/school-admin/periods/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/profile"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/profile"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/reports"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/reports/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/reports/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/reports/bulk"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/rooms"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/rooms"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/rooms/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/rooms/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/school-admin/rooms/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/schedules"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/schedules"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/schedules/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/schedules/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/school-admin/schedules/:id"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/schedules/sync-to-teachers"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/school"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/stats"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/student-progress"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/students"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/students"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/students/:studentId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/school-admin/students/:studentId"
+  },
+  {
+    "method": "PATCH",
+    "path": "/school-admin/students/:studentId/password"
+  },
+  {
+    "method": "POST",
+    "path": "/school-admin/students/bulk-import"
+  },
+  {
+    "method": "GET",
+    "path": "/school-admin/teachers"
+  },
+  {
+    "method": "GET",
+    "path": "/student/assignments"
+  },
+  {
+    "method": "GET",
+    "path": "/student/assignments/:assignmentId"
+  },
+  {
+    "method": "POST",
+    "path": "/student/assignments/:assignmentId/submit"
+  },
+  {
+    "method": "GET",
+    "path": "/student/assignments/hierarchy"
+  },
+  {
+    "method": "POST",
+    "path": "/student/assignments/upload"
+  },
+  {
+    "method": "GET",
+    "path": "/student/certificates"
+  },
+  {
+    "method": "POST",
+    "path": "/student/certificates/generate"
+  },
+  {
+    "method": "GET",
+    "path": "/student/courses"
+  },
+  {
+    "method": "GET",
+    "path": "/student/courses/:courseId/chapters"
+  },
+  {
+    "method": "GET",
+    "path": "/student/courses/:courseId/chapters/:chapterId/contents"
+  },
+  {
+    "method": "GET",
+    "path": "/student/dashboard"
+  },
+  {
+    "method": "GET",
+    "path": "/student/progress"
+  },
+  {
+    "method": "POST",
+    "path": "/student/save-chapter-progress"
+  },
+  {
+    "method": "GET",
+    "path": "/student/simple-progress"
+  },
+  {
+    "method": "POST",
+    "path": "/student/simple-progress"
+  },
+  {
+    "method": "GET",
+    "path": "/success-stories"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/analytics"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/attendance"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/attendance/monthly"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/attendance/today"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/classes"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/dashboard"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/leaves"
+  },
+  {
+    "method": "POST",
+    "path": "/teacher/leaves"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/notifications"
+  },
+  {
+    "method": "POST",
+    "path": "/teacher/notifications"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/notifications/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/teacher/notifications/:id"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/notifications/recipients"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/periods"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/reports"
+  },
+  {
+    "method": "POST",
+    "path": "/teacher/reports"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/schedules"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/schools"
+  },
+  {
+    "method": "GET",
+    "path": "/teacher/student-progress"
+  },
+  {
+    "method": "POST",
+    "path": "/validate-joining-code"
+  }
+]

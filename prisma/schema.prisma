@@ -1,0 +1,838 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  admin
+  school_admin
+  teacher
+  student
+}
+
+// ============ Auth & Core ============
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  domain    String   @unique
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id                       Int                         @id @default(autoincrement())
+  email                    String                      @unique
+  password                 String
+  role                     Role
+  isSuperAdmin             Boolean                     @default(false)
+  isActive                 Boolean                     @default(true)
+  mustChangePassword       Boolean                     @default(false)
+  tokenVersion             Int                         @default(0)
+  tenantId                 String?
+  tenant                   Tenant?                     @relation(fields: [tenantId], references: [id])
+  refreshTokens            RefreshToken[]
+  profile                  Profile?
+  teacherSchools           TeacherSchool[]
+  teacherSectionAssignments TeacherSectionAssignment[]
+  studentSchools           StudentSchool[]
+  schoolAdmins             SchoolAdmin[]
+  notifications            Notification[]
+  sentNotifications        Notification[]               @relation("NotificationSender")
+  notificationReplies      NotificationReply[]
+  teacherLeaves             TeacherLeave[]
+  assignmentSubmissions    AssignmentSubmission[]
+  createdAssignments       Assignment[]                 @relation("TeacherAssignments")
+  grantedRetakeEntries     RetakeGrant[]               @relation("TeacherRetakeGrants")
+  studentRetakeEntries     RetakeGrant[]               @relation("StudentRetakeGrants")
+  studentScores            StudentScore[]              @relation("StudentScoreOwner")
+  certificates             StudentCertificate[]
+  issuedCertificates       StudentCertificate[]        @relation("StudentCertificateIssuedBy")
+  authActivities           AuthActivity[]
+  passwordResetRequests    PasswordResetRequest[]
+  approvedPasswordResets   PasswordResetRequest[]      @relation("ApprovedBy")
+  createdAt                DateTime                    @default(now())
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  @@index([userId])
+}
+
+// ============ Profile (extended user info) ============
+model Profile {
+  id           String   @id @default(uuid())
+  userId       Int      @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  fullName       String?
+  phone          String?
+  qualification  String?
+  experience     String?
+  specialization String?
+  parentName     String?
+  parentPhone  String?
+  schoolId     String?
+  emailNotifications Boolean @default(true)
+  assignmentReminders Boolean @default(true)
+  gradeNotifications Boolean @default(true)
+  courseUpdates Boolean @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@index([userId])
+  @@index([schoolId])
+}
+
+// ============ School (extends Tenant concept) ============
+model School {
+  id                    String   @id @default(uuid())
+  name                  String
+  schoolCode            String?  @unique
+  email                 String?
+  phone                 String?
+  address               String?
+  city                  String?
+  state                 String?
+  country               String?
+  pincode               String?
+  principalName         String?
+  affiliationType        String?
+  schoolType            String?
+  establishedYear       Int?
+  totalStudentsEstimate Int?
+  totalTeachersEstimate Int?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  teacherSchools TeacherSchool[]
+  studentSchools StudentSchool[]
+  schoolAdmins   SchoolAdmin[]
+  courses        CourseAccess[]
+  rooms          Room[]
+  periods        Period[]
+  joinCodes      JoinCode[]
+  grades         Grade[]
+  teacherSectionAssignments TeacherSectionAssignment[]
+  assignments    Assignment[]
+  studentScores  StudentScore[]
+  schoolCalendars SchoolCalendar[]
+  @@index([schoolCode])
+}
+
+// ============ Grade (per school) ============
+model Grade {
+  id        String     @id @default(uuid())
+  schoolId  String
+  name      String
+  school    School     @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  sections  Section[]
+  joinCodes JoinCode[]
+  assignments Assignment[]
+  studentScores StudentScore[]
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  @@unique([schoolId, name])
+  @@index([schoolId])
+}
+
+// ============ Section (per grade) ============
+model Section {
+  id                   String                    @id @default(uuid())
+  gradeId              String
+  name                 String
+  grade                Grade                     @relation(fields: [gradeId], references: [id], onDelete: Cascade)
+  joinCodes            JoinCode[]
+  teacherAssignments   TeacherSectionAssignment[]
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+  @@unique([gradeId, name])
+  @@index([gradeId])
+}
+
+// ============ Teacher–Section assignment (per school) ============
+model TeacherSectionAssignment {
+  id         String   @id @default(uuid())
+  teacherId  Int
+  sectionId  String
+  schoolId   String
+  teacher    User     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  section    Section  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  school     School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  status     String   @default("active")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@unique([teacherId, sectionId])
+  @@index([teacherId])
+  @@index([sectionId])
+  @@index([schoolId])
+}
+
+// ============ Teacher-School assignment ============
+model TeacherSchool {
+  id                  String   @id @default(uuid())
+  teacherId           Int
+  schoolId            String
+  school              School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  teacher             User     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  gradesAssigned      String[] @default([])
+  subjects            String[] @default([])
+  workingDaysPerWeek  Int      @default(5)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  @@unique([teacherId, schoolId])
+  @@index([teacherId])
+  @@index([schoolId])
+}
+
+// ============ Student-School enrollment ============
+model StudentSchool {
+  id        String   @id @default(uuid())
+  studentId Int
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  student   User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  grade     String?
+  section   String?
+  joiningCode String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([studentId, schoolId])
+  @@index([studentId])
+  @@index([schoolId])
+  @@index([grade])
+  @@index([section])
+  @@index([schoolId, grade, section])
+}
+
+// ============ School Admin ============
+model SchoolAdmin {
+  id        String   @id @default(uuid())
+  userId    Int
+  schoolId  String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+  @@unique([userId, schoolId])
+  @@index([userId])
+  @@index([schoolId])
+}
+
+// ============ Courses ============
+model Course {
+  id          String   @id @default(uuid())
+  title       String
+  description String?
+  // Store potentially large base64/data URLs for thumbnails.
+  // Without `@db.Text`, Postgres rejects uploads with "value too long".
+  thumbnailUrl String? @db.Text
+  isPublished Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  chapters    Chapter[]
+  courseAccess CourseAccess[]
+  versions    CourseVersion[]
+  certificates StudentCertificate[]
+  assignments Assignment[]
+  studentScores StudentScore[]
+  @@index([isPublished])
+}
+
+model StudentCertificate {
+  id             String   @id @default(uuid())
+  studentId      Int
+  student        User     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  courseId       String
+  course         Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  certificateName String
+  certificateUrl  String   @db.Text
+  issuedAt       DateTime @default(now())
+  issuedBy       Int?
+  issuedByUser   User?    @relation("StudentCertificateIssuedBy", fields: [issuedBy], references: [id], onDelete: SetNull)
+  @@unique([studentId, courseId])
+  @@index([studentId])
+  @@index([courseId])
+  @@index([issuedAt])
+}
+
+model CourseVersion {
+  id              String   @id @default(uuid())
+  courseId        String
+  course          Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  versionNumber   Int
+  changesSummary  String?  @db.Text
+  snapshot        Json?    // full course state for revert
+  createdAt       DateTime @default(now())
+  @@unique([courseId, versionNumber])
+  @@index([courseId])
+}
+
+model Chapter {
+  id        String   @id @default(uuid())
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title     String
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  assignments Assignment[]
+  contents   ChapterContent[]
+  @@index([courseId])
+}
+
+model ChapterContent {
+  id              String   @id @default(uuid())
+  chapterId       String
+  chapter         Chapter  @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  contentType     String   // text | video | video_link | pdf | image | file | audio | html | link
+  title           String
+  contentText     String?  @db.Text
+  contentUrl      String?
+  sortOrder       Int      @default(0)
+  durationMinutes Int?
+  storagePath     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  @@index([chapterId])
+}
+
+model Assignment {
+  id        String   @id @default(uuid())
+  chapterId String?
+  chapter   Chapter? @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  courseId  String?
+  course    Course?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  gradeId   String?
+  grade     Grade?   @relation(fields: [gradeId], references: [id], onDelete: SetNull)
+  teacherId Int?
+  teacher   User?    @relation("TeacherAssignments", fields: [teacherId], references: [id], onDelete: SetNull)
+  schoolId  String?
+  school    School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  subject   String?
+  assignmentType String @default("COURSE") // COURSE | DAILY
+  academicYear String?
+  title     String
+  description String? @db.Text
+  instructions String? @db.Text
+  attachments Json?   // array of { name, url }
+  dueDate   DateTime?
+  totalMarks Float?
+  isPublished Boolean @default(false)
+  publishScope String  @default("grade") // grade | section | selected_students
+  publishedGradeIds String[] @default([])
+  publishedSectionIds String[] @default([])
+  retakeEnabled Boolean @default(false)
+  maxRetakeAttempts Int? // null means unlimited when retakeEnabled=true
+  retakeScoringRule String @default("latest") // highest | latest
+  retakeWindowOpen Boolean @default(false)
+  retakeAccessScope String @default("all") // all | selected
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  questions AssignmentQuestion[]
+  submissions AssignmentSubmission[]
+  retakeGrants RetakeGrant[]
+  @@index([chapterId])
+  @@index([courseId])
+  @@index([gradeId])
+  @@index([teacherId])
+  @@index([schoolId])
+  @@index([assignmentType])
+}
+
+model AssignmentSubmission {
+  id                 String     @id @default(uuid())
+  assignmentId       String
+  assignment         Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  studentId          Int
+  student            User       @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  gradedByTeacherId  Int?
+  attemptNumber      Int        @default(1)
+  answers            Json?
+  fileUrl            String?
+  textContent        String?    @db.Text
+  feedback           String?    @db.Text
+  status             String     @default("submitted") // pending | submitted | graded | late
+  score              Float?
+  maxScore           Float?
+  isRetake           Boolean    @default(false)
+  submittedAt        DateTime   @default(now())
+  gradedAt           DateTime?
+  @@unique([assignmentId, studentId, attemptNumber])
+  @@index([studentId])
+  @@index([assignmentId])
+  @@index([assignmentId, studentId])
+}
+
+model RetakeGrant {
+  id                 String     @id @default(uuid())
+  assignmentId       String
+  assignment         Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  studentId          Int
+  student            User       @relation("StudentRetakeGrants", fields: [studentId], references: [id], onDelete: Cascade)
+  grantedByTeacherId Int
+  grantedByTeacher   User       @relation("TeacherRetakeGrants", fields: [grantedByTeacherId], references: [id], onDelete: Cascade)
+  grantedAt          DateTime   @default(now())
+  isActive           Boolean    @default(true)
+  specific           Boolean    @default(true) // true = individual grant; false = class-wide
+  @@unique([assignmentId, studentId])
+  @@index([studentId])
+  @@index([grantedByTeacherId])
+}
+
+model StudentScore {
+  id                 String   @id @default(uuid())
+  studentId          Int
+  student            User     @relation("StudentScoreOwner", fields: [studentId], references: [id], onDelete: Cascade)
+  schoolId           String?
+  school             School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
+  gradeId            String?
+  grade              Grade?   @relation(fields: [gradeId], references: [id], onDelete: SetNull)
+  courseId           String?
+  course             Course?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  subject            String?
+  cumulativeScore    Float    @default(0)
+  cumulativeMaxScore Float    @default(0)
+  percentage         Float    @default(0)
+  gpaLikeScore       Float    @default(0)
+  scoringRule        String   @default("latest") // highest | latest
+  updatedAt          DateTime @updatedAt
+  @@unique([studentId, courseId, subject])
+  @@index([studentId])
+  @@index([schoolId])
+  @@index([gradeId])
+  @@index([courseId])
+}
+
+// ============ School-wide student score summary (recalculated on each grading) ============
+model StudentScoreSummary {
+  id                     String   @id @default(uuid())
+  studentId              Int      @unique
+  schoolId               String?
+  academicYear           String   @default("2024-25")
+  courseAssignmentScore  Float    @default(0)
+  dailyAssignmentScore   Float    @default(0)
+  overallScore           Float    @default(0)
+  courseAssignmentRank   Int      @default(0)
+  dailyAssignmentRank    Int      @default(0)
+  overallRank            Int      @default(0)
+  badge                  String   @default("NONE") // GOLD | SILVER | BRONZE | NONE
+  lastCalculatedAt       DateTime @default(now())
+  @@index([schoolId])
+  @@index([schoolId, overallScore])
+  @@index([schoolId, academicYear])
+}
+
+model AssignmentQuestion {
+  id           String   @id @default(uuid())
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  questionType String   // MCQ | FillBlank
+  questionText String   @db.Text
+  options      Json?    // string[] for MCQ
+  correctAnswer String?
+  marks        Int      @default(1)
+  sortOrder    Int      @default(0)
+  createdAt    DateTime @default(now())
+  @@index([assignmentId])
+}
+
+model CourseAccess {
+  id        String   @id @default(uuid())
+  courseId  String
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  grades    String[] @default([])
+  createdAt DateTime @default(now())
+  @@unique([courseId, schoolId])
+  @@index([courseId])
+  @@index([schoolId])
+}
+
+// ============ Student progress ============
+model StudentCourse {
+  id        String   @id @default(uuid())
+  studentId Int
+  courseId  String
+  enrolledAt DateTime @default(now())
+  @@unique([studentId, courseId])
+  @@index([studentId])
+  @@index([courseId])
+}
+
+model CourseProgress {
+  id           String   @id @default(uuid())
+  studentId    Int
+  courseId     String
+  chapterId    String?
+  contentId    String?
+  progress     Float    @default(0)
+  updatedAt    DateTime @updatedAt
+  completedAt  DateTime?
+
+  @@unique([studentId, courseId, chapterId, contentId])
+  @@index([studentId])
+  @@index([courseId])
+}
+
+// ============ Rooms & Periods ============
+model Room {
+  id        String   @id @default(uuid())
+  schoolId  String
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  name      String
+  roomNumber String?
+  roomName  String?
+  capacity  Int?
+  location  String?
+  facilities String[] @default([])
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([schoolId])
+}
+
+model Period {
+  id           String   @id @default(uuid())
+  schoolId     String
+  school       School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  periodNumber Int
+  startTime    String
+  endTime      String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@index([schoolId])
+}
+
+// ============ Schedules ============
+model ClassSchedule {
+  id        String   @id @default(uuid())
+  schoolId  String
+  periodId  String
+  teacherId Int?
+  roomId    String?
+  dayOfWeek Int
+  grade     String?
+  subject   String?
+  classId   String?
+  academicYear String? @default("2024-25")
+  startTime String?
+  endTime   String?
+  notes     String?
+  isActive  Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([schoolId])
+  @@index([dayOfWeek])
+  @@index([teacherId])
+  @@index([roomId])
+}
+
+// ============ School Calendar (Holidays & Breaks) ============
+model SchoolCalendar {
+  id           String    @id @default(uuid())
+  schoolId     String
+  school       School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  date         DateTime
+  endDate      DateTime?
+  name         String
+  type         String    // Holiday | Break | HalfDay | CompensatoryWork
+  academicYear String    @default("2024-25")
+  description  String?
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  @@index([schoolId])
+  @@index([date])
+  @@index([schoolId, date])
+}
+
+// ============ Reports & Attendance ============
+model TeacherReport {
+  id            String   @id @default(uuid())
+  teacherId     Int
+  schoolId      String
+  reportDate    DateTime
+  grade         String?
+  periodId      String?
+  status        String?  @default("submitted")
+  startTime     String?
+  endTime       String?
+  topicsTaught  String?  @db.Text
+  activities    String?  @db.Text
+  studentCount  Int?     
+  durationHours Float?   
+  notes         String?  @db.Text
+  createdAt     DateTime @default(now())
+  @@index([teacherId])
+  @@index([schoolId])
+  @@index([reportDate])
+  @@index([teacherId, schoolId, reportDate])
+  @@index([teacherId, schoolId, reportDate, periodId])
+  @@unique([teacherId, schoolId, reportDate, periodId])
+}
+
+model TeacherLeave {
+  id            String    @id @default(uuid())
+  teacherId     Int
+  schoolId      String
+  teacher       User      @relation(fields: [teacherId], references: [id], onDelete: Cascade)
+  startDate     DateTime
+  endDate       DateTime
+  reason        String?
+  leaveType     String    @default("General")
+  substituteRequired Boolean @default(false)
+  status        String    @default("pending")
+  adminRemarks  String?
+  approvedBy    String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  @@index([teacherId])
+  @@index([schoolId])
+  @@index([status])
+  @@index([teacherId, schoolId, status])
+}
+
+model Attendance {
+  id        String   @id @default(uuid())
+  teacherId Int
+  schoolId  String
+  date      DateTime
+  status    String
+  createdAt DateTime @default(now())
+  @@unique([teacherId, schoolId, date])
+  @@index([teacherId])
+  @@index([schoolId])
+  @@index([date])
+}
+
+// ============ Public Logos ============
+model Logo {
+  id          String   @id @default(uuid())
+  schoolName  String
+  schoolId    String?
+  description String?  @db.Text
+  imageUrl    String
+  createdAt   DateTime @default(now())
+  deletedAt   DateTime?
+  @@index([createdAt])
+  @@index([schoolId])
+}
+
+// ============ Success Stories (public page sections) ============
+model SuccessStorySection {
+  id            String    @id @default(uuid())
+  title         String
+  bodyPrimary   String    @db.Text
+  bodySecondary String?   @db.Text
+  bodyTertiary  String?   @db.Text
+  imageUrl      String?
+  storagePath   String?
+  background    String    @default("white") // blue | white
+  imagePosition String    @default("left")  // left | right
+  orderIndex    Int       @default(0)
+  isPublished   Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  versions      SuccessStoryVersion[]
+  @@index([isPublished])
+  @@index([orderIndex])
+  @@index([updatedAt])
+}
+
+model SuccessStoryVersion {
+  id            String             @id @default(uuid())
+  sectionId     String
+  section       SuccessStorySection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  snapshot      Json
+  createdAt     DateTime           @default(now())
+  @@unique([sectionId, versionNumber])
+  @@index([sectionId])
+}
+
+// ============ Community Page (public + admin CMS) ============
+model CommunityPageConfig {
+  id               String   @id @default("default")
+  heroTitle        String   @default("Yugminds Community")
+  heroSubtitle     String?  @db.Text
+  heroImageUrl     String?
+  sectionTitles    Json?
+  sectionEnabled   Json?
+  sectionColors    Json?
+  impactStats      Json?
+  socialLinks      Json?
+  cornerPillars    Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+model CommunityItem {
+  id                 String   @id @default(uuid())
+  sectionType        String   // reel | profile | project | learn_video | challenge | blog
+  title              String
+  subtitle           String?
+  description        String?  @db.Text
+  mediaUrl           String?
+  thumbnailUrl       String?
+  creatorName        String?
+  creatorAvatarUrl   String?
+  externalUrl        String?
+  ctaLabel           String?
+  ctaUrl             String?
+  likes              Int      @default(0)
+  views              Int      @default(0)
+  metadata           Json?
+  orderIndex         Int      @default(0)
+  isPublished        Boolean  @default(false)
+  isFeatured         Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  versions           CommunityItemVersion[]
+  @@index([sectionType, isPublished, orderIndex])
+  @@index([isFeatured])
+  @@index([updatedAt])
+}
+
+model CommunityItemVersion {
+  id            String        @id @default(uuid())
+  itemId        String
+  item          CommunityItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  versionNumber Int
+  snapshot      Json
+  createdAt     DateTime      @default(now())
+  @@unique([itemId, versionNumber])
+  @@index([itemId])
+}
+
+// ============ Join Codes (per section; optional sectionId/gradeId for section-linked codes) ============
+model JoinCode {
+  id        String    @id @default(uuid())
+  schoolId  String
+  school    School    @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  gradeId   String?
+  sectionId String?
+  grade     String    // display name e.g. "Grade 1" (kept for backward compatibility)
+  section   Section?  @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  gradeRef  Grade?    @relation(fields: [gradeId], references: [id], onDelete: Cascade)
+  code      String    @unique
+  usageType String    @default("single")
+  maxUses   Int?
+  usedCount Int       @default(0)
+  isActive  Boolean   @default(true)
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  @@index([schoolId])
+  @@index([code])
+  @@index([sectionId])
+  @@index([gradeId])
+}
+
+// ============ Notifications ============
+model Notification {
+  id        String    @id @default(uuid())
+  userId    Int
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  senderId  Int?
+  sender    User?     @relation("NotificationSender", fields: [senderId], references: [id], onDelete: SetNull)
+  title     String
+  message   String    @db.Text
+  mode      String?   // course_enrollment | assignment_due | grade_posted | system_alert | achievement | general (stored as mode in DB)
+  readAt    DateTime?
+  deletedAt DateTime?
+  createdAt DateTime  @default(now())
+  replies   NotificationReply[]
+  @@index([userId])
+  @@index([userId, readAt])
+  @@index([senderId])
+}
+
+model NotificationReply {
+  id             String       @id @default(uuid())
+  notificationId String
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+  userId         Int
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  replyText      String       @db.Text
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  @@index([notificationId])
+  @@index([userId])
+}
+
+// ============ Password reset requests (admin-approved flow) ============
+model PasswordResetRequest {
+  id                  String    @id @default(uuid())
+  userId              Int
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status              String    @default("pending") // pending | approved | rejected | completed
+  requestedAt         DateTime  @default(now())
+  approvedAt          DateTime?
+  approvedBy          Int?
+  approvedByUser      User?     @relation("ApprovedBy", fields: [approvedBy], references: [id], onDelete: SetNull)
+  schoolId            String?
+  notes               String?   @db.Text
+  resetToken          String?   // Hashed reset token (replaces plaintext temp password)
+  resetTokenExpiresAt DateTime? // Token expiration time
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+  @@index([userId])
+  @@index([status])
+  @@index([schoolId])
+  @@index([resetToken])
+}
+
+model AuthActivity {
+  id            String   @id @default(uuid())
+  userId        Int?
+  user          User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  email         String?
+  action        String
+  success       Boolean  @default(false)
+  failureReason String?  @db.Text
+  ipAddress     String?
+  userAgent     String?  @db.Text
+  metadata      Json?
+  createdAt     DateTime @default(now())
+  @@index([userId])
+  @@index([email])
+  @@index([action])
+  @@index([createdAt])
+}
+
+// ============ System Settings ============
+model SystemSetting {
+  id    String @id @default(uuid())
+  key   String @unique
+  value String @db.Text
+  @@index([key])
+}
+
+// ============ Contact Submissions ============
+model ContactSubmission {
+  id          String   @id @default(uuid())
+  firstName   String
+  lastName    String
+  email       String
+  areaCode    String   @default("+91")
+  phoneNumber String?
+  purpose     String
+  message     String   @db.Text
+  status      String   @default("new") // new | read | replied | archived
+  adminNotes  String?  @db.Text
+  source      String   @default("robocoders")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status])
+  @@index([email])
+  @@index([createdAt])
+}
