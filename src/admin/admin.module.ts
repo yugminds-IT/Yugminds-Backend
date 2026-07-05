@@ -14,6 +14,7 @@ import { AdminTeacherAttendanceController } from './teacher-attendance/teacher-a
 import { AdminLeavesController } from './leaves/leaves.controller.js';
 import { AdminExtraController } from './extra/admin-extra.controller.js';
 import { CommunityAdminController } from './community/community-admin.controller.js';
+import { AdminLicensesController } from './licenses/licenses.controller.js';
 import { PasswordResetRequestModule } from '../common/password-reset-request/password-reset-request.module.js';
 import { RealtimeModule } from '../common/realtime/realtime.module';
 import { CommonModule } from '../common/common.module';
@@ -28,6 +29,7 @@ import { AdminSchoolAdminsService } from './school-admins/school-admins.service.
 import { AdminJoiningCodesService } from './joining-codes/joining-codes.service.js';
 import { AdminTeacherAttendanceService } from './teacher-attendance/teacher-attendance.service.js';
 import { AdminLeavesService } from './leaves/leaves.service.js';
+import { AdminLicensesService } from './licenses/licenses.service.js';
 
 @Module({
   imports: [
@@ -51,6 +53,7 @@ import { AdminLeavesService } from './leaves/leaves.service.js';
     AdminLeavesController,
     AdminExtraController,
     CommunityAdminController,
+    AdminLicensesController,
   ],
   providers: [
     AdminDashboardService,
@@ -64,6 +67,7 @@ import { AdminLeavesService } from './leaves/leaves.service.js';
     AdminJoiningCodesService,
     AdminTeacherAttendanceService,
     AdminLeavesService,
+    AdminLicensesService,
   ],
 })
 export class AdminModule {}
