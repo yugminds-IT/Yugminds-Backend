@@ -1,9 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 
 @Injectable()
 export class SchoolAdminStatsService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly studentRanking: StudentRankingService,
+  ) {}
 
   async get(user: { id: number; tenantId?: string }) {
     const sa = await this.db.schoolAdmin.findFirst({
@@ -277,13 +281,6 @@ export class SchoolAdminStatsService {
     };
   }
 
-  private computeBadge(overallScore: number): string {
-    if (overallScore >= 90) return 'GOLD';
-    if (overallScore >= 75) return 'SILVER';
-    if (overallScore >= 60) return 'BRONZE';
-    return 'NONE';
-  }
-
   async getLeaderboard(user: { id: number }) {
     const sa = await this.db.schoolAdmin.findFirst({
       where: { userId: user.id },
@@ -430,82 +427,27 @@ export class SchoolAdminStatsService {
     }
     const bestSubmissions = [...bestByKey.values()];
 
-    // Build per-student score buckets
-    type Bucket = {
-      courseScore: number;
-      courseMax: number;
-      dailyScore: number;
-      dailyMax: number;
-      attempted: Set<string>;
-      graded: Set<string>;
-    };
-    const studentBuckets = new Map<number, Bucket>();
-
-    for (const sub of bestSubmissions) {
-      const cur = studentBuckets.get(sub.studentId) ?? {
-        courseScore: 0,
-        courseMax: 0,
-        dailyScore: 0,
-        dailyMax: 0,
-        attempted: new Set<string>(),
-        graded: new Set<string>(),
-      };
-      const isCourse = courseAssignmentIds.includes(sub.assignmentId);
-      const score = Number(sub.score ?? 0);
-      const max = Number(sub.maxScore ?? 0);
-      if (isCourse) {
-        cur.courseScore += score;
-        cur.courseMax += max;
-      } else {
-        cur.dailyScore += score;
-        cur.dailyMax += max;
-      }
-      cur.attempted.add(sub.assignmentId);
-      if (sub.status === 'graded') cur.graded.add(sub.assignmentId);
-      studentBuckets.set(sub.studentId, cur);
-    }
-
-    const emptyBucket: Bucket = {
-      courseScore: 0,
-      courseMax: 0,
-      dailyScore: 0,
-      dailyMax: 0,
-      attempted: new Set(),
-      graded: new Set(),
-    };
-    const studentRows = enrollments.map((e) => {
-      const bucket = studentBuckets.get(e.studentId) ?? emptyBucket;
-      const coursePercent =
-        bucket.courseMax > 0
-          ? Number(((bucket.courseScore / bucket.courseMax) * 100).toFixed(2))
-          : 0;
-      const dailyPercent =
-        bucket.dailyMax > 0
-          ? Number(((bucket.dailyScore / bucket.dailyMax) * 100).toFixed(2))
-          : 0;
-      const overall = Number(
-        (coursePercent * 0.6 + dailyPercent * 0.4).toFixed(2),
-      );
-      return {
-        student_id: e.studentId,
-        student_name:
-          e.student.profile?.fullName ??
-          e.student.email ??
-          `Student ${e.studentId}`,
-        grade: e.grade ?? '',
-        section: e.section ?? '',
-        course_assignment_score: coursePercent,
-        daily_assignment_score: dailyPercent,
-        overall_score: overall,
-        assignments_attempted: bucket.attempted.size,
-        graded_assignments_count: bucket.graded.size,
-        badge: this.computeBadge(overall),
-      };
-    });
-
-    const ranked = [...studentRows]
-      .sort((a, b) => b.overall_score - a.overall_score)
-      .map((r, idx) => ({ ...r, rank: idx + 1 }));
+    // Student leaderboard — canonical scores/ranks from the shared service,
+    // scoped to this school. Keeps all dashboards in agreement.
+    const { rows: saGlobalRows } = await this.studentRanking.getGlobalRanking();
+    const ranked = this.studentRanking
+      .buildLeaderboard(saGlobalRows.filter((r) => r.schoolId === schoolId))
+      .map((r) => ({
+        student_id: r.student_id,
+        student_name: r.student_name,
+        grade: r.grade,
+        section: r.section,
+        course_assignment_score: r.course_score,
+        daily_assignment_score: r.daily_score,
+        overall_score: r.overall_score,
+        assignments_attempted: r.graded_count,
+        graded_assignments_count: r.graded_count,
+        badge: r.badge,
+        rank: r.rank,
+        school_rank: r.school_rank,
+        grade_rank: r.grade_rank,
+        section_rank: r.section_rank,
+      }));
 
     // Grade breakdown
     const gradeMap = new Map<
@@ -604,11 +546,10 @@ export class SchoolAdminStatsService {
         };
       });
 
-    const overallAvg = studentRows.length
+    const overallAvg = ranked.length
       ? Number(
           (
-            studentRows.reduce((s, r) => s + r.overall_score, 0) /
-            studentRows.length
+            ranked.reduce((s, r) => s + r.overall_score, 0) / ranked.length
           ).toFixed(2),
         )
       : 0;

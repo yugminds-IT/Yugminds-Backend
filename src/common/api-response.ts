@@ -17,8 +17,3 @@ export interface ApiResponse<T> {
 export function ok<T>(data: T, meta?: ApiMeta): ApiResponse<T> {
   return meta ? { data, meta } : { data };
 }
-
-export function list<T>(items: T[], total?: number): ApiResponse<T[]> {
-  const count = total ?? items.length;
-  return { data: items, meta: { total: count } };
-}

@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
 import { tenantContext } from '../tenants/tenant-context';
 
 export interface DatabaseService extends PrismaClient {}
@@ -22,10 +23,19 @@ type UserLookupClient = {
 @Injectable()
 export class DatabaseService extends PrismaClient implements OnModuleDestroy {
   constructor() {
+    // Use an explicit pg.Pool so we control connection pool size.
+    // Default Prisma pool (10) is exhausted at ~200 concurrent requests.
+    // Rule of thumb: (2 × CPU cores) + effective_spindle_count, capped at 100.
+    // DB_POOL_SIZE env lets ops tune without a redeploy.
+    const pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      max: Number(process.env.DB_POOL_SIZE ?? 25),
+      idleTimeoutMillis: 30_000,   // release idle connections after 30 s
+      connectionTimeoutMillis: 5_000, // fail fast if no connection available
+    });
+
     super({
-      adapter: new PrismaPg({
-        connectionString: process.env.DATABASE_URL,
-      }),
+      adapter: new PrismaPg(pool),
     });
 
     // Models where studentId is a plain FK with NO `student` relation defined in the schema.
@@ -48,12 +58,42 @@ export class DatabaseService extends PrismaClient implements OnModuleDestroy {
       'ClassSchedule',
     ]);
 
+    // Multi-school support: a teacher can be assigned to several schools, but
+    // User.tenantId only stores ONE (their primary) school. These models DO define
+    // a `teacher` relation, but they are already isolated by their own `schoolId`
+    // scalar column (the tenant scalar check below enforces it). Injecting
+    // `teacher: { tenantId }` here would wrongly filter out a multi-school teacher's
+    // rows in any school other than their primary one. Skip the relation injection
+    // and rely on the `schoolId` scalar for isolation.
+    const MODELS_SKIP_TEACHER_TENANT_INJECTION = new Set([
+      'TeacherSchool',
+      'TeacherSectionAssignment',
+      'TeacherLeave',
+      'Assignment',
+    ]);
+
+    // Same rationale for the student relation: these models are isolated by their
+    // own `schoolId` scalar. (Students normally belong to one school, but this keeps
+    // join-table reads consistent with the teacher handling above.)
+    const MODELS_SKIP_STUDENT_TENANT_INJECTION = new Set(['StudentSchool']);
+
+    // Notifications are user-to-user objects with NO `schoolId` column. Every
+    // controller query pins `userId`/`senderId` to the authenticated user, which IS
+    // the isolation boundary. A multi-school teacher's notifications must remain
+    // visible regardless of which school they are currently viewing, so injecting
+    // `user: { tenantId }` / `sender: { tenantId }` (which would filter by the
+    // recipient's primary tenant) is both redundant and harmful here.
+    const MODELS_SKIP_USER_TENANT_INJECTION = new Set([
+      'Notification',
+      'NotificationReply',
+    ]);
+
     // Prisma v7.4.2 (with the adapter used here) does not expose `prisma.$use`.
     // Use Prisma Client extensions instead to enforce tenant scoping.
     const extended = this.$extends({
       query: {
         $allModels: {
-          $allOperations: async ({ model, operation, args, query }: any) => {
+          $allOperations: ({ model, operation, args, query }: any) => {
             const where = args?.where;
             if (!where || typeof where !== 'object') return query(args);
 
@@ -153,24 +193,36 @@ export class DatabaseService extends PrismaClient implements OnModuleDestroy {
               if (Array.isArray(obj)) return obj.map(applyTenantConstraints);
 
               // Inject tenant constraints into relation filters when FK fields exist.
-              // Skip models that don't have the corresponding relation defined in the schema.
-              if (obj.userId !== undefined && obj.user === undefined)
+              // Skip models that don't have the corresponding relation defined in the
+              // schema, and models that are isolated by their own `schoolId` scalar
+              // (see MODELS_SKIP_* sets above — required for multi-school teachers).
+              if (
+                obj.userId !== undefined &&
+                obj.user === undefined &&
+                !MODELS_SKIP_USER_TENANT_INJECTION.has(model)
+              )
                 obj.user = { tenantId };
               if (
                 obj.teacherId !== undefined &&
                 obj.teacher === undefined &&
-                !MODELS_WITHOUT_TEACHER_RELATION.has(model)
+                !MODELS_WITHOUT_TEACHER_RELATION.has(model) &&
+                !MODELS_SKIP_TEACHER_TENANT_INJECTION.has(model)
               ) {
                 obj.teacher = { tenantId };
               }
               if (
                 obj.studentId !== undefined &&
                 obj.student === undefined &&
-                !MODELS_WITHOUT_STUDENT_RELATION.has(model)
+                !MODELS_WITHOUT_STUDENT_RELATION.has(model) &&
+                !MODELS_SKIP_STUDENT_TENANT_INJECTION.has(model)
               ) {
                 obj.student = { tenantId };
               }
-              if (obj.senderId !== undefined && obj.sender === undefined)
+              if (
+                obj.senderId !== undefined &&
+                obj.sender === undefined &&
+                !MODELS_SKIP_USER_TENANT_INJECTION.has(model)
+              )
                 obj.sender = { tenantId };
               if (obj.issuedBy !== undefined && obj.issuedByUser === undefined)
                 obj.issuedByUser = { tenantId };

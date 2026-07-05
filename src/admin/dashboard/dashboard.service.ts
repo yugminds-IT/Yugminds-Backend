@@ -1,13 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { MonitoringService } from '../../common/monitoring/monitoring.service';
+import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 import { Role } from '@prisma/client';
 
 @Injectable()
 export class AdminDashboardService {
+  private analyticsCache: { data: unknown; expiresAt: number } | null = null;
+  private readonly ANALYTICS_TTL_MS = 2 * 60 * 1000; // 2 minutes
+
   constructor(
     private readonly db: DatabaseService,
     private readonly monitoring: MonitoringService,
+    private readonly studentRanking: StudentRankingService,
   ) {}
 
   async getStats() {
@@ -56,11 +61,18 @@ export class AdminDashboardService {
     return `${MONTHS[date.getMonth()]} ${String(date.getFullYear()).slice(-2)}`;
   }
 
-  async getAnalytics() {
+  async getAnalytics(from?: string, to?: string) {
+    // Serve from cache when no date range is specified (default dashboard view)
+    const isDefaultRange = !from && !to;
+    if (isDefaultRange && this.analyticsCache && Date.now() < this.analyticsCache.expiresAt) {
+      return this.analyticsCache.data;
+    }
+
     try {
-      const now = new Date();
-      const last30Days = new Date(now);
-      last30Days.setUTCDate(last30Days.getUTCDate() - 30);
+      const now = to ? new Date(`${to}T23:59:59.999Z`) : new Date();
+      const last30Days = from
+        ? new Date(`${from}T00:00:00.000Z`)
+        : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
 
       const [schoolCount, teacherCount, studentCount, activeCourses] =
         await Promise.all([
@@ -320,12 +332,13 @@ export class AdminDashboardService {
         GROUP BY DATE_TRUNC('month', "enrolledAt")
         ORDER BY DATE_TRUNC('month', "enrolledAt")
       `,
+        // Use StudentCourse.completedAt as the single source of truth for completions.
         this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
-        SELECT TO_CHAR(DATE_TRUNC('month', "updatedAt"), 'Mon YY') as month, COUNT(*) as count
-        FROM "CourseProgress"
-        WHERE progress >= 99 AND "updatedAt" >= ${sixMonthsAgo}
-        GROUP BY DATE_TRUNC('month', "updatedAt")
-        ORDER BY DATE_TRUNC('month', "updatedAt")
+        SELECT TO_CHAR(DATE_TRUNC('month', "completedAt"), 'Mon YY') as month, COUNT(*) as count
+        FROM "StudentCourse"
+        WHERE "completedAt" IS NOT NULL AND "completedAt" >= ${sixMonthsAgo}
+        GROUP BY DATE_TRUNC('month', "completedAt")
+        ORDER BY DATE_TRUNC('month', "completedAt")
       `,
       ]);
 
@@ -382,7 +395,7 @@ export class AdminDashboardService {
           ? Math.round((successfulRequests / totalRequests) * 100)
           : 100;
 
-      return {
+      const result = {
         analytics: {
           totalSchools: schoolCount,
           totalTeachers: teacherCount,
@@ -405,6 +418,11 @@ export class AdminDashboardService {
         teacherPerformance,
         courseEngagement,
       };
+
+      if (isDefaultRange) {
+        this.analyticsCache = { data: result, expiresAt: Date.now() + this.ANALYTICS_TTL_MS };
+      }
+      return result;
     } catch (err) {
       console.error('[AdminDashboardService] getAnalytics failed:', err);
       return {
@@ -438,15 +456,15 @@ export class AdminDashboardService {
     }
   }
 
-  async refreshViews() {
+  refreshViews() {
     return { success: true, refreshed_at: new Date().toISOString() };
   }
 
-  async getMonitoring() {
+  getMonitoring() {
     return this.monitoring.getSnapshot();
   }
 
-  async getMaterializedViewStats() {
+  getMaterializedViewStats() {
     // No DB-level matview introspection in Prisma here; return empty list as actual state.
     return { views: [], checked_at: new Date().toISOString() };
   }
@@ -483,26 +501,36 @@ export class AdminDashboardService {
       },
     });
 
-    const schoolIds = [
-      ...new Set(
-        assignments.map((a) => a.schoolId).filter(Boolean) as string[],
-      ),
+    // Assignments are frequently course-level (schoolId = null), so we attribute
+    // every metric to the SUBMITTING STUDENT'S school instead of the assignment's.
+    const submittingStudentIds = [
+      ...new Set(submissions.map((s) => s.studentId)),
     ];
-    const [schools, enrollmentCounts] = await Promise.all([
-      this.db.school.findMany({
-        where: { id: { in: schoolIds } },
-        select: { id: true, name: true },
-      }),
+    const [schools, enrollmentCounts, studentSchoolRows] = await Promise.all([
+      // All schools — the leaderboard shows the full platform, not just ones with submissions.
+      this.db.school.findMany({ select: { id: true, name: true } }),
       this.db.studentSchool.groupBy({
         by: ['schoolId'],
-        where: { schoolId: { in: schoolIds }, isActive: true },
+        where: { isActive: true },
         _count: { studentId: true },
       }),
+      submittingStudentIds.length
+        ? this.db.studentSchool.findMany({
+            where: { studentId: { in: submittingStudentIds }, isActive: true },
+            select: { studentId: true, schoolId: true },
+          })
+        : Promise.resolve([]),
     ]);
-    const schoolName = new Map(schools.map((s) => [s.id, s.name]));
     const enrolledBySchool = new Map(
       enrollmentCounts.map((e) => [e.schoolId, e._count.studentId]),
     );
+    // student → their (first active) school
+    const schoolByStudent = new Map<number, string>();
+    for (const r of studentSchoolRows) {
+      if (!schoolByStudent.has(r.studentId)) {
+        schoolByStudent.set(r.studentId, r.schoolId);
+      }
+    }
 
     // Pick best/latest attempt per (student, assignment) to avoid double-counting retakes
     const bestByKey = new Map<string, (typeof submissions)[0]>();
@@ -519,72 +547,62 @@ export class AdminDashboardService {
     }
     const bestSubmissions = [...bestByKey.values()];
 
-    // Count unique submitting students per school (for completion rate)
-    const submittingBySchool = new Map<string, Set<number>>();
-    for (const s of submissions) {
-      const asgn = assignments.find((a) => a.id === s.assignmentId);
-      const sId = asgn?.schoolId ?? 'unknown';
-      const set = submittingBySchool.get(sId) ?? new Set<number>();
-      set.add(s.studentId);
-      submittingBySchool.set(sId, set);
-    }
-
+    // Aggregate by the student's school
     const agg = new Map<
       string,
       {
-        school_id: string;
-        assignments: number;
         attempts: number;
         total: number;
         max: number;
         retakes: number;
+        submitters: Set<number>;
       }
     >();
-    for (const a of assignments) {
-      const sId = a.schoolId ?? 'unknown';
-      const current = agg.get(sId) ?? {
-        school_id: sId,
-        assignments: 0,
-        attempts: 0,
-        total: 0,
-        max: 0,
-        retakes: 0,
-      };
-      current.assignments += 1;
-      agg.set(sId, current);
-    }
+    const ensureAgg = (sid: string) => {
+      let cur = agg.get(sid);
+      if (!cur) {
+        cur = { attempts: 0, total: 0, max: 0, retakes: 0, submitters: new Set() };
+        agg.set(sid, cur);
+      }
+      return cur;
+    };
     for (const s of bestSubmissions) {
-      const asgn = assignments.find((a) => a.id === s.assignmentId);
-      const sId = asgn?.schoolId ?? 'unknown';
-      const current = agg.get(sId);
-      if (!current) continue;
-      current.attempts += 1;
-      current.total += Number(s.score ?? 0);
-      current.max += Number(s.maxScore ?? 0);
+      const sid = schoolByStudent.get(s.studentId);
+      if (!sid) continue;
+      const cur = ensureAgg(sid);
+      cur.attempts += 1;
+      cur.total += Number(s.score ?? 0);
+      cur.max += Number(s.maxScore ?? 0);
+      cur.submitters.add(s.studentId);
     }
     // Count retakes from all submissions (not best-only)
     for (const s of submissions) {
       if (s.attemptNumber > 1) {
-        const asgn = assignments.find((a) => a.id === s.assignmentId);
-        const sId = asgn?.schoolId ?? 'unknown';
-        const current = agg.get(sId);
-        if (current) current.retakes += 1;
+        const sid = schoolByStudent.get(s.studentId);
+        if (sid) ensureAgg(sid).retakes += 1;
       }
     }
 
-    const rows = [...agg.values()]
-      .map((r) => {
-        const enrolled = enrolledBySchool.get(r.school_id) ?? 0;
-        const uniqueSubmitters = submittingBySchool.get(r.school_id)?.size ?? 0;
-        const totalAttempts = r.attempts + r.retakes;
+    // Build a row for every school so the leaderboard reflects the whole platform.
+    const rows = schools
+      .map((school) => {
+        const a = agg.get(school.id);
+        const enrolled = enrolledBySchool.get(school.id) ?? 0;
+        const attempts = a?.attempts ?? 0;
+        const retakes = a?.retakes ?? 0;
+        const totalAttempts = attempts + retakes;
+        const uniqueSubmitters = a?.submitters.size ?? 0;
+        const max = a?.max ?? 0;
+        const total = a?.total ?? 0;
         return {
-          school_id: r.school_id,
-          school_name: schoolName.get(r.school_id) ?? r.school_id,
-          assignments_created: r.assignments,
+          school_id: school.id,
+          school_name: school.name,
+          // Platform assignments are available to every school's students.
+          assignments_created: assignments.length,
           attempts_count: totalAttempts,
           average_score_percentage:
-            r.max > 0 ? Number(((r.total / r.max) * 100).toFixed(2)) : 0,
-          // completion_rate = unique students who submitted / enrolled students (capped at 100%)
+            max > 0 ? Number(((total / max) * 100).toFixed(2)) : 0,
+          // completion_rate = unique students who submitted / enrolled (capped at 100%)
           completion_rate:
             enrolled > 0
               ? Math.min(
@@ -594,22 +612,22 @@ export class AdminDashboardService {
               : 0,
           retake_usage_percentage:
             totalAttempts > 0
-              ? Number(((r.retakes / totalAttempts) * 100).toFixed(2))
+              ? Number(((retakes / totalAttempts) * 100).toFixed(2))
               : 0,
         };
       })
-      .sort((a, b) => b.average_score_percentage - a.average_score_percentage);
+      .sort(
+        (a, b) =>
+          b.average_score_percentage - a.average_score_percentage ||
+          b.completion_rate - a.completion_rate,
+      );
 
     const totalEnrolled = [...enrolledBySchool.values()].reduce(
       (a, b) => a + b,
       0,
     );
-    const totalUniqueSubmitters = new Set(submissions.map((s) => s.studentId))
-      .size;
-    const totalAssignments = rows.reduce(
-      (sum, row) => sum + row.assignments_created,
-      0,
-    );
+    const totalUniqueSubmitters = submittingStudentIds.length;
+    const totalAssignments = assignments.length;
     const totalRetakeCount = rows.reduce(
       (sum, row) =>
         sum + (row.attempts_count * row.retake_usage_percentage) / 100,
@@ -619,67 +637,26 @@ export class AdminDashboardService {
       (sum, row) => sum + row.attempts_count,
       0,
     );
+    // Average score across schools that actually have activity (avoid dilution by 0s)
+    const schoolsWithActivity = rows.filter((r) => r.attempts_count > 0);
 
-    // Top 50 students platform-wide (using best-attempt per assignment)
-    const allStudents = await this.db.user.findMany({
-      where: { role: Role.student, isActive: true },
-      select: {
-        id: true,
-        email: true,
-        profile: { select: { fullName: true } },
-        studentSchools: { select: { schoolId: true, grade: true } },
-      },
-    });
-    const studentScoreMap = new Map<
-      number,
-      {
-        courseTotal: number;
-        courseMax: number;
-        dailyTotal: number;
-        dailyMax: number;
-      }
-    >();
-    for (const s of bestSubmissions) {
-      const asgn = assignments.find((a) => a.id === s.assignmentId);
-      const cur = studentScoreMap.get(s.studentId) ?? {
-        courseTotal: 0,
-        courseMax: 0,
-        dailyTotal: 0,
-        dailyMax: 0,
-      };
-      if ((asgn as any)?.assignmentType === 'COURSE') {
-        cur.courseTotal += Number(s.score ?? 0);
-        cur.courseMax += Number(s.maxScore ?? 0);
-      } else {
-        cur.dailyTotal += Number(s.score ?? 0);
-        cur.dailyMax += Number(s.maxScore ?? 0);
-      }
-      studentScoreMap.set(s.studentId, cur);
-    }
-    const topStudents = allStudents
-      .map((u) => {
-        const b = studentScoreMap.get(u.id);
-        if (!b) return null;
-        const courseScore =
-          b.courseMax > 0 ? (b.courseTotal / b.courseMax) * 100 : 0;
-        const dailyScore =
-          b.dailyMax > 0 ? (b.dailyTotal / b.dailyMax) * 100 : 0;
-        const overall = courseScore * 0.6 + dailyScore * 0.4;
-        const primarySchool = (u.studentSchools ?? [])[0];
-        return {
-          student_id: u.id,
-          student_name: u.profile?.fullName ?? u.email ?? `Student ${u.id}`,
-          school_name: schoolName.get(primarySchool?.schoolId ?? '') ?? '',
-          grade: primarySchool?.grade ?? '',
-          course_assignment_score: Number(courseScore.toFixed(2)),
-          daily_assignment_score: Number(dailyScore.toFixed(2)),
-          overall_score: Number(overall.toFixed(2)),
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null)
-      .sort((a, b) => b.overall_score - a.overall_score)
-      .slice(0, 50)
-      .map((r, idx) => ({ ...r, rank: idx + 1 }));
+    // Top 50 students platform-wide — canonical system ranking from the shared
+    // service (graded-only, retake-rule aware) so it matches what students see.
+    const topStudents = (
+      await this.studentRanking.getSystemLeaderboard(50)
+    ).map((r) => ({
+      student_id: r.studentId,
+      student_name: r.studentName,
+      school_name: r.schoolName,
+      grade: r.grade,
+      section: r.section,
+      course_assignment_score: r.courseScore,
+      daily_assignment_score: r.dailyScore,
+      overall_score: r.overallScore,
+      badge: r.badge,
+      rank: r.system_rank,
+      system_rank: r.system_rank,
+    }));
 
     return {
       analytics: {
@@ -705,11 +682,13 @@ export class AdminDashboardService {
           total_assignments: totalAssignments,
           total_attempts: totalAllAttempts,
           platform_avg_score:
-            rows.length > 0
+            schoolsWithActivity.length > 0
               ? Number(
                   (
-                    rows.reduce((s, r) => s + r.average_score_percentage, 0) /
-                    rows.length
+                    schoolsWithActivity.reduce(
+                      (s, r) => s + r.average_score_percentage,
+                      0,
+                    ) / schoolsWithActivity.length
                   ).toFixed(2),
                 )
               : 0,

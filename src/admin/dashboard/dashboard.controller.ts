@@ -1,4 +1,4 @@
-import { Controller, Get, Post, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Role } from '@prisma/client';
@@ -18,8 +18,11 @@ export class AdminDashboardController {
   }
 
   @Get('analytics')
-  getAnalytics() {
-    return this.service.getAnalytics();
+  getAnalytics(
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+  ) {
+    return this.service.getAnalytics(from, to);
   }
 
   @Get('assignment-analytics')

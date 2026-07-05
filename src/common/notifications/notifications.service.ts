@@ -12,8 +12,21 @@ export interface NotificationDto {
   message: string;
   type: string | null;
   is_read: boolean;
+  allow_replies: boolean;
   created_at: string;
   notification_data?: Record<string, unknown>;
+}
+
+export interface NotificationWithProfileDto extends NotificationDto {
+  user_id: number;
+  sender_id: number | null;
+  reply_count?: number;
+  profiles?: {
+    id: string;
+    full_name: string | null;
+    email: string;
+    role: string;
+  };
 }
 
 @Injectable()
@@ -22,6 +35,112 @@ export class NotificationsService {
     private readonly db: DatabaseService,
     private readonly realtimeGateway: RealtimeGateway,
   ) {}
+
+  // ─── Core send ────────────────────────────────────────────────────────────
+
+  /**
+   * Batch-send notifications to multiple users.
+   * Uses a single createMany INSERT then emits per-user WS events.
+   * Does NOT trigger per-user dashboard stat recomputation (too expensive at scale).
+   */
+  async sendBroadcast(
+    senderId: number,
+    userIds: number[],
+    data: {
+      title: string;
+      message: string;
+      type?: string;
+      allowReplies?: boolean;
+    },
+  ): Promise<{ sent: number }> {
+    const ids = Array.from(new Set(userIds)).filter((id) => id !== senderId);
+    if (ids.length === 0) return { sent: 0 };
+
+    const now = new Date();
+    await this.db.notification.createMany({
+      data: ids.map((uid) => ({
+        userId: uid,
+        senderId,
+        title: data.title,
+        message: data.message,
+        mode: data.type ?? 'general',
+        allowReplies: data.allowReplies !== false,
+        createdAt: now,
+      })),
+    });
+
+    // Fetch created rows so we have real IDs for WS payload.
+    const created = await this.db.notification.findMany({
+      where: { userId: { in: ids }, senderId, createdAt: now },
+      select: {
+        id: true,
+        userId: true,
+        title: true,
+        message: true,
+        mode: true,
+        allowReplies: true,
+        createdAt: true,
+      },
+    });
+
+    const byUser = new Map(created.map((n) => [n.userId, n]));
+    for (const uid of ids) {
+      const n = byUser.get(uid);
+      if (!n) continue;
+      this.realtimeGateway.emitNotificationNew(uid, {
+        id: n.id,
+        title: n.title,
+        message: n.message,
+        type: n.mode ?? 'general',
+        is_read: false,
+        allow_replies: n.allowReplies,
+        created_at: n.createdAt.toISOString(),
+      });
+    }
+
+    return { sent: ids.length };
+  }
+
+  /**
+   * Send a single notification to one user and emit WS events.
+   * Used for system-generated notifications (schedule sync, grade notifications, etc.).
+   */
+  async sendOne(
+    senderId: number,
+    userId: number,
+    data: {
+      title: string;
+      message: string;
+      type?: string;
+      allowReplies?: boolean;
+    },
+  ): Promise<NotificationDto> {
+    const n = await this.db.notification.create({
+      data: {
+        userId,
+        senderId,
+        title: data.title,
+        message: data.message,
+        mode: data.type ?? 'general',
+        allowReplies: data.allowReplies !== false,
+      },
+    });
+    const dto: NotificationDto = {
+      id: n.id,
+      title: n.title,
+      message: n.message,
+      type: n.mode ?? 'general',
+      is_read: false,
+      allow_replies: n.allowReplies,
+      created_at: n.createdAt.toISOString(),
+    };
+    const unreadCount = await this.getUnreadCount(userId);
+    this.realtimeGateway.emitNotificationNew(userId, dto);
+    this.realtimeGateway.emitUnreadCount(userId, unreadCount);
+    return dto;
+  }
+
+  // ─── Reading ──────────────────────────────────────────────────────────────
 
   async getUnreadCount(
     userId: number,
@@ -33,13 +152,11 @@ export class NotificationsService {
       deletedAt: null,
     };
     if (excludePasswordReset) {
-      // Admins track password resets via a dedicated badge; exclude them from the inbox count.
       where.NOT = {
         title: { contains: 'password reset', mode: 'insensitive' },
       };
     }
-    const count = await this.db.notification.count({ where });
-    return count;
+    return this.db.notification.count({ where });
   }
 
   async getUserNotifications(
@@ -53,9 +170,7 @@ export class NotificationsService {
       userId,
       deletedAt: null,
     };
-    if (filter === 'unread') {
-      where.readAt = null;
-    }
+    if (filter === 'unread') where.readAt = null;
 
     const list = await this.db.notification.findMany({
       where,
@@ -69,9 +184,93 @@ export class NotificationsService {
       message: n.message,
       type: n.mode ?? 'general',
       is_read: n.readAt != null,
+      allow_replies: n.allowReplies,
       created_at: n.createdAt.toISOString(),
     }));
   }
+
+  /**
+   * List notifications with sender/recipient profiles and reply counts.
+   * Used by admin, school-admin, and teacher "sent/received/all" views.
+   *
+   * @param allowedRecipientIds - when set, scopes "sent" view to only those recipients
+   * @param excludePasswordReset - admin inbox suppresses password-reset notifications
+   */
+  async listWithProfiles(
+    userId: number,
+    opts: {
+      mode: 'received' | 'sent' | 'all';
+      limit: number;
+      allowedRecipientIds?: number[];
+      excludePasswordReset?: boolean;
+    },
+  ): Promise<NotificationWithProfileDto[]> {
+    const { mode, limit, allowedRecipientIds, excludePasswordReset } = opts;
+    const take = Math.min(Math.max(limit, 1), 100);
+
+    const recipientFilter =
+      allowedRecipientIds && allowedRecipientIds.length > 0
+        ? { userId: { in: allowedRecipientIds } }
+        : {};
+
+    let where: Record<string, unknown>;
+    if (mode === 'sent') {
+      where = { senderId: userId, deletedAt: null, ...recipientFilter };
+    } else if (mode === 'all') {
+      where = {
+        deletedAt: null,
+        OR: [
+          { userId },
+          { senderId: userId, ...recipientFilter },
+        ],
+      };
+    } else {
+      where = { userId, deletedAt: null };
+      if (excludePasswordReset) {
+        where.NOT = {
+          title: { contains: 'password reset', mode: 'insensitive' },
+        };
+      }
+    }
+
+    const list = await this.db.notification.findMany({
+      where: where as any,
+      orderBy: { createdAt: 'desc' },
+      take,
+      include: {
+        user: { include: { profile: { select: { fullName: true } } } },
+        sender: { include: { profile: { select: { fullName: true } } } },
+        _count: { select: { replies: true } },
+      },
+    });
+
+    const isSent = mode === 'sent';
+    return list.map((n) => {
+      const profileUser = isSent ? n.user : n.sender;
+      return {
+        id: n.id,
+        user_id: n.userId,
+        sender_id: n.senderId ?? null,
+        title: n.title,
+        message: n.message,
+        type: n.mode ?? 'general',
+        is_read: !!n.readAt,
+        allow_replies: n.allowReplies,
+        created_at: n.createdAt.toISOString(),
+        reply_count: n._count?.replies ?? 0,
+        profiles: profileUser
+          ? {
+              id: String(profileUser.id),
+              full_name: profileUser.profile?.fullName ?? profileUser.email,
+              email: profileUser.email,
+              role: profileUser.role,
+            }
+          : undefined,
+      };
+    });
+  }
+
+  // ─── Updating ─────────────────────────────────────────────────────────────
 
   async updateUserNotification(
     userId: number,
@@ -104,9 +303,8 @@ export class NotificationsService {
       const n = await this.db.notification.findFirst({
         where: { id: notification_id, userId },
       });
-      if (!n) {
-        throw new ForbiddenException('Notification not found');
-      }
+      if (!n) throw new ForbiddenException('Notification not found');
+
       if (deleted) {
         const wasUnread = n.readAt == null;
         await this.db.notification.update({
@@ -120,6 +318,7 @@ export class NotificationsService {
         await this.realtimeGateway.emitDashboardStatsForUser(userId);
         return { success: true };
       }
+
       if (is_read) {
         await this.db.notification.update({
           where: { id: notification_id },
@@ -145,6 +344,7 @@ export class NotificationsService {
                 message: updated.message,
                 type: updated.mode ?? 'general',
                 is_read: updated.readAt != null,
+                allow_replies: updated.allowReplies,
                 created_at: updated.createdAt.toISOString(),
               }
             : undefined,
@@ -157,7 +357,57 @@ export class NotificationsService {
     );
   }
 
-  /** Get replies for a notification. Caller must be recipient or sender of the notification. */
+  /**
+   * Mark one notification as read/unread or delete it.
+   * Used by role-scoped PATCH endpoints (teacher, school-admin).
+   * The caller must verify the notification belongs to userId before calling.
+   */
+  async markNotification(
+    userId: number,
+    notificationId: string,
+    action: { is_read?: boolean; deleted?: boolean },
+  ): Promise<{ success: boolean }> {
+    const n = await this.db.notification.findFirst({
+      where: { id: notificationId, userId },
+    });
+    if (!n) throw new BadRequestException('Notification not found');
+
+    if (action.deleted) {
+      await this.db.notification.update({
+        where: { id: notificationId },
+        data: { deletedAt: new Date() },
+      });
+      if (n.readAt == null) {
+        const unreadCount = await this.getUnreadCount(userId);
+        this.realtimeGateway.emitUnreadCount(userId, unreadCount);
+      }
+      return { success: true };
+    }
+
+    if (action.is_read !== undefined) {
+      await this.db.notification.update({
+        where: { id: notificationId },
+        data: { readAt: action.is_read ? new Date() : null },
+      });
+      if (action.is_read) {
+        const unreadCount = await this.getUnreadCount(userId);
+        this.realtimeGateway.emitNotificationRead(userId, {
+          notification_id: notificationId,
+          mark_all: false,
+          read_at: new Date().toISOString(),
+        });
+        this.realtimeGateway.emitUnreadCount(userId, unreadCount);
+      } else {
+        const unreadCount = await this.getUnreadCount(userId);
+        this.realtimeGateway.emitUnreadCount(userId, unreadCount);
+      }
+    }
+
+    return { success: true };
+  }
+
+  // ─── Replies ──────────────────────────────────────────────────────────────
+
   async getReplies(
     notificationId: string,
     currentUserId: number,
@@ -206,7 +456,6 @@ export class NotificationsService {
     }));
   }
 
-  /** Create a reply to a notification. Caller must be recipient or sender. */
   async createReply(
     notificationId: string,
     currentUserId: number,
@@ -222,7 +471,7 @@ export class NotificationsService {
   }> {
     const notification = await this.db.notification.findUnique({
       where: { id: notificationId },
-      select: { userId: true, senderId: true },
+      select: { userId: true, senderId: true, allowReplies: true },
     });
     if (!notification) throw new BadRequestException('Notification not found');
     const canReply =
@@ -231,6 +480,8 @@ export class NotificationsService {
         notification.senderId === currentUserId);
     if (!canReply)
       throw new ForbiddenException('Cannot reply to this notification');
+    if (!notification.allowReplies)
+      throw new ForbiddenException('Replies are disabled for this notification');
 
     const text = String(replyText ?? '').trim();
     if (!text) throw new BadRequestException('reply_text is required');
@@ -256,32 +507,19 @@ export class NotificationsService {
     };
   }
 
-  /** Create a notification for a user (e.g. from admin or system). */
+  // ─── Legacy compat (used by internal services: batchGrade, courses, etc.) ─
+
+  /** @deprecated Use sendOne() instead */
   async create(
     userId: number,
-    data: { title: string; message: string; type?: string; senderId?: number },
+    data: {
+      title: string;
+      message: string;
+      type?: string;
+      senderId?: number;
+      allowReplies?: boolean;
+    },
   ): Promise<NotificationDto> {
-    const n = await this.db.notification.create({
-      data: {
-        userId,
-        title: data.title,
-        message: data.message,
-        mode: data.type ?? 'general',
-        senderId: data.senderId ?? undefined,
-      },
-    });
-    const dto = {
-      id: n.id,
-      title: n.title,
-      message: n.message,
-      type: n.mode ?? 'general',
-      is_read: false,
-      created_at: n.createdAt.toISOString(),
-    };
-    const unreadCount = await this.getUnreadCount(userId);
-    this.realtimeGateway.emitNotificationNew(userId, dto);
-    this.realtimeGateway.emitUnreadCount(userId, unreadCount);
-    await this.realtimeGateway.emitDashboardStatsForUser(userId);
-    return dto;
+    return this.sendOne(data.senderId ?? userId, userId, data);
   }
 }

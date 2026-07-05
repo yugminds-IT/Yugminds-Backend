@@ -7,7 +7,7 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength } from '../../common/utils/password.util';
-import { AuditService } from '../../common/audit/audit.service';
+import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 
 type StudentSchoolDto = {
   school_id: string;
@@ -50,7 +50,7 @@ type UserWithRelations = Awaited<
 export class AdminStudentsService {
   constructor(
     private readonly db: DatabaseService,
-    private readonly audit: AuditService,
+    private readonly enrollmentService: EnrollmentService,
   ) {}
 
   private toStudentDetail(u: UserWithRelations): StudentDetailResponse {
@@ -82,19 +82,22 @@ export class AdminStudentsService {
         }
       : { role: Role.student, isActive: true };
     const take = limit ? parseInt(limit, 10) : 50;
-    const users = await this.db.user.findMany({
-      where,
-      take: Math.min(take, 100),
-      include: {
-        profile: true,
-        studentSchools: { include: { school: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    const [users, total] = await Promise.all([
+      this.db.user.findMany({
+        where,
+        take: Math.min(take, 5000),
+        include: {
+          profile: true,
+          studentSchools: { include: { school: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.db.user.count({ where }),
+    ]);
     const students = (users as UserWithRelations[]).map((u) =>
       this.toStudentDetail(u),
     );
-    return { students };
+    return { students, total };
   }
 
   async get(
@@ -207,18 +210,18 @@ export class AdminStudentsService {
       },
     });
 
+    await this.enrollmentService.enrollStudentInRelevantCourses(
+      user.id,
+      schoolId,
+      grade,
+    );
+
     const created = await this.db.user.findFirst({
       where: { id: user.id },
       include: {
         profile: true,
         studentSchools: { include: { school: true } },
       },
-    });
-    this.audit.log({
-      action: 'CREATE_STUDENT',
-      entity: 'Student',
-      entityId: String(user.id),
-      details: `Created student ${email}`,
     });
     return this.toStudentDetail(created as UserWithRelations);
   }
@@ -328,13 +331,60 @@ export class AdminStudentsService {
       },
     });
     if (!user) throw new NotFoundException('Student not found');
-    this.audit.log({
-      action: 'UPDATE_STUDENT',
-      entity: 'Student',
-      entityId: id,
-      details: `Updated student ${id}`,
-    });
     return this.toStudentDetail(user as UserWithRelations);
+  }
+
+  async enrollStudent(id: string) {
+    const studentId = parseInt(id, 10);
+    const studentSchools = await this.db.studentSchool.findMany({
+      where: { studentId, isActive: true },
+    });
+    if (studentSchools.length === 0) {
+      throw new NotFoundException('Student has no active school assignment');
+    }
+    // Count once before all schools, once after — N schools → 2 queries total.
+    const before = await this.db.studentCourse.count({ where: { studentId } });
+    for (const ss of studentSchools) {
+      await this.enrollmentService.enrollStudentInRelevantCourses(
+        studentId,
+        ss.schoolId,
+        ss.grade,
+      );
+    }
+    const after = await this.db.studentCourse.count({ where: { studentId } });
+    const enrolled = after - before;
+    return { success: true, new_enrollments: enrolled };
+  }
+
+  async syncEnrollments(schoolId?: string) {
+    const studentWhere = schoolId
+      ? {
+          role: Role.student,
+          isActive: true,
+          studentSchools: { some: { schoolId } },
+        }
+      : { role: Role.student, isActive: true };
+
+    const [studentsProcessed, publishedCourses] = await Promise.all([
+      this.db.user.count({ where: studentWhere }),
+      this.db.course.findMany({
+        where: { isPublished: true },
+        select: { id: true },
+      }),
+    ]);
+
+    let newEnrollments = 0;
+    newEnrollments =
+      await this.enrollmentService.bulkSyncPublishedEnrollments(schoolId);
+
+    return {
+      success: true,
+      students_processed: studentsProcessed,
+      students_updated:
+        newEnrollments > 0 ? Math.min(studentsProcessed, newEnrollments) : 0,
+      new_enrollments: newEnrollments,
+      courses_processed: publishedCourses.length,
+    };
   }
 
   async delete(id: string) {
@@ -345,12 +395,6 @@ export class AdminStudentsService {
       // P2025 = record already deleted — treat as success
       if ((err as { code?: string })?.code !== 'P2025') throw err;
     }
-    this.audit.log({
-      action: 'DELETE_STUDENT',
-      entity: 'Student',
-      entityId: id,
-      details: `Deleted student ${id}`,
-    });
     return { success: true };
   }
 }

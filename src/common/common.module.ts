@@ -14,6 +14,7 @@ import { ValidateJoiningCodeService } from './validate-joining-code/validate-joi
 import { RealtimeModule } from './realtime/realtime.module';
 import { EnrollmentService } from './enrollment/enrollment.service';
 import { RankingService } from './assignment/ranking.service';
+import { StudentRankingService } from './assignment/student-ranking.service';
 
 @Module({
   imports: [DatabaseModule, AuthModule, RealtimeModule],
@@ -32,7 +33,13 @@ import { RankingService } from './assignment/ranking.service';
     ValidateJoiningCodeService,
     EnrollmentService,
     RankingService,
+    StudentRankingService,
   ],
-  exports: [NotificationsService, EnrollmentService, RankingService],
+  exports: [
+    NotificationsService,
+    EnrollmentService,
+    RankingService,
+    StudentRankingService,
+  ],
 })
 export class CommonModule {}

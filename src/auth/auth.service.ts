@@ -432,22 +432,25 @@ export class AuthService {
           throw new UnauthorizedException('Invalid refresh token');
         }
 
-        let matched: { id: string; user: User } | null = null;
-        for (const row of storedTokens) {
-          if (!row.user) continue;
-          // Enforce DB expiry even though JWT verification also enforces exp.
-          if (row.expiresAt < now) continue;
-
-          const ok = await bcrypt.compare(refreshToken, row.token);
-          if (ok) {
-            matched = { id: row.id, user: row.user };
-            break;
-          }
-        }
-
-        if (!matched) {
+        // Compare all non-expired tokens in parallel to avoid serialising
+        // bcrypt (which is intentionally slow) across multiple device sessions.
+        const validCandidates = storedTokens.filter(
+          (row) => row.user && row.expiresAt >= now,
+        );
+        const comparisons = await Promise.all(
+          validCandidates.map(async (row) => ({
+            row,
+            ok: await bcrypt.compare(refreshToken, row.token),
+          })),
+        );
+        const matchedEntry = comparisons.find((c) => c.ok);
+        if (!matchedEntry) {
           throw new UnauthorizedException('Invalid refresh token');
         }
+        const matched = {
+          id: matchedEntry.row.id,
+          user: matchedEntry.row.user as User,
+        };
 
         // Rotation: delete the matched refresh token hash, store a new one.
         await this.db.refreshToken.delete({ where: { id: matched.id } });
@@ -489,22 +492,23 @@ export class AuthService {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
-      let matched: { id: string; user: User } | null = null;
-      for (const row of storedTokens) {
-        if (!row.user) continue;
-        // Enforce DB expiry even though JWT verification also enforces exp.
-        if (row.expiresAt < now) continue;
-
-        const ok = await bcrypt.compare(refreshToken, row.token);
-        if (ok) {
-          matched = { id: row.id, user: row.user };
-          break;
-        }
-      }
-
-      if (!matched) {
+      const validCandidates2 = storedTokens.filter(
+        (row) => row.user && row.expiresAt >= now,
+      );
+      const comparisons2 = await Promise.all(
+        validCandidates2.map(async (row) => ({
+          row,
+          ok: await bcrypt.compare(refreshToken, row.token),
+        })),
+      );
+      const matchedEntry2 = comparisons2.find((c) => c.ok);
+      if (!matchedEntry2) {
         throw new UnauthorizedException('Invalid refresh token');
       }
+      const matched = {
+        id: matchedEntry2.row.id,
+        user: matchedEntry2.row.user as User,
+      };
 
       // Rotation: delete the matched refresh token hash, store a new one.
       // delete uses a unique selector; we already validated tenant via the matched user's tenantId.
@@ -641,14 +645,17 @@ export class AuthService {
           select: { id: true, token: true },
         });
 
-        for (const row of storedTokens) {
-          const ok = await bcrypt.compare(raw, row.token);
-          if (ok) {
-            await this.db.refreshToken
-              .delete({ where: { id: row.id } })
-              .catch(() => {});
-            break;
-          }
+        const logoutComparisons = await Promise.all(
+          storedTokens.map(async (row) => ({
+            row,
+            ok: await bcrypt.compare(raw, row.token),
+          })),
+        );
+        const logoutMatch = logoutComparisons.find((c) => c.ok);
+        if (logoutMatch) {
+          await this.db.refreshToken
+            .delete({ where: { id: logoutMatch.row.id } })
+            .catch(() => {});
         }
         return;
       }
@@ -664,15 +671,17 @@ export class AuthService {
         select: { id: true, token: true },
       });
 
-      // Best-effort: delete only the refresh token that matches the provided raw token.
-      for (const row of storedTokens) {
-        const ok = await bcrypt.compare(raw, row.token);
-        if (ok) {
-          await this.db.refreshToken
-            .delete({ where: { id: row.id } })
-            .catch(() => {});
-          break;
-        }
+      const logoutComparisons2 = await Promise.all(
+        storedTokens.map(async (row) => ({
+          row,
+          ok: await bcrypt.compare(raw, row.token),
+        })),
+      );
+      const logoutMatch2 = logoutComparisons2.find((c) => c.ok);
+      if (logoutMatch2) {
+        await this.db.refreshToken
+          .delete({ where: { id: logoutMatch2.row.id } })
+          .catch(() => {});
       }
       return;
     }

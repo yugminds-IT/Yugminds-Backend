@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider        = "prisma-client-js"
+  previewFeatures = ["views"]
 }
 
 datasource db {
@@ -66,18 +67,25 @@ model RefreshToken {
 }
 
 // ============ Profile (extended user info) ============
+// Fields are role-specific:
+//   Teachers  → qualification, experience, specialization
+//   Students  → parentName, parentPhone
+//   All roles → fullName, phone, schoolId, notification prefs
 model Profile {
   id           String   @id @default(uuid())
   userId       Int      @unique
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   fullName       String?
   phone          String?
+  // Teacher-only fields
   qualification  String?
   experience     String?
   specialization String?
+  // Student-only fields
   parentName     String?
   parentPhone  String?
   schoolId     String?
+  // Notification preferences (all roles)
   emailNotifications Boolean @default(true)
   assignmentReminders Boolean @default(true)
   gradeNotifications Boolean @default(true)
@@ -121,6 +129,7 @@ model School {
   assignments    Assignment[]
   studentScores  StudentScore[]
   schoolCalendars SchoolCalendar[]
+  robocodersLicenses RobocodersLicense[]
   @@index([schoolCode])
 }
 
@@ -173,13 +182,13 @@ model TeacherSectionAssignment {
 }
 
 // ============ Teacher-School assignment ============
+// gradesAssigned removed: derive from TeacherSectionAssignment → section → grade instead.
 model TeacherSchool {
   id                  String   @id @default(uuid())
   teacherId           Int
   schoolId            String
   school              School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   teacher             User     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
-  gradesAssigned      String[] @default([])
   subjects            String[] @default([])
   workingDaysPerWeek  Int      @default(5)
   createdAt           DateTime @default(now())
@@ -367,6 +376,7 @@ model AssignmentSubmission {
   @@index([studentId])
   @@index([assignmentId])
   @@index([assignmentId, studentId])
+  @@index([studentId, status])
 }
 
 model RetakeGrant {
@@ -396,6 +406,7 @@ model StudentScore {
   courseId           String?
   course             Course?  @relation(fields: [courseId], references: [id], onDelete: SetNull)
   subject            String?
+  academicYear       String   @default("2024-25")
   cumulativeScore    Float    @default(0)
   cumulativeMaxScore Float    @default(0)
   percentage         Float    @default(0)
@@ -407,6 +418,7 @@ model StudentScore {
   @@index([schoolId])
   @@index([gradeId])
   @@index([courseId])
+  @@index([studentId, schoolId, academicYear])
 }
 
 // ============ School-wide student score summary (recalculated on each grading) ============
@@ -443,27 +455,44 @@ model AssignmentQuestion {
 }
 
 model CourseAccess {
-  id        String   @id @default(uuid())
+  id        String             @id @default(uuid())
   courseId  String
-  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  course    Course             @relation(fields: [courseId], references: [id], onDelete: Cascade)
   schoolId  String
-  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
-  grades    String[] @default([])
-  createdAt DateTime @default(now())
+  school    School             @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  // grades[] replaced by CourseAccessGrade junction table for relational integrity
+  gradeAccess CourseAccessGrade[]
+  createdAt DateTime           @default(now())
   @@unique([courseId, schoolId])
   @@index([courseId])
   @@index([schoolId])
 }
 
+// Junction table: which grades in a school can access a course.
+// Replaces the old CourseAccess.grades String[] denormalized array.
+model CourseAccessGrade {
+  id             String       @id @default(uuid())
+  courseAccessId String
+  courseAccess   CourseAccess @relation(fields: [courseAccessId], references: [id], onDelete: Cascade)
+  gradeName      String       // e.g. "Grade 1" — matches StudentSchool.grade for enrollment logic
+  createdAt      DateTime     @default(now())
+  @@unique([courseAccessId, gradeName])
+  @@index([courseAccessId])
+}
+
 // ============ Student progress ============
 model StudentCourse {
-  id        String   @id @default(uuid())
-  studentId Int
-  courseId  String
-  enrolledAt DateTime @default(now())
+  id          String    @id @default(uuid())
+  studentId   Int
+  courseId    String
+  enrolledAt  DateTime  @default(now())
+  // Single source of truth for course completion. Set when all chapters are done.
+  completedAt DateTime?
   @@unique([studentId, courseId])
   @@index([studentId])
   @@index([courseId])
+  @@index([completedAt])
+  @@index([studentId, completedAt])
 }
 
 model CourseProgress {
@@ -479,6 +508,7 @@ model CourseProgress {
   @@unique([studentId, courseId, chapterId, contentId])
   @@index([studentId])
   @@index([courseId])
+  @@index([studentId, courseId])
 }
 
 // ============ Rooms & Periods ============
@@ -529,8 +559,7 @@ model ClassSchedule {
   isActive  Boolean @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  @@index([schoolId])
-  @@index([dayOfWeek])
+  @@index([schoolId, dayOfWeek, isActive])
   @@index([teacherId])
   @@index([roomId])
 }
@@ -556,21 +585,26 @@ model SchoolCalendar {
 
 // ============ Reports & Attendance ============
 model TeacherReport {
-  id            String   @id @default(uuid())
+  id            String      @id @default(uuid())
   teacherId     Int
   schoolId      String
   reportDate    DateTime
   grade         String?
   periodId      String?
-  status        String?  @default("submitted")
+  status        String?     @default("submitted") // submitted | approved | rejected
   startTime     String?
   endTime       String?
-  topicsTaught  String?  @db.Text
-  activities    String?  @db.Text
-  studentCount  Int?     
-  durationHours Float?   
-  notes         String?  @db.Text
-  createdAt     DateTime @default(now())
+  topicsTaught  String?     @db.Text
+  activities    String?     @db.Text
+  studentCount  Int?
+  durationHours Float?
+  notes         String?     @db.Text
+  adminNotes    String?     @db.Text
+  // Link to the admin-verified attendance record for the same day (optional).
+  // Attendance = admin-verified presence; TeacherReport = teacher self-reported work.
+  attendanceId  String?
+  attendance    Attendance? @relation(fields: [attendanceId], references: [id], onDelete: SetNull)
+  createdAt     DateTime    @default(now())
   @@index([teacherId])
   @@index([schoolId])
   @@index([reportDate])
@@ -601,12 +635,13 @@ model TeacherLeave {
 }
 
 model Attendance {
-  id        String   @id @default(uuid())
+  id        String          @id @default(uuid())
   teacherId Int
   schoolId  String
   date      DateTime
   status    String
-  createdAt DateTime @default(now())
+  createdAt DateTime        @default(now())
+  reports   TeacherReport[]
   @@unique([teacherId, schoolId, date])
   @@index([teacherId])
   @@index([schoolId])
@@ -624,38 +659,6 @@ model Logo {
   deletedAt   DateTime?
   @@index([createdAt])
   @@index([schoolId])
-}
-
-// ============ Success Stories (public page sections) ============
-model SuccessStorySection {
-  id            String    @id @default(uuid())
-  title         String
-  bodyPrimary   String    @db.Text
-  bodySecondary String?   @db.Text
-  bodyTertiary  String?   @db.Text
-  imageUrl      String?
-  storagePath   String?
-  background    String    @default("white") // blue | white
-  imagePosition String    @default("left")  // left | right
-  orderIndex    Int       @default(0)
-  isPublished   Boolean   @default(false)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  versions      SuccessStoryVersion[]
-  @@index([isPublished])
-  @@index([orderIndex])
-  @@index([updatedAt])
-}
-
-model SuccessStoryVersion {
-  id            String             @id @default(uuid())
-  sectionId     String
-  section       SuccessStorySection @relation(fields: [sectionId], references: [id], onDelete: Cascade)
-  versionNumber Int
-  snapshot      Json
-  createdAt     DateTime           @default(now())
-  @@unique([sectionId, versionNumber])
-  @@index([sectionId])
 }
 
 // ============ Community Page (public + admin CMS) ============
@@ -746,6 +749,7 @@ model Notification {
   title     String
   message   String    @db.Text
   mode      String?   // course_enrollment | assignment_due | grade_posted | system_alert | achievement | general (stored as mode in DB)
+  allowReplies Boolean @default(true) // when false, recipients/sender cannot post replies
   readAt    DateTime?
   deletedAt DateTime?
   createdAt DateTime  @default(now())
@@ -814,6 +818,48 @@ model SystemSetting {
   key   String @unique
   value String @db.Text
   @@index([key])
+}
+
+// ============ RoboCoders Studio licenses (offline activation keys per system) ============
+// One row per licensed machine/system. The activationKey is generated server-side
+// using AES-256-CTR + HMAC-SHA256 (see admin/licenses/license-crypto.ts) and is
+// byte-identical to the keys the RoboCoders Studio desktop app verifies offline.
+model RobocodersLicense {
+  id            String   @id @default(uuid())
+  schoolId      String
+  school        School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  systemLabel   String   // admin's mark for the machine, e.g. "Lab PC 3" / "System 1"
+  machineId     String   // 16 hex chars, shown on the desktop app activation screen
+  licenseNumber Int      // internal reference number baked into the key (0..99999)
+  startDate     DateTime // first day the license is valid (UTC date)
+  expiryDate    DateTime // last day the license is valid, inclusive (UTC date)
+  durationDays  Int      // convenience copy of expiry-start in days
+  activationKey String   // 21-char Base32 key (grouped with dashes)
+  notes         String?  @db.Text
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  @@index([schoolId])
+  @@index([machineId])
+  @@index([schoolId, machineId])
+}
+
+// ============================================================
+// Issue 7: Unified user–school membership view (read-only)
+// Created by migration 20260610000001_consolidation_fixes.
+// Unions TeacherSchool + StudentSchool + SchoolAdmin so cross-role
+// queries can use one surface instead of joining three tables.
+// Writes must still target the three original tables.
+// ============================================================
+view UserSchoolMembership {
+  id        String
+  userId    Int
+  schoolId  String
+  role      String   // teacher | student | school_admin
+  createdAt DateTime
+
+  @@unique([id])
+  @@map("UserSchoolMembership")
 }
 
 // ============ Contact Submissions ============

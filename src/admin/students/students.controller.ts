@@ -39,6 +39,16 @@ export class AdminStudentsController {
     return this.service.create(body);
   }
 
+  @Post('sync-enrollments')
+  syncEnrollments(@Query('school_id') schoolId?: string) {
+    return this.service.syncEnrollments(schoolId);
+  }
+
+  @Post(':studentId/enroll')
+  enrollStudent(@Param('studentId') studentId: string) {
+    return this.service.enrollStudent(studentId);
+  }
+
   @Patch(':studentId')
   update(
     @Param('studentId') studentId: string,

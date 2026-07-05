@@ -24,6 +24,7 @@ import { ResourceIdParamDto } from './dto/resource-id-param.dto';
 import { DataImportDto } from './dto/data-import.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -49,6 +50,7 @@ export class SchoolAdminExtraController {
     private readonly passwordResetRequestService: PasswordResetRequestService,
     private readonly realtimeGateway: RealtimeGateway,
     private readonly enrollmentService: EnrollmentService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
@@ -126,7 +128,7 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  // Rooms – full CRUD (school-scoped)
+  // Rooms - full CRUD (school-scoped)
 
   @Get('rooms')
   async listRooms(@CurrentUser() user: { id: number }) {
@@ -305,7 +307,7 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  // Periods – full CRUD (school-scoped)
+  // Periods - full CRUD (school-scoped)
 
   @Get('periods')
   async listPeriods(@CurrentUser() user: { id: number }) {
@@ -448,7 +450,7 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  // Teachers – list (school-scoped). School admins cannot create teachers.
+  // Teachers - list (school-scoped). School admins cannot create teachers.
 
   @Get('teachers')
   async listTeachers(
@@ -468,6 +470,10 @@ export class SchoolAdminExtraController {
         teacher: {
           include: {
             profile: true,
+            teacherSectionAssignments: {
+              where: { schoolId },
+              include: { section: { include: { grade: true } } },
+            },
           },
         },
       },
@@ -549,9 +555,14 @@ export class SchoolAdminExtraController {
           leaves_taken: leavesByTeacher[ts.teacherId] ?? 0,
           teacher_schools: [
             {
-              grades_assigned: Array.isArray(ts.gradesAssigned)
-                ? ts.gradesAssigned
-                : [],
+              // Derived from TeacherSectionAssignment → section → grade (no longer stored on TeacherSchool).
+              grades_assigned: [
+                ...new Set(
+                  (u?.teacherSectionAssignments ?? [])
+                    .map((a: any) => a.section?.grade?.name)
+                    .filter(Boolean),
+                ),
+              ],
               subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
               working_days_per_week: ts.workingDaysPerWeek ?? 5,
               max_students_per_session: 30,
@@ -562,7 +573,7 @@ export class SchoolAdminExtraController {
     };
   }
 
-  // Students – list + create (school-scoped)
+  // Students - list + create (school-scoped)
 
   @Get('students')
   async listStudents(
@@ -1123,7 +1134,7 @@ export class SchoolAdminExtraController {
       try {
         await this.db.user.delete({ where: { id: studentId } });
       } catch (err: unknown) {
-        // P2025 = record not found (already deleted) — treat as success
+        // P2025 = record not found (already deleted) - treat as success
         const code = (err as { code?: string })?.code;
         if (code !== 'P2025') throw err;
       }
@@ -1482,7 +1493,7 @@ export class SchoolAdminExtraController {
     };
   }
 
-  // Courses – list (school’s courses via CourseAccess) + progress
+  // Courses - list (school's courses via CourseAccess) + progress
 
   @Get('courses')
   async listCourses(
@@ -1870,7 +1881,7 @@ export class SchoolAdminExtraController {
     };
   }
 
-  // Schedules – ClassSchedule (schoolId, periodId, dayOfWeek)
+  // Schedules - ClassSchedule (schoolId, periodId, dayOfWeek)
 
   private static readonly DAY_MAP: Record<string, number> = {
     Sunday: 0,
@@ -2369,34 +2380,16 @@ export class SchoolAdminExtraController {
           dayNames.find(([, n]) => n === s.dayOfWeek)?.[0] ??
           `Day ${s.dayOfWeek}`;
         const time =
-          s.startTime && s.endTime ? ` (${s.startTime}–${s.endTime})` : '';
-        return `${day}: ${s.subject ?? 'Class'} – ${s.grade ?? 'All'}${time}`;
+          s.startTime && s.endTime ? ` (${s.startTime}-${s.endTime})` : '';
+        return `${day}: ${s.subject ?? 'Class'} - ${s.grade ?? 'All'}${time}`;
       });
 
-      const notification = await this.db.notification.create({
-        data: {
-          userId: teacherId,
-          senderId: user.id,
-          title: 'Your Updated Schedule',
-          message: `Your current schedule:\n${lines.join('\n')}`,
-          mode: 'schedule',
-        },
+      await this.notificationsService.sendOne(user.id, teacherId, {
+        title: 'Your Updated Schedule',
+        message: `Your current schedule:\n${lines.join('\n')}`,
+        type: 'schedule',
+        allowReplies: false,
       });
-
-      const unreadCount = await this.db.notification.count({
-        where: { userId: teacherId, readAt: null, deletedAt: null },
-      });
-      this.realtimeGateway.emitNotificationNew(teacherId, {
-        id: notification.id,
-        title: notification.title,
-        message: notification.message,
-        type: notification.mode ?? 'schedule',
-        is_read: false,
-        created_at: notification.createdAt.toISOString(),
-      });
-      this.realtimeGateway.emitUnreadCount(teacherId, unreadCount);
-      // Trigger a full dashboard refresh for the teacher
-      await this.realtimeGateway.emitDashboardStatsForUser(teacherId);
       synced++;
     }
 
@@ -2407,7 +2400,7 @@ export class SchoolAdminExtraController {
     };
   }
 
-  // Notifications – list (for school admin’s own user), create (broadcast to recipients), recipients, PATCH
+  // Notifications - list (sent/received/all), create (broadcast), recipients, PATCH
 
   @Get('notifications')
   async listNotifications(
@@ -2416,75 +2409,33 @@ export class SchoolAdminExtraController {
     @Query('mode') mode?: string,
     @Query('school_id') schoolIdParam?: string,
   ) {
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
-      : 50;
-    const m = String(mode ?? 'received')
-      .trim()
-      .toLowerCase(); // received | sent | all
-    const schoolId = schoolIdParam ?? (await this.getSchoolId(user.id));
+    const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
+    const m = (mode ?? 'received').trim().toLowerCase() as 'received' | 'sent' | 'all';
 
-    // Allowed recipients for this school (for "sent/all" views)
-    const allowedRecipientIds: number[] = schoolId
-      ? Array.from(
+    // For sent/all views, scope to this school's members only.
+    let allowedRecipientIds: number[] | undefined;
+    if (m === 'sent' || m === 'all') {
+      const schoolId = schoolIdParam ?? (await this.getSchoolId(user.id));
+      if (schoolId) {
+        const [teacherRows, studentRows] = await Promise.all([
+          this.db.teacherSchool.findMany({ where: { schoolId }, select: { teacherId: true } }),
+          this.db.studentSchool.findMany({ where: { schoolId }, select: { studentId: true } }),
+        ]);
+        allowedRecipientIds = Array.from(
           new Set<number>([
-            ...(
-              await this.db.teacherSchool.findMany({
-                where: { schoolId },
-                select: { teacherId: true },
-              })
-            ).map((t) => t.teacherId),
-            ...(
-              await this.db.studentSchool.findMany({
-                where: { schoolId },
-                select: { studentId: true },
-              })
-            ).map((s) => s.studentId),
+            ...teacherRows.map((t) => t.teacherId),
+            ...studentRows.map((s) => s.studentId),
           ]),
-        )
-      : [];
+        );
+      }
+    }
 
-    const where =
-      m === 'sent'
-        ? {
-            senderId: user.id,
-            deletedAt: null,
-            ...(allowedRecipientIds.length > 0
-              ? { userId: { in: allowedRecipientIds } }
-              : {}),
-          }
-        : m === 'all'
-          ? {
-              deletedAt: null,
-              OR: [
-                { userId: user.id },
-                {
-                  senderId: user.id,
-                  ...(allowedRecipientIds.length > 0
-                    ? { userId: { in: allowedRecipientIds } }
-                    : {}),
-                },
-              ],
-            }
-          : { userId: user.id, deletedAt: null };
-
-    const notifications = await this.db.notification.findMany({
-      where: where as any,
-      orderBy: { createdAt: 'desc' },
-      take,
+    const notifications = await this.notificationsService.listWithProfiles(user.id, {
+      mode: m,
+      limit: take,
+      allowedRecipientIds,
     });
-    return {
-      notifications: notifications.map((n) => ({
-        id: n.id,
-        user_id: n.userId,
-        sender_id: n.senderId ?? null,
-        title: n.title,
-        message: n.message,
-        type: n.mode ?? 'general',
-        is_read: !!n.readAt,
-        created_at: n.createdAt.toISOString(),
-      })),
-    };
+    return { notifications };
   }
 
   @Post('notifications')
@@ -2498,63 +2449,45 @@ export class SchoolAdminExtraController {
       recipientType?: string;
       recipients?: string[];
       school_id?: string;
+      allowReplies?: boolean;
     },
   ) {
     const title = String(body?.title ?? '').trim();
     const message = String(body?.message ?? '').trim();
     if (!title || !message)
       throw new BadRequestException('Title and message are required');
+
     const recipientType = body?.recipientType ?? 'role';
     const recipients = Array.isArray(body?.recipients) ? body.recipients : [];
     const schoolId = body?.school_id ?? (await this.getSchoolId(user.id));
     let userIds: number[] = [];
+
     if (recipientType === 'role') {
-      for (const r of recipients) {
+      const queries = recipients.map((r) => {
         if (r === 'role:teacher') {
-          const ts = await this.db.teacherSchool.findMany({
-            where: { schoolId: schoolId ?? undefined },
-            select: { teacherId: true },
-          });
-          userIds.push(...ts.map((t) => t.teacherId));
-        } else if (r === 'role:student') {
-          const ss = await this.db.studentSchool.findMany({
-            where: { schoolId: schoolId ?? undefined },
-            select: { studentId: true },
-          });
-          userIds.push(...ss.map((s) => s.studentId));
+          return this.db.teacherSchool
+            .findMany({ where: { schoolId: schoolId ?? undefined }, select: { teacherId: true } })
+            .then((rows) => rows.map((t) => t.teacherId));
         }
-      }
+        if (r === 'role:student') {
+          return this.db.studentSchool
+            .findMany({ where: { schoolId: schoolId ?? undefined }, select: { studentId: true } })
+            .then((rows) => rows.map((s) => s.studentId));
+        }
+        return Promise.resolve([] as number[]);
+      });
+      userIds = (await Promise.all(queries)).flat();
     } else {
-      userIds = recipients
-        .map((id) => parseInt(id, 10))
-        .filter((n) => !Number.isNaN(n));
+      userIds = recipients.map((id) => parseInt(id, 10)).filter((n) => !Number.isNaN(n));
     }
-    userIds = Array.from(new Set(userIds));
-    for (const uid of userIds) {
-      const created = await this.db.notification.create({
-        data: {
-          userId: uid,
-          senderId: user.id,
-          title,
-          message,
-          mode: body?.type ?? 'general',
-        },
-      });
-      const count = await this.db.notification.count({
-        where: { userId: uid, readAt: null, deletedAt: null },
-      });
-      this.realtimeGateway.emitNotificationNew(uid, {
-        id: created.id,
-        title: created.title,
-        message: created.message,
-        type: created.mode ?? 'general',
-        is_read: false,
-        created_at: created.createdAt.toISOString(),
-      });
-      this.realtimeGateway.emitUnreadCount(uid, count);
-      await this.realtimeGateway.emitDashboardStatsForUser(uid);
-    }
-    return { sent: userIds.length, success: true };
+
+    const { sent } = await this.notificationsService.sendBroadcast(user.id, userIds, {
+      title,
+      message,
+      type: body?.type,
+      allowReplies: body?.allowReplies,
+    });
+    return { sent, success: true };
   }
 
   @Get('notifications/recipients')
@@ -2564,52 +2497,35 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = schoolIdParam ?? (await this.getSchoolId(user.id));
     if (!schoolId) return { roles: [], users: [] };
-    const [teacherCount, studentCount] = await Promise.all([
+
+    const [teacherCount, studentCount, teacherUsers, studentUsers] = await Promise.all([
       this.db.teacherSchool.count({ where: { schoolId } }),
       this.db.studentSchool.count({ where: { schoolId } }),
-    ]);
-    const roles = [
-      teacherCount > 0
-        ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount }
-        : null,
-      studentCount > 0
-        ? { id: 'role:student', name: 'All Students', count: studentCount }
-        : null,
-    ].filter(
-      (r): r is { id: string; name: string; count: number } => r !== null,
-    );
-    const [teacherUsers, studentUsers] = await Promise.all([
       this.db.teacherSchool.findMany({ where: { schoolId } }),
       this.db.studentSchool.findMany({
         where: { schoolId },
         include: { student: { include: { profile: true } } },
       }),
     ]);
-    const teacherIds = Array.from(
-      new Set(teacherUsers.map((t) => t.teacherId)),
-    );
-    const teachers =
-      teacherIds.length > 0
-        ? await this.db.user.findMany({
-            where: { id: { in: teacherIds } },
-            include: { profile: true },
-          })
-        : [];
+
+    const roles = [
+      teacherCount > 0 ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount } : null,
+      studentCount > 0 ? { id: 'role:student', name: 'All Students', count: studentCount } : null,
+    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
+
+    const teacherIds = Array.from(new Set(teacherUsers.map((t) => t.teacherId)));
+    const teachers = teacherIds.length > 0
+      ? await this.db.user.findMany({ where: { id: { in: teacherIds } }, include: { profile: true } })
+      : [];
     const teacherById = new Map(teachers.map((t) => [t.id, t]));
+
     const users = [
       ...teacherUsers
         .map((ts) => {
           const t = teacherById.get(ts.teacherId);
-          return t
-            ? {
-                id: String(t.id),
-                name: t.profile?.fullName ?? t.email,
-                email: t.email,
-                role: 'teacher' as const,
-              }
-            : null;
+          return t ? { id: String(t.id), name: t.profile?.fullName ?? t.email, email: t.email, role: 'teacher' as const } : null;
         })
-        .filter((u) => u !== null),
+        .filter((u): u is NonNullable<typeof u> => u !== null),
       ...studentUsers.map((ss) => ({
         id: String(ss.student.id),
         name: ss.student.profile?.fullName ?? ss.student.email,
@@ -2624,43 +2540,12 @@ export class SchoolAdminExtraController {
   async updateNotification(
     @CurrentUser() user: { id: number },
     @Param('id') id: string,
-    @Body() body: { is_read?: boolean },
+    @Body() body: { is_read?: boolean; deleted?: boolean },
   ) {
-    const n = await this.db.notification.findFirst({
-      where: { id, userId: user.id },
-    });
-    if (!n) throw new BadRequestException('Notification not found');
-
-    if (body?.is_read === true) {
-      await this.db.notification.update({
-        where: { id },
-        data: { readAt: new Date() },
-      });
-      const unreadCount = await this.db.notification.count({
-        where: { userId: user.id, readAt: null, deletedAt: null },
-      });
-      this.realtimeGateway.emitNotificationRead(user.id, {
-        notification_id: id,
-        mark_all: false,
-        read_at: new Date().toISOString(),
-      });
-      this.realtimeGateway.emitUnreadCount(user.id, unreadCount);
-      await this.realtimeGateway.emitDashboardStatsForUser(user.id);
-    } else if (body?.is_read === false) {
-      await this.db.notification.update({
-        where: { id },
-        data: { readAt: null },
-      });
-      const unreadCount = await this.db.notification.count({
-        where: { userId: user.id, readAt: null, deletedAt: null },
-      });
-      this.realtimeGateway.emitUnreadCount(user.id, unreadCount);
-    }
-
-    return { success: true };
+    return this.notificationsService.markNotification(user.id, id, body);
   }
 
-  // Reports – TeacherReport (school-scoped)
+  // Reports - TeacherReport (school-scoped)
 
   @Get('reports')
   async getReports(
@@ -2757,6 +2642,47 @@ export class SchoolAdminExtraController {
     };
   }
 
+  @Patch('reports/bulk')
+  async bulkUpdateReports(
+    @CurrentUser() user: { id: number },
+    @Body() body: { report_ids?: string[]; action?: string },
+  ) {
+    const schoolId = await this.getSchoolId(user.id);
+    if (!schoolId) throw new BadRequestException('School not found');
+    const ids = Array.isArray(body?.report_ids) ? body.report_ids : [];
+    if (ids.length === 0) return { approved: 0 };
+    const action =
+      body?.action === 'approve'
+        ? 'approved'
+        : body?.action === 'reject'
+          ? 'rejected'
+          : 'submitted';
+    await this.db.teacherReport.updateMany({
+      where: { id: { in: ids }, schoolId },
+      data: { status: action },
+    });
+    const affectedReports = await this.db.teacherReport.findMany({
+      where: { id: { in: ids }, schoolId },
+      select: { teacherId: true },
+    });
+    const [schoolAdmins, adminUsers] = await Promise.all([
+      this.db.schoolAdmin.findMany({
+        where: { schoolId },
+        select: { userId: true },
+      }),
+      this.db.user.findMany({
+        where: { role: Role.admin },
+        select: { id: true },
+      }),
+    ]);
+    await this.realtimeGateway.emitDashboardStatsForUsers([
+      ...affectedReports.map((r) => r.teacherId),
+      ...schoolAdmins.map((s) => s.userId),
+      ...adminUsers.map((u) => u.id),
+    ]);
+    return { approved: ids.length };
+  }
+
   @Patch('reports/:id')
   async updateReport(
     @CurrentUser() user: { id: number },
@@ -2806,48 +2732,7 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  @Patch('reports/bulk')
-  async bulkUpdateReports(
-    @CurrentUser() user: { id: number },
-    @Body() body: { report_ids?: string[]; action?: string },
-  ) {
-    const schoolId = await this.getSchoolId(user.id);
-    if (!schoolId) throw new BadRequestException('School not found');
-    const ids = Array.isArray(body?.report_ids) ? body.report_ids : [];
-    if (ids.length === 0) return { approved: 0 };
-    const action =
-      body?.action === 'approve'
-        ? 'approved'
-        : body?.action === 'reject'
-          ? 'rejected'
-          : 'submitted';
-    await this.db.teacherReport.updateMany({
-      where: { id: { in: ids }, schoolId },
-      data: { status: action },
-    });
-    const affectedReports = await this.db.teacherReport.findMany({
-      where: { id: { in: ids }, schoolId },
-      select: { teacherId: true },
-    });
-    const [schoolAdmins, adminUsers] = await Promise.all([
-      this.db.schoolAdmin.findMany({
-        where: { schoolId },
-        select: { userId: true },
-      }),
-      this.db.user.findMany({
-        where: { role: Role.admin },
-        select: { id: true },
-      }),
-    ]);
-    await this.realtimeGateway.emitDashboardStatsForUsers([
-      ...affectedReports.map((r) => r.teacherId),
-      ...schoolAdmins.map((s) => s.userId),
-      ...adminUsers.map((u) => u.id),
-    ]);
-    return { approved: ids.length };
-  }
-
-  // Leaves – TeacherLeave (school-scoped)
+  // Leaves - TeacherLeave (school-scoped)
 
   @Get('leaves')
   async listLeaves(
@@ -3110,7 +2995,7 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  // Password reset requests – scoped to this school admin's school
+  // Password reset requests - scoped to this school admin's school
 
   @Get('password-reset-requests')
   async listPasswordResetRequests(
@@ -3178,10 +3063,10 @@ export class SchoolAdminExtraController {
     return { success: true };
   }
 
-  // Data export – stub for compatibility
+  // Data export - stub for compatibility
 
   @Get('data/export')
-  async exportData(@CurrentUser() _user: { id: number }) {
+  exportData(@CurrentUser() _user: { id: number }) {
     return { export: [], message: 'Export not implemented.' };
   }
 

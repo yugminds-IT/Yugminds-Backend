@@ -39,35 +39,7 @@ export class CommonExtraController {
     };
   }
 
-  // Public success stories & logos
-
-  @Get('success-stories')
-  async publicSuccessStories(@Query('limit') limit?: string) {
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
-      : 50;
-    const sections = await this.db.successStorySection.findMany({
-      where: { isPublished: true },
-      orderBy: { orderIndex: 'asc' },
-      take,
-    });
-    return {
-      sections: sections.map((s) => ({
-        id: s.id,
-        title: s.title,
-        body_primary: s.bodyPrimary,
-        body_secondary: s.bodySecondary,
-        body_tertiary: s.bodyTertiary,
-        image_url: s.imageUrl,
-        storage_path: s.storagePath,
-        background: s.background,
-        image_position: s.imagePosition,
-        order_index: s.orderIndex,
-        is_published: s.isPublished,
-        updated_at: s.updatedAt.toISOString(),
-      })),
-    };
-  }
+  // Public logos
 
   @Get('api/logos')
   async publicLogosApi(@Query('limit') limit?: string) {
@@ -373,13 +345,14 @@ export class CommonExtraController {
   // Misc helpers
 
   @Post('admin/upload')
+  @UseGuards(JwtAuthGuard)
   @UseInterceptors(
     FileInterceptor('file', {
       // Set a high cap; we enforce tighter limits in code per upload `type`.
       limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
     }),
   )
-  async adminUpload(
+  adminUpload(
     @Body() body: Record<string, unknown>,
     @UploadedFile()
     file?: {
@@ -388,7 +361,7 @@ export class CommonExtraController {
       size: number;
       buffer: Buffer;
     },
-  ): Promise<{
+  ): {
     success: boolean;
     file: {
       url: string;
@@ -397,7 +370,7 @@ export class CommonExtraController {
       mime_type: string;
       size: number;
     };
-  }> {
+  } {
     if (!file) throw new BadRequestException('file is required');
 
     const type = String(body?.type ?? '').trim();

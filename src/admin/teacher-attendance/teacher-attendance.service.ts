@@ -53,13 +53,19 @@ export class AdminTeacherAttendanceService {
    * List all teachers with today's attendance summary and per-teacher status.
    * If teacherId is provided, returns attendance records for that teacher only.
    */
-  async list(schoolId?: string, teacherId?: string) {
+  async list(schoolId?: string, teacherId?: string, from?: string, to?: string) {
     if (teacherId) {
       const tid = parseInt(teacherId, 10);
       if (isNaN(tid))
         return { summary: null, teacherTodayStatus: {}, attendance: [] };
+      const dateFilter: { gte?: Date; lte?: Date } = {};
+      if (from) dateFilter.gte = new Date(`${from}T00:00:00.000Z`);
+      if (to) dateFilter.lte = new Date(`${to}T23:59:59.999Z`);
       const records = await this.db.attendance.findMany({
-        where: { teacherId: tid },
+        where: {
+          teacherId: tid,
+          ...(from || to ? { date: dateFilter } : {}),
+        },
         orderBy: { date: 'desc' },
         take: 365,
       });
@@ -188,7 +194,7 @@ export class AdminTeacherAttendanceService {
   /**
    * Get monthly attendance data (per teacher or aggregated) for a given month.
    */
-  async monthly(month?: string) {
+  async monthly(month?: string, schoolId?: string) {
     const now = new Date();
     const year = month ? parseInt(month.slice(0, 4), 10) : now.getFullYear();
     const monthNum = month
@@ -199,7 +205,13 @@ export class AdminTeacherAttendanceService {
     const monthKey = `${year}-${String(monthNum).padStart(2, '0')}`;
 
     const teachers = await this.db.user.findMany({
-      where: { role: Role.teacher, isActive: true },
+      where: {
+        role: Role.teacher,
+        isActive: true,
+        ...(schoolId
+          ? { teacherSchools: { some: { schoolId } } }
+          : {}),
+      },
       include: {
         profile: true,
         teacherSchools: { include: { school: true } },

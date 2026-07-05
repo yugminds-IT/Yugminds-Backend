@@ -15,13 +15,18 @@ export class AdminTeacherAttendanceController {
   list(
     @Query('school_id') schoolId?: string,
     @Query('teacherId') teacherId?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
   ) {
-    return this.service.list(schoolId, teacherId);
+    return this.service.list(schoolId, teacherId, from, to);
   }
 
   @Get('monthly')
-  monthly(@Query('month') month?: string) {
-    return this.service.monthly(month);
+  monthly(
+    @Query('month') month?: string,
+    @Query('school_id') schoolId?: string,
+  ) {
+    return this.service.monthly(month, schoolId);
   }
 
   @Post('mark-missing')

@@ -26,6 +26,7 @@ export type RealtimeNotification = {
   message: string;
   type: string | null;
   is_read: boolean;
+  allow_replies?: boolean;
   created_at: string;
 };
 
@@ -45,6 +46,14 @@ export class RealtimeGateway
   server!: Server;
 
   private readonly logger = new Logger(RealtimeGateway.name);
+
+  // Per-user dashboard stats cache. Each entry expires after STATS_TTL_MS.
+  // Prevents N×10 DB queries when many users connect/reconnect simultaneously.
+  private readonly statsCache = new Map<
+    number,
+    { data: Record<string, unknown>; expiry: number }
+  >();
+  private readonly STATS_TTL_MS = 30_000; // 30 seconds
 
   constructor(
     private readonly jwtService: JwtService,
@@ -100,7 +109,23 @@ export class RealtimeGateway
     return user.id;
   }
 
+  /** Invalidate cached stats for a user (call after grading / attendance change). */
+  invalidateStatsCache(userId: number): void {
+    this.statsCache.delete(userId);
+  }
+
   private async buildDashboardStatsForUser(
+    userId: number,
+  ): Promise<Record<string, unknown>> {
+    const cached = this.statsCache.get(userId);
+    if (cached && Date.now() < cached.expiry) return cached.data;
+
+    const data = await this._computeDashboardStats(userId);
+    this.statsCache.set(userId, { data, expiry: Date.now() + this.STATS_TTL_MS });
+    return data;
+  }
+
+  private async _computeDashboardStats(
     userId: number,
   ): Promise<Record<string, unknown>> {
     const user = await this.db.user.findUnique({

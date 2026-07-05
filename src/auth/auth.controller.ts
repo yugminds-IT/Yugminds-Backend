@@ -59,7 +59,8 @@ export class AuthController {
   ) {}
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  // Per-IP (pre-auth). Raised for shared school IPs while keeping signup-spam protection.
+  @Throttle({ default: { limit: 50, ttl: 60000 } })
   @Post('signup')
   async signup(
     @Body() dto: SignupDto,
@@ -92,7 +93,9 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  // Per-IP (pre-auth). Raised so a whole computer lab logging in at once isn't
+  // blocked, while still capping brute-force attempts from a single IP.
+  @Throttle({ default: { limit: 100, ttl: 60000 } })
   @Post('login')
   async login(
     @Body() dto: LoginDto,
@@ -117,7 +120,10 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  // Per-IP (the refresh cookie carries no access token, so there's no req.user
+  // to key on). Token refresh fires automatically for every active session, so
+  // many students on one school IP need plenty of headroom.
+  @Throttle({ default: { limit: 300, ttl: 60000 } })
   @Post('refresh')
   async refresh(
     @Req() req: Request,
@@ -155,7 +161,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Throttle({ default: { limit: 50, ttl: 60000 } })
   @Post('password-reset-request')
   async passwordResetRequest(
     @Body()
@@ -168,7 +174,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Throttle({ default: { limit: 50, ttl: 60000 } })
   @Post('verify-reset-token')
   async verifyResetToken(
     @Body() body: { requestId?: string; token?: string },
@@ -189,7 +195,7 @@ export class AuthController {
   }
 
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Throttle({ default: { limit: 50, ttl: 60000 } })
   @Post('complete-password-reset')
   async completePasswordReset(
     @Body() body: { requestId?: string; token?: string; newPassword?: string },

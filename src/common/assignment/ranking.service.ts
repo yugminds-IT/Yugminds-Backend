@@ -150,7 +150,9 @@ export class RankingService {
 
   /**
    * Canonical school-wide rank computation stored in StudentScoreSummary.
-   * Uses graded-only submissions and respects retakeScoringRule.
+   * Course scores are read from the already-computed StudentScore rows (set by
+   * recomputeStudentScores) to avoid double-scanning submissions. Daily scores
+   * are aggregated fresh from graded submissions for DAILY-type assignments.
    * Formula: overall = courseScore * 0.6 + dailyScore * 0.4
    */
   async recomputeStudentScoreSummary(schoolId: string): Promise<void> {
@@ -161,123 +163,107 @@ export class RankingService {
     const studentIds = schoolStudents.map((s) => s.studentId);
     if (!studentIds.length) return;
 
-    const [schoolAssignments, courseAccess] = await Promise.all([
-      this.db.assignment.findMany({
-        where: { schoolId },
-        select: {
-          id: true,
-          assignmentType: true,
-          totalMarks: true,
-          retakeScoringRule: true,
-        },
-      }),
-      this.db.courseAccess.findMany({
-        where: { schoolId },
-        select: { courseId: true },
-      }),
-    ]);
-    const accessibleCourseIds = [
-      ...new Set(courseAccess.map((c) => c.courseId)),
-    ];
-    const courseAssignments = accessibleCourseIds.length
-      ? await this.db.assignment.findMany({
-          where: {
-            OR: [
-              { courseId: { in: accessibleCourseIds } },
-              { chapter: { courseId: { in: accessibleCourseIds } } },
-            ],
-            assignmentType: 'COURSE',
-          },
-          select: {
-            id: true,
-            assignmentType: true,
-            totalMarks: true,
-            retakeScoringRule: true,
-          },
-        })
-      : [];
-
-    const allAssignments = [
-      ...schoolAssignments,
-      ...courseAssignments.filter(
-        (ca) => !schoolAssignments.some((sa) => sa.id === ca.id),
-      ),
-    ];
-    const courseIds = allAssignments
-      .filter((a) => (a as any).assignmentType === 'COURSE')
-      .map((a) => a.id);
-    const dailyIds = allAssignments
-      .filter((a) => (a as any).assignmentType !== 'COURSE')
-      .map((a) => a.id);
-
-    // Only graded submissions for stored summary
-    const allSubmissions = await this.db.assignmentSubmission.findMany({
+    // --- Course scores: read from already-computed StudentScore rows ---
+    // recomputeStudentScores already aggregated all COURSE assignment submissions
+    // per (student, course, subject), so we just sum those up here instead of
+    // rescanning AssignmentSubmission.
+    const courseScoreRows = await this.db.studentScore.findMany({
       where: {
         studentId: { in: studentIds },
-        assignmentId: { in: allAssignments.map((a) => a.id) },
-        status: 'graded',
+        schoolId,
+        courseId: { not: null },
       },
       select: {
         studentId: true,
-        assignmentId: true,
-        score: true,
-        maxScore: true,
-        attemptNumber: true,
+        cumulativeScore: true,
+        cumulativeMaxScore: true,
       },
-      orderBy: [
-        { studentId: 'asc' },
-        { assignmentId: 'asc' },
-        { attemptNumber: 'asc' },
-      ],
     });
+    const courseByStudent = new Map<number, { total: number; max: number }>();
+    for (const row of courseScoreRows) {
+      const cur = courseByStudent.get(row.studentId) ?? { total: 0, max: 0 };
+      cur.total += Number(row.cumulativeScore);
+      cur.max += Number(row.cumulativeMaxScore);
+      courseByStudent.set(row.studentId, cur);
+    }
 
-    const computeBuckets = (assignmentIds: string[]) => {
+    // --- Daily scores: aggregate from graded DAILY submissions ---
+    const dailyAssignments = await this.db.assignment.findMany({
+      where: { schoolId, assignmentType: 'DAILY' },
+      select: { id: true, totalMarks: true, retakeScoringRule: true },
+    });
+    const dailyIds = dailyAssignments.map((a) => a.id);
+
+    const dailyByStudent = new Map<number, { total: number; max: number }>();
+    if (dailyIds.length && studentIds.length) {
+      const dailySubmissions = await this.db.assignmentSubmission.findMany({
+        where: {
+          studentId: { in: studentIds },
+          assignmentId: { in: dailyIds },
+          status: 'graded',
+        },
+        select: {
+          studentId: true,
+          assignmentId: true,
+          score: true,
+          maxScore: true,
+          attemptNumber: true,
+        },
+        orderBy: [
+          { studentId: 'asc' },
+          { assignmentId: 'asc' },
+          { attemptNumber: 'asc' },
+        ],
+      });
+      const asgnRuleMap = new Map(
+        dailyAssignments.map((a) => [
+          a.id,
+          String(a.retakeScoringRule ?? 'latest').toLowerCase(),
+        ]),
+      );
       const bestByKey = new Map<
         string,
         { studentId: number; score: number; maxScore: number }
       >();
-      for (const s of allSubmissions) {
-        if (!assignmentIds.includes(s.assignmentId)) continue;
-        const asgn = allAssignments.find((a) => a.id === s.assignmentId);
-        const rule = String(asgn?.retakeScoringRule ?? 'latest').toLowerCase();
+      for (const s of dailySubmissions) {
+        const rule = asgnRuleMap.get(s.assignmentId) ?? 'latest';
         const key = `${s.studentId}:${s.assignmentId}`;
         const existing = bestByKey.get(key);
-        if (!existing) {
-          bestByKey.set(key, {
-            studentId: s.studentId,
-            score: Number(s.score ?? 0),
-            maxScore: Number(s.maxScore ?? asgn?.totalMarks ?? 0),
-          });
-        } else if (
-          rule === 'highest' &&
-          Number(s.score ?? 0) > existing.score
+        if (
+          !existing ||
+          (rule === 'highest' && Number(s.score ?? 0) > existing.score)
         ) {
           bestByKey.set(key, {
             studentId: s.studentId,
             score: Number(s.score ?? 0),
-            maxScore: Number(s.maxScore ?? asgn?.totalMarks ?? 0),
+            maxScore:
+              Number(s.maxScore ?? 0) ||
+              Number(
+                dailyAssignments.find((a) => a.id === s.assignmentId)
+                  ?.totalMarks ?? 0,
+              ),
           });
-        } else {
-          // latest: ascending order means last write wins
+        } else if (rule !== 'highest') {
+          // latest: ascending order → last write wins
           bestByKey.set(key, {
             studentId: s.studentId,
             score: Number(s.score ?? 0),
-            maxScore: Number(s.maxScore ?? asgn?.totalMarks ?? 0),
+            maxScore:
+              Number(s.maxScore ?? 0) ||
+              Number(
+                dailyAssignments.find((a) => a.id === s.assignmentId)
+                  ?.totalMarks ?? 0,
+              ),
           });
         }
       }
-      const byStudent = new Map<number, { total: number; max: number }>();
       for (const val of bestByKey.values()) {
-        const cur = byStudent.get(val.studentId) ?? { total: 0, max: 0 };
+        const cur = dailyByStudent.get(val.studentId) ?? { total: 0, max: 0 };
         cur.total += val.score;
         cur.max += val.maxScore;
-        byStudent.set(val.studentId, cur);
+        dailyByStudent.set(val.studentId, cur);
       }
-      return byStudent;
-    };
-
-    const courseByStudent = computeBuckets(courseIds);
-    const dailyByStudent = computeBuckets(dailyIds);
+    }
 
     const scores = studentIds.map((sid) => {
       const c = courseByStudent.get(sid);

@@ -1,15 +1,43 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 
 @Injectable()
 export class StudentDashboardService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly dailyAssignments: StudentDailyAssignmentsService,
+  ) {}
+
+  /**
+   * Pending/completed counts for DAILY (school-scoped homework) assignments.
+   * "Completed" = has any submission; "pending" = visible but not yet submitted.
+   * Counted independently of course enrollment so daily-only students are covered.
+   */
+  private async dailyAssignmentCounts(studentId: number) {
+    const { assignments } =
+      await this.dailyAssignments.getVisibleDailyAssignments(studentId);
+    const ids = assignments.map((a) => a.id);
+    const submitted =
+      ids.length > 0
+        ? await this.db.assignmentSubmission
+            .findMany({
+              where: { studentId, assignmentId: { in: ids } },
+              select: { assignmentId: true },
+              distinct: ['assignmentId'],
+            })
+            .then((rows) => rows.length)
+        : 0;
+    return { pending: Math.max(0, ids.length - submitted), completed: submitted };
+  }
 
   async get(user: { id: number }) {
     const enrollments = await this.db.studentCourse.findMany({
       where: { studentId: user.id },
       select: { courseId: true },
     });
+
+    const daily = await this.dailyAssignmentCounts(user.id);
 
     if (enrollments.length === 0) {
       const unreadNotifications = await this.db.notification.count({
@@ -19,8 +47,8 @@ export class StudentDashboardService {
         stats: {
           activeCourses: 0,
           completedCourses: 0,
-          pendingAssignments: 0,
-          completedAssignments: 0,
+          pendingAssignments: daily.pending,
+          completedAssignments: daily.completed,
           unreadNotifications,
         },
       };
@@ -165,8 +193,10 @@ export class StudentDashboardService {
       stats: {
         activeCourses,
         completedCourses,
-        pendingAssignments: Math.max(0, assignmentIds.length - submissionCount),
-        completedAssignments: submissionCount,
+        // Combine course (chapter-based) + daily (school homework) assignments.
+        pendingAssignments:
+          Math.max(0, assignmentIds.length - submissionCount) + daily.pending,
+        completedAssignments: submissionCount + daily.completed,
         unreadNotifications,
       },
     };

@@ -29,7 +29,7 @@ import * as QRCode from 'qrcode';
 import { randomUUID } from 'crypto';
 import { BatchGenerateCertificatesDto } from './dto/batch-generate-certificates.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
-import { AuditService } from '../../common/audit/audit.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
 
 interface PlaceholderResponse {
@@ -48,7 +48,7 @@ export class AdminExtraController {
     private readonly passwordResetRequestService: PasswordResetRequestService,
     private readonly monitoringService: MonitoringService,
     private readonly realtimeGateway: RealtimeGateway,
-    private readonly auditService: AuditService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
@@ -60,62 +60,206 @@ export class AdminExtraController {
     };
   }
 
-  // Minimal PDF generator (single page, Helvetica, plain text).
-  // Used by `/admin/reports` so the admin download feature works without extra PDF dependencies.
-  private buildSimplePdf(lines: string[]): Buffer {
-    const escapePdfText = (input: string) =>
-      String(input ?? '')
-        .replace(/\\/g, '\\\\')
-        .replace(/\(/g, '\\(')
-        .replace(/\)/g, '\\)')
-        .replace(/\r?\n/g, ' ')
-        .slice(0, 120);
+  // Styled PDF generator using pdfkit — produces a professional report with logo, header, tables, footer.
+  private buildStyledPdf(opts: {
+    title: string;
+    subtitle: string;
+    generatedAt: Date;
+    filters: Record<string, string>;
+    summaryStats: Array<{ label: string; value: string | number }>;
+    tableColumns: string[];
+    tableRows: string[][];
+  }): Promise<Buffer> {
+    return new Promise((resolve, reject) => {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const PDFDocument = require('pdfkit');
+      const path = require('path');
+      const fs = require('fs');
 
-    const safeLines = (Array.isArray(lines) ? lines : [])
-      .map((l) => escapePdfText(l))
-      .filter((l) => l.length > 0)
-      .slice(0, 30);
+      const doc = new PDFDocument({ margin: 50, size: 'A4' });
+      const chunks: Buffer[] = [];
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+      doc.on('end', () => resolve(Buffer.concat(chunks)));
+      doc.on('error', reject);
 
-    let content = 'BT\n/F1 14 Tf\n72 720 Td\n';
-    for (let i = 0; i < safeLines.length; i++) {
-      content += `(${safeLines[i]}) Tj\n`;
-      if (i < safeLines.length - 1) content += '0 -18 Td\n';
-    }
-    if (safeLines.length === 0) {
-      content += '(No data) Tj\n';
-    }
-    content += 'ET';
+      // ── Brand colours ─────────────────────────────────────────────────────────
+      const PRIMARY   = '#1e3a5f'; // dark navy
+      const ACCENT    = '#0ea5e9'; // sky blue
+      const LIGHT_BG  = '#f0f7ff'; // very light blue
+      const TEXT_DARK = '#1a202c';
+      const TEXT_MID  = '#4a5568';
+      const TEXT_LITE = '#718096';
+      const WHITE     = '#ffffff';
+      const ROW_ALT   = '#f7fafc';
+      const BORDER    = '#e2e8f0';
 
-    const contentBytes = Buffer.from(content, 'ascii');
+      const PAGE_W = doc.page.width;
+      const PAGE_H = doc.page.height;
+      const MARGIN = 50;
+      const CONTENT_W = PAGE_W - MARGIN * 2;
 
-    const header = '%PDF-1.4\n';
-    const obj1 = '1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n';
-    const obj2 = '2 0 obj<< /Type /Pages /Kids [3 0 R] /Count 1 >>endobj\n';
-    const obj3 =
-      '3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources<< /Font<< /F1 5 0 R >> >> /Contents 4 0 R >>endobj\n';
-    const obj4 = `4 0 obj<< /Length ${contentBytes.length} >>stream\n${content}\nendstream endobj\n`;
-    const obj5 =
-      '5 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj\n';
+      // ── Helper: draw a filled rounded rect ────────────────────────────────────
+      const fillRect = (x: number, y: number, w: number, h: number, colour: string, r = 0) => {
+        doc.save().roundedRect(x, y, w, h, r).fill(colour).restore();
+      };
 
-    const objects = [obj1, obj2, obj3, obj4, obj5];
-    let pdf = header;
-    const offsets: number[] = [0]; // object 0
-    for (const obj of objects) {
-      offsets.push(Buffer.byteLength(pdf, 'ascii'));
-      pdf += obj;
-    }
+      // ── HEADER BAND ───────────────────────────────────────────────────────────
+      fillRect(0, 0, PAGE_W, 90, PRIMARY);
 
-    const xrefOffset = Buffer.byteLength(pdf, 'ascii');
-    const size = objects.length + 1;
+      // Logo (if file exists)
+      const logoPath = path.join(__dirname, '..', '..', '..', 'assets', 'yugminds-logo.png');
+      if (fs.existsSync(logoPath)) {
+        try {
+          doc.image(logoPath, MARGIN, 18, { height: 54, fit: [160, 54] });
+        } catch { /* skip logo on error */ }
+      }
 
-    let xref = `xref\n0 ${size}\n`;
-    xref += '0000000000 65535 f \n';
-    for (let i = 1; i < offsets.length; i++) {
-      xref += `${String(offsets[i]).padStart(10, '0')} 00000 n \n`;
-    }
+      // Right side: platform name + report title
+      doc
+        .fillColor(WHITE)
+        .font('Helvetica-Bold')
+        .fontSize(18)
+        .text('Yugminds Education Platform', 0, 22, { align: 'right' })
+        .font('Helvetica')
+        .fontSize(10)
+        .fillColor(ACCENT)
+        .text(opts.title, 0, 46, { align: 'right' });
 
-    const trailer = `trailer<< /Size ${size} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
-    return Buffer.from(pdf + xref + trailer, 'ascii');
+      // Accent stripe below header
+      fillRect(0, 90, PAGE_W, 4, ACCENT);
+
+      let y = 114;
+
+      // ── META ROW ──────────────────────────────────────────────────────────────
+      fillRect(MARGIN, y, CONTENT_W, 44, LIGHT_BG, 6);
+
+      const formattedDate = opts.generatedAt.toLocaleDateString('en-IN', {
+        day: '2-digit', month: 'long', year: 'numeric',
+      });
+      const formattedTime = opts.generatedAt.toLocaleTimeString('en-IN', {
+        hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+
+      const filterStr = Object.entries(opts.filters)
+        .filter(([k]) => k !== 'type')
+        .map(([k, v]) => `${k}: ${v}`)
+        .join('  |  ') || 'All records';
+
+      doc
+        .fillColor(TEXT_MID)
+        .font('Helvetica')
+        .fontSize(9)
+        .text(`Generated: ${formattedDate} at ${formattedTime}`, MARGIN + 12, y + 8)
+        .text(`Filters applied: ${filterStr}`, MARGIN + 12, y + 22);
+
+      y += 60;
+
+      // ── SUBTITLE ─────────────────────────────────────────────────────────────
+      doc
+        .fillColor(PRIMARY)
+        .font('Helvetica-Bold')
+        .fontSize(15)
+        .text(opts.subtitle, MARGIN, y);
+      y += 22;
+      fillRect(MARGIN, y, 48, 3, ACCENT, 2);
+      y += 16;
+
+      // ── SUMMARY STATS CARDS ───────────────────────────────────────────────────
+      if (opts.summaryStats.length > 0) {
+        const cardW = Math.floor(CONTENT_W / opts.summaryStats.length) - 8;
+        opts.summaryStats.forEach((stat, i) => {
+          const cx = MARGIN + i * (cardW + 8);
+          fillRect(cx, y, cardW, 52, WHITE, 6);
+          // Border
+          doc.save().roundedRect(cx, y, cardW, 52, 6).stroke(BORDER).restore();
+          doc
+            .fillColor(ACCENT)
+            .font('Helvetica-Bold')
+            .fontSize(20)
+            .text(String(stat.value), cx + 10, y + 8, { width: cardW - 20 });
+          doc
+            .fillColor(TEXT_LITE)
+            .font('Helvetica')
+            .fontSize(8)
+            .text(stat.label.toUpperCase(), cx + 10, y + 32, { width: cardW - 20 });
+        });
+        y += 68;
+      }
+
+      // ── DATA TABLE ────────────────────────────────────────────────────────────
+      if (opts.tableColumns.length > 0) {
+        const colCount = opts.tableColumns.length;
+        const colW = Math.floor(CONTENT_W / colCount);
+
+        // Table header row
+        fillRect(MARGIN, y, CONTENT_W, 24, PRIMARY, 4);
+        opts.tableColumns.forEach((col, i) => {
+          doc
+            .fillColor(WHITE)
+            .font('Helvetica-Bold')
+            .fontSize(8)
+            .text(col.toUpperCase(), MARGIN + i * colW + 8, y + 7, { width: colW - 12, ellipsis: true });
+        });
+        y += 24;
+
+        // Table body rows
+        const ROW_H = 20;
+        opts.tableRows.forEach((row, rowIdx) => {
+          // Page break check
+          if (y + ROW_H > PAGE_H - 70) {
+            doc.addPage();
+            y = MARGIN;
+            // Reprint header on new page
+            fillRect(MARGIN, y, CONTENT_W, 24, PRIMARY, 4);
+            opts.tableColumns.forEach((col, i) => {
+              doc
+                .fillColor(WHITE)
+                .font('Helvetica-Bold')
+                .fontSize(8)
+                .text(col.toUpperCase(), MARGIN + i * colW + 8, y + 7, { width: colW - 12, ellipsis: true });
+            });
+            y += 24;
+          }
+
+          const rowBg = rowIdx % 2 === 0 ? WHITE : ROW_ALT;
+          fillRect(MARGIN, y, CONTENT_W, ROW_H, rowBg);
+          // Bottom border
+          doc.save().moveTo(MARGIN, y + ROW_H).lineTo(MARGIN + CONTENT_W, y + ROW_H).stroke(BORDER).restore();
+
+          row.forEach((cell, i) => {
+            doc
+              .fillColor(TEXT_DARK)
+              .font('Helvetica')
+              .fontSize(8)
+              .text(String(cell ?? '—'), MARGIN + i * colW + 8, y + 5, { width: colW - 12, ellipsis: true });
+          });
+          y += ROW_H;
+        });
+
+        if (opts.tableRows.length === 0) {
+          fillRect(MARGIN, y, CONTENT_W, 36, ROW_ALT);
+          doc
+            .fillColor(TEXT_LITE)
+            .font('Helvetica')
+            .fontSize(10)
+            .text('No records found for the selected filters.', MARGIN, y + 11, { width: CONTENT_W, align: 'center' });
+          y += 36;
+        }
+      }
+
+      // ── FOOTER ────────────────────────────────────────────────────────────────
+      const footerY = PAGE_H - 46;
+      fillRect(0, footerY, PAGE_W, 46, PRIMARY);
+      doc
+        .fillColor(WHITE)
+        .font('Helvetica')
+        .fontSize(8)
+        .text('Yugminds Education Platform  ·  www.yugminds.com  ·  Confidential — for school use only', 0, footerY + 10, { align: 'center' })
+        .fillColor(ACCENT)
+        .text(`Generated on ${formattedDate}`, 0, footerY + 26, { align: 'center' });
+
+      doc.end();
+    });
   }
 
   // Monitoring / analytics / stats
@@ -129,7 +273,7 @@ export class AdminExtraController {
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
   ) {
-    const take = limit ? Math.min(parseInt(limit, 10) || 20, 500) : 20;
+    const take = limit ? Math.min(parseInt(limit, 10) || 20, 5000) : 20;
     const skip = offset ? Math.max(parseInt(offset, 10) || 0, 0) : 0;
 
     // Build DB-level filter to avoid loading all students into memory
@@ -144,16 +288,33 @@ export class AdminExtraController {
       studentWhere.studentSchools = { some: schoolFilter };
     }
 
-    const allStudentsFiltered = await this.db.user.findMany({
-      where: studentWhere,
-      include: {
-        profile: true,
-        studentSchools: true,
-      },
-      orderBy: { createdAt: 'desc' },
-    });
+    // Run count and page fetch in parallel — no in-memory pagination.
+    const [totalStudents, allStudentsFiltered] = await Promise.all([
+      this.db.user.count({ where: studentWhere }),
+      this.db.user.findMany({
+        where: studentWhere,
+        select: {
+          id: true,
+          email: true,
+          profile: {
+            select: { fullName: true, phone: true },
+          },
+          studentSchools: {
+            select: {
+              schoolId: true,
+              grade: true,
+              section: true,
+              joiningCode: true,
+              isActive: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+    ]);
 
-    const totalStudents = allStudentsFiltered.length;
     const allStudentIds = allStudentsFiltered.map((u) => u.id);
 
     if (allStudentIds.length === 0) {
@@ -338,19 +499,8 @@ export class AdminExtraController {
       };
     });
 
-    const studentsDto = studentsDtoAll.slice(skip, skip + take);
-
-    const studentsWithProgress = studentsDtoAll.filter(
-      (s) => s.total_courses > 0,
-    );
-    const studentsCompleted = studentsDtoAll.filter(
-      (s) => s.total_courses > 0 && s.completed_courses === s.total_courses,
-    );
-    const averageSystemProgress =
-      studentsDtoAll.length > 0
-        ? studentsDtoAll.reduce((sum, s) => sum + s.average_progress, 0) /
-          studentsDtoAll.length
-        : 0;
+    // Page is already sliced at DB level; rename for clarity.
+    const studentsDto = studentsDtoAll;
 
     const allCourseIds: string[] = Array.from(
       new Set<string>(studentCourses.map((sc) => sc.courseId)),
@@ -430,14 +580,77 @@ export class AdminExtraController {
         s.count > 0 ? Number((s.sum_progress / s.count).toFixed(2)) : 0,
     }));
 
+    // ── System-wide summary (NOT page-bound) ──────────────────────────────
+    // studentsDtoAll above is only the current page, so every summary metric
+    // except total_students must be computed with dedicated scope-aware queries
+    // or the cards reflect just the 50 visible students.
+    const hasStudentFilter = Boolean(schoolId || grade || studentId);
+    const summaryStudentIds = hasStudentFilter
+      ? (
+          await this.db.user.findMany({
+            where: studentWhere,
+            select: { id: true },
+          })
+        ).map((u) => u.id)
+      : null;
+    const studentScope = summaryStudentIds
+      ? { studentId: { in: summaryStudentIds } }
+      : {};
+    const courseScope = courseId ? { courseId } : {};
+
+    const [
+      totalSchoolsCount,
+      totalCoursesCount,
+      activeStudentGroups,
+      enrolledStudentGroups,
+      incompleteStudentGroups,
+      perStudentAvg,
+    ] = await Promise.all([
+      schoolId ? Promise.resolve(1) : this.db.school.count(),
+      this.db.course.count(),
+      this.db.courseProgress.groupBy({
+        by: ['studentId'],
+        where: { progress: { gt: 0 }, ...studentScope, ...courseScope },
+      }),
+      this.db.studentCourse.groupBy({
+        by: ['studentId'],
+        where: { ...studentScope, ...courseScope },
+      }),
+      this.db.studentCourse.groupBy({
+        by: ['studentId'],
+        where: { completedAt: null, ...studentScope, ...courseScope },
+      }),
+      this.db.courseProgress.groupBy({
+        by: ['studentId'],
+        where: { ...studentScope, ...courseScope },
+        _avg: { progress: true },
+      }),
+    ]);
+
+    const activeStudentsCount = activeStudentGroups.length;
+    const enrolledIds = new Set(enrolledStudentGroups.map((g) => g.studentId));
+    const incompleteIds = new Set(
+      incompleteStudentGroups.map((g) => g.studentId),
+    );
+    // A student "completed" all courses when they have enrollments and none
+    // remain incomplete (StudentCourse.completedAt is the source of truth).
+    const completedStudentsCount = [...enrolledIds].filter(
+      (id) => !incompleteIds.has(id),
+    ).length;
+    const systemAvgProgress =
+      totalStudents > 0
+        ? perStudentAvg.reduce((sum, r) => sum + (r._avg.progress ?? 0), 0) /
+          totalStudents
+        : 0;
+
     return {
       students: studentsDto,
       schools: schoolsDto,
       courses: coursesDto,
       summary: {
         total_students: totalStudents,
-        students_with_progress: studentsWithProgress.length,
-        students_completed: studentsCompleted.length,
+        students_with_progress: activeStudentsCount,
+        students_completed: completedStudentsCount,
         average_school_progress:
           schoolsDto.length > 0
             ? Number(
@@ -447,10 +660,10 @@ export class AdminExtraController {
                 ).toFixed(2),
               )
             : 0,
-        average_system_progress: Number(averageSystemProgress.toFixed(2)),
-        total_courses: allCourseIds.length,
+        average_system_progress: Number(systemAvgProgress.toFixed(2)),
+        total_courses: totalCoursesCount,
         total_teachers: 0,
-        total_schools: schoolsDto.length,
+        total_schools: totalSchoolsCount,
       },
       pagination: {
         limit: take,
@@ -573,6 +786,8 @@ export class AdminExtraController {
           student_count: r.studentCount ?? 0,
           duration_hours: r.durationHours ?? 0,
           notes: r.notes ?? '',
+          admin_notes: (r as any).adminNotes ?? '',
+          status: r.status ?? 'submitted',
           created_at: r.createdAt.toISOString(),
           profiles: teacher
             ? {
@@ -622,7 +837,7 @@ export class AdminExtraController {
 
     const data: Record<string, unknown> = {};
     if (status) data.status = status;
-    if (admin_notes !== undefined) data.notes = admin_notes;
+    if (admin_notes !== undefined) data.adminNotes = admin_notes;
 
     const updated = await this.db.teacherReport.update({
       where: { id },
@@ -631,15 +846,15 @@ export class AdminExtraController {
 
     return {
       success: true,
-      report: { id: updated.id, status: updated.status, notes: updated.notes },
+      report: {
+        id: updated.id,
+        status: updated.status,
+        notes: updated.notes,
+        admin_notes: (updated as any).adminNotes ?? '',
+      },
     };
   }
 
-  @Get('audit-log')
-  getAuditLog(@Query('limit') limit?: string) {
-    const take = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
-    return { entries: this.auditService.list(take) };
-  }
 
   @Get('cache-monitor')
   getCacheMonitor() {
@@ -844,7 +1059,9 @@ export class AdminExtraController {
     if (!pending?.value)
       throw new BadRequestException('MFA enrollment not found');
 
-    const ok = verify({ token: code, secret: pending.value });
+    const ok = await Promise.resolve(
+      verify({ token: code, secret: pending.value }),
+    );
     if (!ok) throw new BadRequestException('Invalid verification code');
 
     await this.db.systemSetting.upsert({
@@ -886,64 +1103,15 @@ export class AdminExtraController {
     @Query('limit') limit?: string,
     @Query('mode') mode?: string,
   ) {
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
-      : 50;
-    const isSent = mode === 'sent';
-
-    const where: Prisma.NotificationWhereInput = isSent
-      ? { senderId: user.id, deletedAt: null }
-      : {
-          userId: user.id,
-          deletedAt: null,
-          // Password reset workflow has its own dashboard tab + badge.
-          // Exclude any notification whose title contains "password reset" (case-insensitive)
-          // to handle both old rows with inconsistent capitalisation.
-          NOT: { title: { contains: 'password reset', mode: 'insensitive' } },
-        };
-
-    const list = await this.db.notification.findMany({
-      where,
-      orderBy: { createdAt: 'desc' },
-      take,
-      include: {
-        user: { include: { profile: { select: { fullName: true } } } },
-        sender: { include: { profile: { select: { fullName: true } } } },
-        _count: { select: { replies: true } },
-      },
-    });
-
-    const profileFromUser = (u: {
-      id: number;
-      email: string;
-      role: string;
-      profile?: { fullName: string | null } | null;
-    }) => ({
-      id: String(u.id),
-      full_name: u.profile?.fullName ?? u.email,
-      email: u.email,
-      role: u.role,
-    });
-
-    const notifications = list.map((n) => ({
-      id: n.id,
-      user_id: n.userId,
-      title: n.title,
-      message: n.message,
-      type: n.mode ?? 'general',
-      is_read: !!n.readAt,
-      created_at: n.createdAt.toISOString(),
-      reply_count: n._count?.replies ?? 0,
-      // Received inbox: show who sent the notification. Sent folder: show each recipient.
-      profiles: isSent
-        ? n.user
-          ? profileFromUser(n.user)
-          : undefined
-        : n.sender
-          ? profileFromUser(n.sender)
-          : undefined,
-    }));
-
+    const take = Math.min(
+      Math.max(parseInt(limit ?? '50', 10) || 50, 1),
+      100,
+    );
+    const m = mode === 'sent' ? 'sent' : 'received';
+    const notifications = await this.notificationsService.listWithProfiles(
+      user.id,
+      { mode: m, limit: take, excludePasswordReset: m === 'received' },
+    );
     return { notifications };
   }
 
@@ -957,6 +1125,7 @@ export class AdminExtraController {
       type?: string;
       recipientType?: string;
       recipients?: string[];
+      allowReplies?: boolean;
     },
   ) {
     const title = String(body?.title ?? '').trim();
@@ -966,7 +1135,6 @@ export class AdminExtraController {
 
     const recipientType = body?.recipientType ?? 'all';
     const recipients = Array.isArray(body?.recipients) ? body.recipients : [];
-
     let userIds: number[] = [];
 
     if (recipientType === 'all') {
@@ -976,63 +1144,75 @@ export class AdminExtraController {
       });
       userIds = users.map((u) => u.id);
     } else if (recipientType === 'role') {
-      for (const r of recipients) {
-        if (r === 'role:teacher') {
-          const u = await this.db.user.findMany({
-            where: { role: Role.teacher, isActive: true },
-            select: { id: true },
-          });
-          userIds.push(...u.map((x) => x.id));
-        } else if (r === 'role:student') {
-          const u = await this.db.user.findMany({
-            where: { role: Role.student, isActive: true },
-            select: { id: true },
-          });
-          userIds.push(...u.map((x) => x.id));
-        } else if (r === 'role:school_admin') {
-          // Only send to school_admin users who have an actual SchoolAdmin record
-          const schoolAdminUserIds = (
+      const roleFilters: Record<string, () => Promise<number[]>> = {
+        'role:teacher': async () =>
+          (
+            await this.db.user.findMany({
+              where: { role: Role.teacher, isActive: true },
+              select: { id: true },
+            })
+          ).map((u) => u.id),
+        'role:student': async () =>
+          (
+            await this.db.user.findMany({
+              where: { role: Role.student, isActive: true },
+              select: { id: true },
+            })
+          ).map((u) => u.id),
+        'role:admin': async () =>
+          (
+            await this.db.user.findMany({
+              where: { role: Role.admin, isActive: true },
+              select: { id: true },
+            })
+          ).map((u) => u.id),
+        'role:school_admin': async () => {
+          const saIds = (
             await this.db.schoolAdmin.findMany({ select: { userId: true } })
           ).map((sa) => sa.userId);
-          const u = await this.db.user.findMany({
-            where: {
-              role: Role.school_admin,
-              isActive: true,
-              id: { in: schoolAdminUserIds },
-            },
-            select: { id: true },
-          });
-          userIds.push(...u.map((x) => x.id));
-        } else if (r === 'role:admin') {
-          const u = await this.db.user.findMany({
-            where: { role: Role.admin, isActive: true },
-            select: { id: true },
-          });
-          userIds.push(...u.map((x) => x.id));
-        }
-      }
+          return (
+            await this.db.user.findMany({
+              where: {
+                role: Role.school_admin,
+                isActive: true,
+                id: { in: saIds },
+              },
+              select: { id: true },
+            })
+          ).map((u) => u.id);
+        },
+      };
+      const results = await Promise.all(
+        recipients
+          .filter((r) => r in roleFilters)
+          .map((r) => roleFilters[r]()),
+      );
+      userIds = results.flat();
     } else if (recipientType === 'school') {
-      for (const schoolId of recipients) {
-        const [teacherIds, studentIds, adminIds] = await Promise.all([
-          this.db.teacherSchool.findMany({
-            where: { schoolId },
-            select: { teacherId: true },
-          }),
-          this.db.studentSchool.findMany({
-            where: { schoolId },
-            select: { studentId: true },
-          }),
-          this.db.schoolAdmin.findMany({
-            where: { schoolId },
-            select: { userId: true },
-          }),
-        ]);
-        userIds.push(
-          ...teacherIds.map((t) => t.teacherId),
-          ...studentIds.map((s) => s.studentId),
-          ...adminIds.map((a) => a.userId),
-        );
-      }
+      const schoolResults = await Promise.all(
+        recipients.map(async (schoolId) => {
+          const [teacherIds, studentIds, adminIds] = await Promise.all([
+            this.db.teacherSchool.findMany({
+              where: { schoolId },
+              select: { teacherId: true },
+            }),
+            this.db.studentSchool.findMany({
+              where: { schoolId },
+              select: { studentId: true },
+            }),
+            this.db.schoolAdmin.findMany({
+              where: { schoolId },
+              select: { userId: true },
+            }),
+          ]);
+          return [
+            ...teacherIds.map((t) => t.teacherId),
+            ...studentIds.map((s) => s.studentId),
+            ...adminIds.map((a) => a.userId),
+          ];
+        }),
+      );
+      userIds = schoolResults.flat();
     } else if (recipientType === 'individual') {
       const parsedIds = recipients
         .map((id) => parseInt(id, 10))
@@ -1044,40 +1224,21 @@ export class AdminExtraController {
       userIds = activeUsers.map((u) => u.id);
     }
 
-    userIds = Array.from(new Set(userIds)).filter((id) => id !== user.id);
-
-    for (const uid of userIds) {
-      const created = await this.db.notification.create({
-        data: {
-          userId: uid,
-          senderId: user.id,
-          title,
-          message,
-          mode: body?.type ?? 'general',
-        },
-      });
-      const count = await this.db.notification.count({
-        where: { userId: uid, readAt: null, deletedAt: null },
-      });
-      this.realtimeGateway.emitNotificationNew(uid, {
-        id: created.id,
-        title: created.title,
-        message: created.message,
-        type: created.mode ?? 'general',
-        is_read: false,
-        created_at: created.createdAt.toISOString(),
-      });
-      this.realtimeGateway.emitUnreadCount(uid, count);
-      await this.realtimeGateway.emitDashboardStatsForUser(uid);
-    }
-
-    return { recipients: userIds.length, success: true };
+    const { sent } = await this.notificationsService.sendBroadcast(
+      user.id,
+      userIds,
+      {
+        title,
+        message,
+        type: body?.type,
+        allowReplies: body?.allowReplies,
+      },
+    );
+    return { recipients: sent, success: true };
   }
 
   @Get('notifications/recipients')
   async listNotificationRecipients() {
-    // For school_admin role: only count users who have an actual SchoolAdmin record
-    // (prevents orphaned User rows from inflating the count)
     const schoolAdminUserIds = (
       await this.db.schoolAdmin.findMany({ select: { userId: true } })
     ).map((sa) => sa.userId);
@@ -1104,35 +1265,27 @@ export class AdminExtraController {
         ? { id: 'role:student', name: 'All Students', count: studentCount }
         : null,
       schoolAdminCount > 0
-        ? {
-            id: 'role:school_admin',
-            name: 'All School Admins',
-            count: schoolAdminCount,
-          }
+        ? { id: 'role:school_admin', name: 'All School Admins', count: schoolAdminCount }
         : null,
       adminCount > 0
         ? { id: 'role:admin', name: 'All Admins', count: adminCount }
         : null,
-    ].filter(
-      (r): r is { id: string; name: string; count: number } => r !== null,
-    );
+    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
 
-    const schools = await this.db.school.findMany({
-      select: { id: true, name: true },
-      orderBy: { name: 'asc' },
-    });
-
-    const users = await this.db.user.findMany({
-      where: {
-        isActive: true,
-        OR: [
-          { role: { not: Role.school_admin } },
-          { role: Role.school_admin, id: { in: schoolAdminUserIds } },
-        ],
-      },
-      take: 500,
-      include: { profile: { select: { fullName: true } } },
-    });
+    const [schools, users] = await Promise.all([
+      this.db.school.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      this.db.user.findMany({
+        where: {
+          isActive: true,
+          OR: [
+            { role: { not: Role.school_admin } },
+            { role: Role.school_admin, id: { in: schoolAdminUserIds } },
+          ],
+        },
+        take: 500,
+        include: { profile: { select: { fullName: true } } },
+      }),
+    ]);
 
     return {
       roles,
@@ -1154,41 +1307,272 @@ export class AdminExtraController {
     const now = new Date();
     const datePart = now.toISOString().slice(0, 10);
 
-    const title =
-      type === 'schools'
-        ? 'Schools Report'
-        : type === 'teachers'
-          ? 'Teacher Performance Report'
-          : type === 'students'
-            ? 'Student Enrollment Report'
-            : type === 'courses'
-              ? 'Courses Report'
-              : 'System Report';
+    const titleMap: Record<string, string> = {
+      schools: 'Schools Report',
+      teachers: 'Teacher Performance Report',
+      students: 'Student Enrollment Report',
+      courses: 'Course Progress Report',
+    };
+    const title = titleMap[type] ?? 'System Report';
 
-    const lines: string[] = [
-      title,
-      `Generated at: ${now.toISOString()}`,
-      `Filters: ${Object.keys(query).length ? JSON.stringify(query) : 'none'}`,
+    // ── Parse filter IDs from query params ────────────────────────────────────
+    const parseIds = (raw: string | undefined): string[] | undefined => {
+      if (!raw || !raw.trim()) return undefined;
+      const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+      return ids.length > 0 ? ids : undefined;
+    };
+
+    const filterSchoolIds   = parseIds(query.school_ids);
+    const filterTeacherIds  = parseIds(query.teacher_ids);
+    const filterStudentIds  = parseIds(query.student_ids);
+    const filterCourseIds   = parseIds(query.course_ids);
+
+    // ── Resolve human-readable filter labels for PDF display ─────────────────
+    const humanFilters: Record<string, string> = {};
+    try {
+      if (filterSchoolIds) {
+        const schools = await this.db.school.findMany({
+          where: { id: { in: filterSchoolIds } },
+          select: { name: true },
+        });
+        humanFilters['Schools'] = schools.map((s) => s.name).join(', ');
+      }
+    } catch { /* non-critical */ }
+
+    // ── Scoped summary counts ─────────────────────────────────────────────────
+    let schoolCount = 0, teacherCount = 0, studentCount = 0, courseCount = 0;
+    try {
+      [schoolCount, teacherCount, studentCount, courseCount] = await Promise.all([
+        this.db.school.count({
+          where: {
+            isActive: true,
+            ...(filterSchoolIds ? { id: { in: filterSchoolIds } } : {}),
+          },
+        }),
+        this.db.user.count({
+          where: {
+            role: Role.teacher,
+            isActive: true,
+            ...(filterTeacherIds ? { id: { in: filterTeacherIds.map(Number) } } : {}),
+            ...(filterSchoolIds && !filterTeacherIds
+              ? { teacherSchools: { some: { schoolId: { in: filterSchoolIds } } } }
+              : {}),
+          },
+        }),
+        this.db.user.count({
+          where: {
+            role: Role.student,
+            isActive: true,
+            ...(filterStudentIds ? { id: { in: filterStudentIds.map(Number) } } : {}),
+            ...(filterSchoolIds && !filterStudentIds
+              ? { studentSchools: { some: { schoolId: { in: filterSchoolIds } } } }
+              : {}),
+          },
+        }),
+        this.db.course.count({
+          where: {
+            isPublished: true,
+            ...(filterCourseIds ? { id: { in: filterCourseIds } } : {}),
+          },
+        }),
+      ]);
+    } catch { /* keep zero counts */ }
+
+    const summaryStats = [
+      { label: 'Schools', value: schoolCount },
+      { label: 'Teachers', value: teacherCount },
+      { label: 'Students', value: studentCount },
+      { label: 'Courses', value: courseCount },
     ];
 
-    // Optionally enrich with counts when the report type is known.
+    // ── Fetch per-type detailed rows (with filters applied) ───────────────────
+    let tableColumns: string[] = [];
+    let tableRows: string[][] = [];
+
     try {
-      const [schoolCount, teacherCount, studentCount, courseCount] =
-        await Promise.all([
-          this.db.school.count({ where: { isActive: true } }),
-          this.db.user.count({ where: { role: Role.teacher, isActive: true } }),
-          this.db.user.count({ where: { role: Role.student, isActive: true } }),
-          this.db.course.count({ where: { isPublished: true } }),
+      if (type === 'schools') {
+        tableColumns = ['#', 'School Name', 'Code', 'Status', 'Registered On'];
+        const schools = await this.db.school.findMany({
+          where: {
+            ...(filterSchoolIds ? { id: { in: filterSchoolIds } } : {}),
+          },
+          orderBy: { name: 'asc' },
+          take: 500,
+          select: { id: true, name: true, schoolCode: true, isActive: true, createdAt: true },
+        });
+        tableRows = schools.map((s, i) => [
+          String(i + 1),
+          s.name,
+          s.schoolCode ?? '—',
+          s.isActive ? 'Active' : 'Inactive',
+          s.createdAt ? new Date(s.createdAt).toLocaleDateString('en-IN') : '—',
         ]);
-      lines.push(`Active schools: ${schoolCount}`);
-      lines.push(`Active teachers: ${teacherCount}`);
-      lines.push(`Active students: ${studentCount}`);
-      lines.push(`Published courses: ${courseCount}`);
-    } catch {
-      // Keep it minimal; PDF should still download even if counts fail.
+      } else if (type === 'teachers') {
+        tableColumns = ['#', 'Name', 'School', 'Classes Taught', 'Attendance', 'Avg Students/Class', 'Leaves Taken', 'Status'];
+
+        const teacherWhere: any = {
+          role: Role.teacher,
+          ...(filterTeacherIds ? { id: { in: filterTeacherIds.map(Number) } } : {}),
+          ...(filterSchoolIds && !filterTeacherIds
+            ? { teacherSchools: { some: { schoolId: { in: filterSchoolIds } } } }
+            : {}),
+        };
+
+        const teachers = await this.db.user.findMany({
+          where: teacherWhere,
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+          select: {
+            id: true,
+            email: true,
+            isActive: true,
+            createdAt: true,
+            profile: { select: { fullName: true } },
+            teacherSchools: { take: 1, select: { schoolId: true, school: { select: { name: true } } } },
+          },
+        });
+
+        const teacherIds = teachers.map((t) => t.id);
+
+        // Fetch performance data in parallel for all teachers
+        const schoolIdFilter = filterSchoolIds ?? undefined;
+        const [reportAgg, attendanceAgg, leaveAgg] = await Promise.all([
+          // TeacherReport: count of reports (classes taught) + avg student count per teacher
+          this.db.teacherReport.groupBy({
+            by: ['teacherId'],
+            where: {
+              teacherId: { in: teacherIds },
+              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
+            },
+            _count: { id: true },
+            _avg: { studentCount: true },
+          }),
+          // Attendance: count present days per teacher
+          this.db.attendance.groupBy({
+            by: ['teacherId'],
+            where: {
+              teacherId: { in: teacherIds },
+              status: 'present',
+              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
+            },
+            _count: { id: true },
+          }),
+          // TeacherLeave: count approved leaves per teacher
+          this.db.teacherLeave.groupBy({
+            by: ['teacherId'],
+            where: {
+              teacherId: { in: teacherIds },
+              status: 'approved',
+              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
+            },
+            _count: { id: true },
+          }),
+        ]);
+
+        // Build lookup maps
+        const reportMap = new Map(reportAgg.map((r: any) => [r.teacherId, r]));
+        const attendMap = new Map(attendanceAgg.map((r: any) => [r.teacherId, r._count.id]));
+        const leaveMap  = new Map(leaveAgg.map((r: any) => [r.teacherId, r._count.id]));
+
+        tableRows = teachers.map((t, i) => {
+          const rep   = reportMap.get(t.id) as any;
+          const classesTaught = rep?._count?.id ?? 0;
+          const avgStudents   = rep?._avg?.studentCount != null
+            ? Math.round(rep._avg.studentCount)
+            : '—';
+          const presentDays   = attendMap.get(t.id) ?? 0;
+          const leavesTaken   = leaveMap.get(t.id) ?? 0;
+
+          return [
+            String(i + 1),
+            (t as any).profile?.fullName ?? t.email ?? '—',
+            (t as any).teacherSchools?.[0]?.school?.name ?? '—',
+            String(classesTaught),
+            presentDays > 0 ? `${presentDays} days` : '—',
+            String(avgStudents),
+            String(leavesTaken),
+            t.isActive ? 'Active' : 'Inactive',
+          ];
+        });
+      } else if (type === 'students') {
+        tableColumns = ['#', 'Name', 'Email', 'School', 'Grade', 'Section', 'Enrolled On'];
+        const students = await this.db.user.findMany({
+          where: {
+            role: Role.student,
+            ...(filterStudentIds ? { id: { in: filterStudentIds.map(Number) } } : {}),
+            ...(filterSchoolIds && !filterStudentIds
+              ? { studentSchools: { some: { schoolId: { in: filterSchoolIds } } } }
+              : {}),
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+          select: {
+            id: true,
+            email: true,
+            createdAt: true,
+            profile: { select: { fullName: true } },
+            studentSchools: {
+              take: 1,
+              select: {
+                grade: true,
+                section: true,
+                school: { select: { name: true } },
+              },
+            },
+          },
+        });
+        tableRows = students.map((s, i) => {
+          const ss = (s as any).studentSchools?.[0];
+          return [
+            String(i + 1),
+            (s as any).profile?.fullName ?? s.email ?? '—',
+            s.email ?? '—',
+            ss?.school?.name ?? '—',
+            ss?.grade ?? '—',
+            ss?.section ?? '—',
+            s.createdAt ? new Date(s.createdAt).toLocaleDateString('en-IN') : '—',
+          ];
+        });
+      } else if (type === 'courses') {
+        tableColumns = ['#', 'Course Title', 'Status', 'School Access', 'Published On'];
+        const courses = await this.db.course.findMany({
+          where: {
+            ...(filterCourseIds ? { id: { in: filterCourseIds } } : {}),
+            ...(filterSchoolIds && !filterCourseIds
+              ? { courseAccess: { some: { schoolId: { in: filterSchoolIds } } } }
+              : {}),
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 500,
+          select: {
+            id: true,
+            title: true,
+            isPublished: true,
+            createdAt: true,
+            _count: { select: { courseAccess: true } },
+          },
+        });
+        tableRows = courses.map((c, i) => [
+          String(i + 1),
+          c.title ?? '—',
+          c.isPublished ? 'Published' : 'Draft',
+          String((c as any)._count?.courseAccess ?? 0),
+          c.createdAt ? new Date(c.createdAt).toLocaleDateString('en-IN') : '—',
+        ]);
+      }
+    } catch (err) {
+      console.error('Report data fetch error:', err);
     }
 
-    const pdf = this.buildSimplePdf(lines);
+    const pdf = await this.buildStyledPdf({
+      title,
+      subtitle: `${title} — ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}`,
+      generatedAt: now,
+      filters: Object.keys(humanFilters).length > 0 ? humanFilters : {},
+      summaryStats,
+      tableColumns,
+      tableRows,
+    });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader(
@@ -1505,11 +1889,11 @@ export class AdminExtraController {
   // Certificates admin
 
   @Post('certificates/generate-all-eligible')
-  generateAllEligibleCertificates(): PlaceholderResponse {
-    return this.buildResponse(
-      '/admin/certificates/generate-all-eligible',
-      'POST',
-    );
+  async generateAllEligibleCertificates(
+    @CurrentUser() user: { id: number },
+  ) {
+    // Delegates to batchGenerateCertificates with no filters = all students, all courses.
+    return this.batchGenerateCertificates(user, { dry_run: false });
   }
 
   @Post('certificates/batch-generate')
@@ -1825,419 +2209,39 @@ export class AdminExtraController {
     }
 
     for (const schoolId of uniqueSchoolIds) {
+      const gradeNames = Array.from(gradesBySchool.get(schoolId) ?? []);
       await this.db.courseAccess.create({
         data: {
           courseId,
           schoolId,
-          grades: Array.from(gradesBySchool.get(schoolId) ?? []),
-        } as any,
+          gradeAccess: {
+            create: gradeNames.map((gradeName) => ({ gradeName })),
+          },
+        },
       });
     }
 
     // Return the freshly saved access in the frontend shape
     const rows = await this.db.courseAccess.findMany({
       where: { courseId },
-      include: { school: { select: { name: true } } },
+      include: { school: { select: { name: true } }, gradeAccess: true },
     });
 
     const course_access = rows.flatMap((row) => {
-      const grades = (row as any).grades as unknown;
       const gradeList =
-        Array.isArray(grades) && grades.length > 0 ? grades : [''];
+        row.gradeAccess.length > 0
+          ? row.gradeAccess.map((g) => g.gradeName)
+          : [''];
       return gradeList.map((grade) => ({
         id: row.id,
         course_id: row.courseId,
         school_id: row.schoolId,
-        grade: String(grade ?? ''),
+        grade,
         schools: row.school ? { name: row.school.name } : undefined,
       }));
     });
 
     return { success: true, course_access };
-  }
-
-  // Success stories
-
-  @Get('success-stories')
-  async listSuccessStories(@Query('published') published?: string) {
-    const where: { isPublished?: boolean } = {};
-    if (published === 'true' || published === '1') where.isPublished = true;
-    if (published === 'false' || published === '0') where.isPublished = false;
-    const sections = await this.db.successStorySection.findMany({
-      where,
-      orderBy: { orderIndex: 'asc' },
-    });
-    return {
-      sections: sections.map((s) => ({
-        id: s.id,
-        title: s.title,
-        body_primary: s.bodyPrimary,
-        body_secondary: s.bodySecondary,
-        body_tertiary: s.bodyTertiary,
-        image_url: s.imageUrl,
-        storage_path: s.storagePath,
-        background: s.background,
-        image_position: s.imagePosition,
-        order_index: s.orderIndex,
-        is_published: s.isPublished,
-        updated_at: s.updatedAt.toISOString(),
-      })),
-    };
-  }
-
-  @Post('success-stories')
-  @UseInterceptors(FileInterceptor('image'))
-  async createSuccessStory(
-    @UploadedFile() file: any,
-    @Body()
-    body: {
-      title?: string;
-      body_primary?: string;
-      body_secondary?: string;
-      body_tertiary?: string;
-      background?: string;
-      image_position?: string;
-      order_index?: string;
-      is_published?: string;
-    },
-  ) {
-    const title = (body?.title ?? '').trim();
-    const bodyPrimary = (body?.body_primary ?? '').trim();
-    if (!title) throw new BadRequestException('title is required');
-    if (!bodyPrimary) throw new BadRequestException('body_primary is required');
-
-    const background = body?.background === 'blue' ? 'blue' : 'white';
-    const imagePosition = body?.image_position === 'right' ? 'right' : 'left';
-    const orderIndex = Math.max(parseInt(body?.order_index ?? '0', 10) || 0, 0);
-    const isPublished =
-      body?.is_published === 'true' || body?.is_published === '1';
-
-    if (!file) throw new BadRequestException('image is required');
-    const allowed = [
-      'image/png',
-      'image/jpeg',
-      'image/svg+xml',
-      'video/mp4',
-      'video/webm',
-      'video/quicktime',
-    ];
-    if (!allowed.includes(file.mimetype))
-      throw new BadRequestException('Unsupported media type');
-    const maxSize = file.mimetype.startsWith('video/')
-      ? 100 * 1024 * 1024
-      : 5 * 1024 * 1024;
-    if (file.size > maxSize)
-      throw new BadRequestException(
-        `File too large (max ${file.mimetype.startsWith('video/') ? '100MB' : '5MB'})`,
-      );
-
-    const base64 = file.buffer.toString('base64');
-    const imageUrl = `data:${file.mimetype};base64,${base64}`;
-
-    const section = await this.db.successStorySection.create({
-      data: {
-        title,
-        bodyPrimary,
-        bodySecondary: body?.body_secondary?.trim() || null,
-        bodyTertiary: body?.body_tertiary?.trim() || null,
-        imageUrl,
-        storagePath: null,
-        background,
-        imagePosition,
-        orderIndex,
-        isPublished,
-      },
-    });
-
-    await this.db.successStoryVersion.create({
-      data: {
-        sectionId: section.id,
-        versionNumber: 1,
-        snapshot: {
-          title: section.title,
-          body_primary: section.bodyPrimary,
-          body_secondary: section.bodySecondary,
-          body_tertiary: section.bodyTertiary,
-          image_url: section.imageUrl,
-          storage_path: section.storagePath,
-          background: section.background,
-          image_position: section.imagePosition,
-          order_index: section.orderIndex,
-          is_published: section.isPublished,
-        },
-      },
-    });
-
-    return {
-      section: {
-        id: section.id,
-        title: section.title,
-        body_primary: section.bodyPrimary,
-        body_secondary: section.bodySecondary,
-        body_tertiary: section.bodyTertiary,
-        image_url: section.imageUrl,
-        storage_path: section.storagePath,
-        background: section.background,
-        image_position: section.imagePosition,
-        order_index: section.orderIndex,
-        is_published: section.isPublished,
-        updated_at: section.updatedAt.toISOString(),
-      },
-    };
-  }
-
-  @Get('success-stories/:id')
-  async getSuccessStory(@Param('id') id: string) {
-    const section = await this.db.successStorySection.findUnique({
-      where: { id },
-    });
-    if (!section) throw new BadRequestException('Section not found');
-    return {
-      section: {
-        id: section.id,
-        title: section.title,
-        body_primary: section.bodyPrimary,
-        body_secondary: section.bodySecondary,
-        body_tertiary: section.bodyTertiary,
-        image_url: section.imageUrl,
-        storage_path: section.storagePath,
-        background: section.background,
-        image_position: section.imagePosition,
-        order_index: section.orderIndex,
-        is_published: section.isPublished,
-        updated_at: section.updatedAt.toISOString(),
-      },
-    };
-  }
-
-  @Put('success-stories/:id')
-  @UseInterceptors(FileInterceptor('image'))
-  updateSuccessStory(
-    @Param('id') id: string,
-    @UploadedFile() file: any,
-    @Body()
-    body: {
-      title?: string;
-      body_primary?: string;
-      body_secondary?: string;
-      body_tertiary?: string;
-      background?: string;
-      image_position?: string;
-      order_index?: string;
-      is_published?: string;
-    },
-  ) {
-    return this.db.$transaction(async (tx) => {
-      const existing = await tx.successStorySection.findUnique({
-        where: { id },
-      });
-      if (!existing) throw new BadRequestException('Section not found');
-
-      const title =
-        body?.title !== undefined ? body.title.trim() : existing.title;
-      const bodyPrimary =
-        body?.body_primary !== undefined
-          ? body.body_primary.trim()
-          : existing.bodyPrimary;
-      if (!title) throw new BadRequestException('title is required');
-      if (!bodyPrimary)
-        throw new BadRequestException('body_primary is required');
-
-      const background = body?.background
-        ? body.background === 'blue'
-          ? 'blue'
-          : 'white'
-        : existing.background;
-      const imagePosition = body?.image_position
-        ? body.image_position === 'right'
-          ? 'right'
-          : 'left'
-        : existing.imagePosition;
-      const orderIndex =
-        body?.order_index !== undefined
-          ? Math.max(parseInt(body.order_index, 10) || 0, 0)
-          : existing.orderIndex;
-      const isPublished =
-        body?.is_published !== undefined
-          ? body.is_published === 'true' || body.is_published === '1'
-          : existing.isPublished;
-
-      let imageUrl = existing.imageUrl;
-      if (file) {
-        const allowed = [
-          'image/png',
-          'image/jpeg',
-          'image/svg+xml',
-          'video/mp4',
-          'video/webm',
-          'video/quicktime',
-        ];
-        if (!allowed.includes(file.mimetype))
-          throw new BadRequestException('Unsupported media type');
-        const maxSize = file.mimetype.startsWith('video/')
-          ? 100 * 1024 * 1024
-          : 5 * 1024 * 1024;
-        if (file.size > maxSize)
-          throw new BadRequestException(
-            `File too large (max ${file.mimetype.startsWith('video/') ? '100MB' : '5MB'})`,
-          );
-        const base64 = file.buffer.toString('base64');
-        imageUrl = `data:${file.mimetype};base64,${base64}`;
-      }
-
-      const updated = await tx.successStorySection.update({
-        where: { id },
-        data: {
-          title,
-          bodyPrimary,
-          bodySecondary:
-            body?.body_secondary !== undefined
-              ? body.body_secondary.trim() || null
-              : existing.bodySecondary,
-          bodyTertiary:
-            body?.body_tertiary !== undefined
-              ? body.body_tertiary.trim() || null
-              : existing.bodyTertiary,
-          imageUrl,
-          background,
-          imagePosition,
-          orderIndex,
-          isPublished,
-        },
-      });
-
-      const max = await tx.successStoryVersion.aggregate({
-        where: { sectionId: id },
-        _max: { versionNumber: true },
-      });
-      const nextVersion = (max._max.versionNumber ?? 0) + 1;
-
-      await tx.successStoryVersion.create({
-        data: {
-          sectionId: id,
-          versionNumber: nextVersion,
-          snapshot: {
-            title: updated.title,
-            body_primary: updated.bodyPrimary,
-            body_secondary: updated.bodySecondary,
-            body_tertiary: updated.bodyTertiary,
-            image_url: updated.imageUrl,
-            storage_path: updated.storagePath,
-            background: updated.background,
-            image_position: updated.imagePosition,
-            order_index: updated.orderIndex,
-            is_published: updated.isPublished,
-          },
-        },
-      });
-
-      return {
-        section: {
-          id: updated.id,
-          title: updated.title,
-          body_primary: updated.bodyPrimary,
-          body_secondary: updated.bodySecondary,
-          body_tertiary: updated.bodyTertiary,
-          image_url: updated.imageUrl,
-          storage_path: updated.storagePath,
-          background: updated.background,
-          image_position: updated.imagePosition,
-          order_index: updated.orderIndex,
-          is_published: updated.isPublished,
-          updated_at: updated.updatedAt.toISOString(),
-        },
-      };
-    });
-  }
-
-  @Delete('success-stories/:id')
-  async deleteSuccessStory(@Param('id') id: string) {
-    await this.db.successStorySection
-      .delete({ where: { id } })
-      .catch((e: { code?: string }) => {
-        if (e?.code === 'P2025')
-          throw new BadRequestException('Section not found');
-        throw e;
-      });
-    return { success: true };
-  }
-
-  @Get('success-stories/:id/versions')
-  async listSuccessStoryVersions(@Param('id') id: string) {
-    const versions = await this.db.successStoryVersion.findMany({
-      where: { sectionId: id },
-      orderBy: { versionNumber: 'desc' },
-      take: 50,
-    });
-    return {
-      versions: versions.map((v) => ({
-        id: v.id,
-        version_number: v.versionNumber,
-        created_at: v.createdAt.toISOString(),
-      })),
-    };
-  }
-
-  @Post('success-stories/:id/revert')
-  async revertSuccessStory(
-    @Param('id') id: string,
-    @Body() body: { version_id?: string },
-  ) {
-    const versionId = (body?.version_id ?? '').trim();
-    if (!versionId) throw new BadRequestException('version_id is required');
-
-    return this.db.$transaction(async (tx) => {
-      const version = await tx.successStoryVersion.findFirst({
-        where: { id: versionId, sectionId: id },
-      });
-      if (!version) throw new BadRequestException('Version not found');
-
-      const snap = version.snapshot as any;
-      const updated = await tx.successStorySection.update({
-        where: { id },
-        data: {
-          title: String(snap.title ?? '').trim(),
-          bodyPrimary: String(snap.body_primary ?? '').trim(),
-          bodySecondary:
-            snap.body_secondary != null ? String(snap.body_secondary) : null,
-          bodyTertiary:
-            snap.body_tertiary != null ? String(snap.body_tertiary) : null,
-          imageUrl: snap.image_url != null ? String(snap.image_url) : null,
-          storagePath:
-            snap.storage_path != null ? String(snap.storage_path) : null,
-          background: snap.background === 'blue' ? 'blue' : 'white',
-          imagePosition: snap.image_position === 'right' ? 'right' : 'left',
-          orderIndex: Number(snap.order_index) || 0,
-          isPublished: !!snap.is_published,
-        },
-      });
-
-      const max = await tx.successStoryVersion.aggregate({
-        where: { sectionId: id },
-        _max: { versionNumber: true },
-      });
-      const nextVersion = (max._max.versionNumber ?? 0) + 1;
-      await tx.successStoryVersion.create({
-        data: {
-          sectionId: id,
-          versionNumber: nextVersion,
-          snapshot: {
-            title: updated.title,
-            body_primary: updated.bodyPrimary,
-            body_secondary: updated.bodySecondary,
-            body_tertiary: updated.bodyTertiary,
-            image_url: updated.imageUrl,
-            storage_path: updated.storagePath,
-            background: updated.background,
-            image_position: updated.imagePosition,
-            order_index: updated.orderIndex,
-            is_published: updated.isPublished,
-          },
-        },
-      });
-
-      return { success: true };
-    });
   }
 
   // ─── Contact Submissions ─────────────────────────────────────────────────────

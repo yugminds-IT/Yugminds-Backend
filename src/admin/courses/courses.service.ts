@@ -165,7 +165,7 @@ export class AdminCoursesService {
     courseAccess: Array<{
       id: string;
       schoolId: string;
-      grades?: unknown;
+      gradeAccess?: Array<{ gradeName: string }>;
       school?: { name: string } | null;
     }>;
   }): CourseListItem {
@@ -173,21 +173,17 @@ export class AdminCoursesService {
     const grades: string[] = [];
     const course_access: CourseListItem['course_access'] = [];
     course.courseAccess.forEach((ca) => {
-      if (Array.isArray(ca.grades)) {
-        ca.grades.forEach((g: string) => {
-          if (g && !grades.includes(g)) grades.push(g);
-        });
+      const gradeList = (ca.gradeAccess ?? []).map((g) => g.gradeName).filter(Boolean);
+      for (const g of gradeList) {
+        if (!grades.includes(g)) grades.push(g);
       }
-      const gradeList = Array.isArray(ca.grades)
-        ? (ca.grades as string[]).filter(Boolean)
-        : [];
       const normalizedGrades = gradeList.length > 0 ? gradeList : [''];
       for (const grade of normalizedGrades) {
         course_access.push({
           id: ca.id,
           course_id: course.id,
           school_id: ca.schoolId,
-          grade: typeof grade === 'string' ? grade : String(grade ?? ''),
+          grade,
           schools: ca.school ? { name: ca.school.name } : undefined,
         });
       }
@@ -233,7 +229,7 @@ export class AdminCoursesService {
     const courses = await this.db.course.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
-        courseAccess: { include: { school: { select: { name: true } } } },
+        courseAccess: { include: { school: { select: { name: true } }, gradeAccess: true } },
         chapters: {
           select: {
             id: true,
@@ -260,7 +256,7 @@ export class AdminCoursesService {
             },
           },
         },
-        courseAccess: { include: { school: { select: { name: true } } } },
+        courseAccess: { include: { school: { select: { name: true } }, gradeAccess: true } },
       },
     });
     if (!course) throw new NotFoundException('Course not found');
@@ -538,11 +534,14 @@ export class AdminCoursesService {
     );
     const uniqueSchoolIds = Array.from(gradesBySchool.keys());
     for (const schoolId of uniqueSchoolIds) {
+      const gradeNames = Array.from(gradesBySchool.get(schoolId) ?? []);
       await this.db.courseAccess.create({
         data: {
           courseId: created.id,
           schoolId,
-          grades: Array.from(gradesBySchool.get(schoolId) ?? []),
+          gradeAccess: {
+            create: gradeNames.map((gradeName) => ({ gradeName })),
+          },
         },
       });
     }
@@ -564,6 +563,12 @@ export class AdminCoursesService {
         chapterContents,
         assignments,
       );
+    }
+
+    // Students created before this course existed are not enrolled unless we
+    // sync here (publish() also enrolls, but create can set isPublished directly).
+    if (isPublished && uniqueSchoolIds.length > 0) {
+      await this.enrollmentService.enrollRelevantStudentsInCourse(created.id);
     }
 
     // Notify dashboards
@@ -627,11 +632,14 @@ export class AdminCoursesService {
       const uniqueSchoolIds = Array.from(gradesBySchool.keys());
       impactedSchoolIds = uniqueSchoolIds;
       for (const schoolId of uniqueSchoolIds) {
+        const gradeNames = Array.from(gradesBySchool.get(schoolId) ?? []);
         await this.db.courseAccess.create({
           data: {
             courseId: id,
             schoolId,
-            grades: Array.from(gradesBySchool.get(schoolId) ?? []),
+            gradeAccess: {
+              create: gradeNames.map((gradeName) => ({ gradeName })),
+            },
           },
         });
       }

@@ -6,14 +6,12 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
 import { ok } from '../../common/api-response';
-import { AuditService } from '../../common/audit/audit.service';
 
 @Injectable()
 export class AdminSchoolsService {
   constructor(
     private readonly db: DatabaseService,
     private readonly authService: AuthService,
-    private readonly audit: AuditService,
   ) {}
 
   async list(_schoolId?: string, limit = 50, offset = 0) {
@@ -563,12 +561,6 @@ export class AdminSchoolsService {
     // Delete school row (same id as tenant) and its cascaded data (grades, sections, etc.)
     await this.db.school.deleteMany({ where: { id } });
     const result = await this.db.tenant.delete({ where: { id } });
-    this.audit.log({
-      action: 'DELETE_SCHOOL',
-      entity: 'School',
-      entityId: id,
-      details: `Deleted school ${id}`,
-    });
     return result;
   }
 

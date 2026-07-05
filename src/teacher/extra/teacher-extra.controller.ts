@@ -19,7 +19,10 @@ import { Prisma, Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { RankingService } from '../../common/assignment/ranking.service';
+import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 import { NotificationIdParamDto } from './dto/notification-id-param.dto';
+import { NotificationsService } from '../../common/notifications/notifications.service';
+import { tenantContext } from '../../tenants/tenant-context';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -34,6 +37,8 @@ export class TeacherExtraController {
   constructor(
     private readonly db: DatabaseService,
     private readonly ranking: RankingService,
+    private readonly studentRanking: StudentRankingService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   private async canTeacherAccessAssignment(
@@ -163,6 +168,26 @@ export class TeacherExtraController {
     await this.ranking.recomputeStudentScoreSummary(schoolId);
   }
 
+  /**
+   * Run `fn` in the given school's tenant context.
+   *
+   * Assignment sub-resource routes are addressed by assignment id and carry no
+   * `school_id` for the global tenant interceptor to switch on. When the
+   * assignment belongs to a school other than the teacher's primary one, any
+   * school-scoped work (enrolment lookups, score recomputation, student-filtered
+   * reads) must run in that assignment's school context or the tenant-isolation
+   * layer would filter the data out.
+   */
+  private runInSchool<T>(
+    schoolId: string | null | undefined,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    // Await INSIDE the context callback: Prisma promises are lazy, so a query
+    // awaited outside `tenantContext.run` would execute in the caller's context
+    // instead of the school we just switched to.
+    return schoolId ? tenantContext.run(schoolId, async () => await fn()) : fn();
+  }
+
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
     return {
       endpoint,
@@ -182,39 +207,22 @@ export class TeacherExtraController {
   async listNotifications(
     @CurrentUser() user: { id: number },
     @Query('limit') limit?: string,
+    @Query('mode') mode?: string,
     @Query('school_id') schoolId?: string,
   ) {
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 1, 1), 100)
-      : 50;
-    // If school is provided, ensure teacher is assigned to it
+    const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
     if (schoolId) {
       const assigned = await this.db.teacherSchool.findFirst({
         where: { teacherId: user.id, schoolId },
       });
-      if (!assigned)
-        throw new ForbiddenException('Not assigned to this school');
+      if (!assigned) throw new ForbiddenException('Not assigned to this school');
     }
-    const notifications = await this.db.notification.findMany({
-      where: {
-        deletedAt: null,
-        OR: [{ userId: user.id }, { senderId: user.id }],
-      },
-      orderBy: { createdAt: 'desc' },
-      take,
+    const m = (mode ?? 'all').trim().toLowerCase() as 'received' | 'sent' | 'all';
+    const notifications = await this.notificationsService.listWithProfiles(user.id, {
+      mode: m,
+      limit: take,
     });
-    return {
-      notifications: notifications.map((n) => ({
-        id: n.id,
-        user_id: n.userId,
-        title: n.title,
-        message: n.message,
-        type: n.mode ?? 'general',
-        is_read: !!n.readAt,
-        sender_id: n.senderId ?? null,
-        created_at: n.createdAt.toISOString(),
-      })),
-    };
+    return { notifications };
   }
 
   @Post('notifications')
@@ -228,13 +236,12 @@ export class TeacherExtraController {
       school_id?: string;
       recipientType?: 'role' | 'individual';
       recipients?: string[];
+      allowReplies?: boolean;
     },
   ) {
     const title = (body.title ?? '').trim();
     const message = (body.message ?? '').trim();
-    if (!title || !message) {
-      throw new BadRequestException('Title and message are required');
-    }
+    if (!title || !message) throw new BadRequestException('Title and message are required');
     const schoolId = (body.school_id ?? '').trim();
     if (!schoolId) throw new BadRequestException('school_id is required');
     const assigned = await this.db.teacherSchool.findFirst({
@@ -244,65 +251,45 @@ export class TeacherExtraController {
 
     const recipientType = body.recipientType ?? 'role';
     const recipients = Array.isArray(body.recipients) ? body.recipients : [];
-    if (recipients.length === 0)
-      throw new BadRequestException('At least one recipient is required');
+    if (recipients.length === 0) throw new BadRequestException('At least one recipient is required');
 
     const targetUserIds = new Set<number>();
     if (recipientType === 'role') {
-      for (const r of recipients) {
-        if (r === 'role:student') {
-          const students = await this.db.studentSchool.findMany({
-            where: { schoolId, isActive: true },
-            select: { studentId: true },
-          });
-          students.forEach((s) => targetUserIds.add(s.studentId));
-        } else if (r === 'role:teacher') {
-          const teachers = await this.db.teacherSchool.findMany({
-            where: { schoolId },
-            select: { teacherId: true },
-          });
-          teachers.forEach((t) => targetUserIds.add(t.teacherId));
-        }
-      }
+      const queries = recipients.map((r) => {
+        if (r === 'role:student')
+          return this.db.studentSchool
+            .findMany({ where: { schoolId, isActive: true }, select: { studentId: true } })
+            .then((rows) => rows.map((s) => s.studentId));
+        if (r === 'role:teacher')
+          return this.db.teacherSchool
+            .findMany({ where: { schoolId }, select: { teacherId: true } })
+            .then((rows) => rows.map((t) => t.teacherId));
+        return Promise.resolve([] as number[]);
+      });
+      (await Promise.all(queries)).flat().forEach((id) => targetUserIds.add(id));
+      targetUserIds.delete(user.id);
     } else {
-      // individual: validate each user belongs to this school (student or teacher)
       const ids = recipients
         .map((x) => parseInt(String(x), 10))
         .filter((n) => Number.isFinite(n) && n > 0);
       if (ids.length === 0) throw new BadRequestException('Invalid recipients');
       const [studentRows, teacherRows] = await Promise.all([
-        this.db.studentSchool.findMany({
-          where: { schoolId, studentId: { in: ids } },
-          select: { studentId: true },
-        }),
-        this.db.teacherSchool.findMany({
-          where: { schoolId, teacherId: { in: ids } },
-          select: { teacherId: true },
-        }),
+        this.db.studentSchool.findMany({ where: { schoolId, studentId: { in: ids } }, select: { studentId: true } }),
+        this.db.teacherSchool.findMany({ where: { schoolId, teacherId: { in: ids } }, select: { teacherId: true } }),
       ]);
       studentRows.forEach((s) => targetUserIds.add(s.studentId));
       teacherRows.forEach((t) => targetUserIds.add(t.teacherId));
     }
 
-    // Do not send to self unless explicitly selected as an individual
-    if (recipientType === 'role') targetUserIds.delete(user.id);
-    const userIds = Array.from(targetUserIds);
-    if (userIds.length === 0)
+    if (targetUserIds.size === 0)
       throw new BadRequestException('No valid recipients for this school');
 
-    const mode = (body.type ?? 'general').trim() || 'general';
-    const createdAt = new Date();
-    const result = await this.db.notification.createMany({
-      data: userIds.map((uid) => ({
-        userId: uid,
-        senderId: user.id,
-        title,
-        message,
-        mode,
-        createdAt,
-      })),
-    });
-    return { sent: result.count };
+    const { sent } = await this.notificationsService.sendBroadcast(
+      user.id,
+      Array.from(targetUserIds),
+      { title, message, type: body.type, allowReplies: body.allowReplies },
+    );
+    return { sent };
   }
 
   @Get('notifications/recipients')
@@ -310,76 +297,40 @@ export class TeacherExtraController {
     @CurrentUser() user: { id: number },
     @Query('school_id') schoolId?: string,
   ) {
-    if (!schoolId) {
-      return { roles: [], users: [] };
-    }
+    if (!schoolId) return { roles: [], users: [] };
     const assigned = await this.db.teacherSchool.findFirst({
       where: { teacherId: user.id, schoolId },
     });
     if (!assigned) throw new ForbiddenException('Not assigned to this school');
 
-    // Aggregate role-level options (teacher / student) for the school
-    const [teacherCount, studentCount] = await Promise.all([
+    const [teacherCount, studentCount, teacherUsers, studentUsers] = await Promise.all([
       this.db.teacherSchool.count({ where: { schoolId } }),
       this.db.studentSchool.count({ where: { schoolId } }),
-    ]);
-
-    const roles = [
-      teacherCount > 0
-        ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount }
-        : null,
-      studentCount > 0
-        ? { id: 'role:student', name: 'All Students', count: studentCount }
-        : null,
-    ].filter(
-      (r): r is { id: string; name: string; count: number } => r !== null,
-    );
-
-    // Individual users (teachers + students) for the school
-    const [teacherUsers, studentUsers] = await Promise.all([
-      this.db.teacherSchool.findMany({
-        where: { schoolId },
-      }),
+      this.db.teacherSchool.findMany({ where: { schoolId } }),
       this.db.studentSchool.findMany({
         where: { schoolId },
         include: { student: { include: { profile: true } } },
       }),
     ]);
 
-    // Load teacher user records separately since TeacherSchool has only teacherId
-    const teacherIds = Array.from(
-      new Set(teacherUsers.map((t) => t.teacherId)),
-    );
-    const teachers =
-      teacherIds.length > 0
-        ? await this.db.user.findMany({
-            where: { id: { in: teacherIds } },
-            include: { profile: true },
-          })
-        : [];
-    const teacherById = new Map<number, (typeof teachers)[number]>();
-    teachers.forEach((t) => teacherById.set(t.id, t));
+    const roles = [
+      teacherCount > 0 ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount } : null,
+      studentCount > 0 ? { id: 'role:student', name: 'All Students', count: studentCount } : null,
+    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
+
+    const teacherIds = Array.from(new Set(teacherUsers.map((t) => t.teacherId)));
+    const teachers = teacherIds.length > 0
+      ? await this.db.user.findMany({ where: { id: { in: teacherIds } }, include: { profile: true } })
+      : [];
+    const teacherById = new Map(teachers.map((t) => [t.id, t]));
 
     const users = [
-      ...(teacherUsers
+      ...teacherUsers
         .map((ts) => {
-          const teacher = teacherById.get(ts.teacherId);
-          if (!teacher) return null;
-          return {
-            id: String(teacher.id),
-            name: teacher.profile?.fullName ?? teacher.email,
-            email: teacher.email,
-            role: 'teacher',
-            isActive: true,
-          };
+          const t = teacherById.get(ts.teacherId);
+          return t ? { id: String(t.id), name: t.profile?.fullName ?? t.email, email: t.email, role: 'teacher', isActive: true } : null;
         })
-        .filter((u) => u !== null) as Array<{
-        id: string;
-        name: string | null;
-        email: string | null;
-        role: string;
-        isActive: boolean;
-      }>),
+        .filter((u): u is NonNullable<typeof u> => u !== null),
       ...studentUsers.map((ss) => ({
         id: String(ss.student.id),
         name: ss.student.profile?.fullName ?? ss.student.email,
@@ -388,7 +339,6 @@ export class TeacherExtraController {
         isActive: ss.isActive,
       })),
     ];
-
     return { roles, users };
   }
 
@@ -398,11 +348,7 @@ export class TeacherExtraController {
     @Param() params: NotificationIdParamDto,
   ) {
     const n = await this.db.notification.findFirst({
-      where: {
-        id: params.id,
-        deletedAt: null,
-        OR: [{ userId: user.id }, { senderId: user.id }],
-      },
+      where: { id: params.id, deletedAt: null, OR: [{ userId: user.id }, { senderId: user.id }] },
     });
     if (!n) throw new BadRequestException('Notification not found');
     return {
@@ -423,24 +369,9 @@ export class TeacherExtraController {
   async updateNotification(
     @CurrentUser() user: { id: number },
     @Param('id') id: string,
-    @Body() body: { is_read?: boolean },
+    @Body() body: { is_read?: boolean; deleted?: boolean },
   ) {
-    const notification = await this.db.notification.findUnique({
-      where: { id },
-    });
-    if (!notification || notification.deletedAt)
-      throw new BadRequestException('Notification not found');
-    if (notification.userId !== user.id) {
-      throw new ForbiddenException(
-        'You can only update notifications you received',
-      );
-    }
-    const isRead = !!body?.is_read;
-    await this.db.notification.update({
-      where: { id },
-      data: { readAt: isRead ? new Date() : null },
-    });
-    return { success: true };
+    return this.notificationsService.markNotification(user.id, id, body);
   }
 
   // Reports: implemented in TeacherReportsController
@@ -1071,16 +1002,10 @@ export class TeacherExtraController {
       const dayNum = TeacherExtraController.DAY_OF_WEEK_MAP[day];
       if (dayNum !== undefined) where.dayOfWeek = dayNum;
     }
-    console.log(
-      `[TeacherExtraController] listSchedules: userId=${user.id}, schoolId=${schoolId}, day=${day}`,
-    );
     const schedules = await this.db.classSchedule.findMany({
       where,
       orderBy: [{ dayOfWeek: 'asc' }, { id: 'asc' }],
     });
-    console.log(
-      `[TeacherExtraController] listSchedules: found ${schedules.length} records`,
-    );
     const periodIds = Array.from(new Set(schedules.map((s) => s.periodId)));
     const roomIds = Array.from(
       new Set(schedules.map((s) => s.roomId).filter(Boolean)),
@@ -1535,10 +1460,9 @@ export class TeacherExtraController {
 
     // Notify students when an assignment is first published via PATCH
     if (!wasPublished && updated.isPublished && updated.schoolId) {
-      await this.notifyTargetedStudents(
-        assignmentId,
-        updated.schoolId,
-        updated,
+      const sid = updated.schoolId;
+      await this.runInSchool(sid, () =>
+        this.notifyTargetedStudents(assignmentId, sid, updated),
       );
     }
 
@@ -1769,6 +1693,7 @@ export class TeacherExtraController {
     }
     if (!assignment.schoolId)
       throw new BadRequestException('Assignment has no associated school');
+    const schoolId = assignment.schoolId;
 
     // Open window on the assignment itself
     await this.db.assignment.update({
@@ -1780,66 +1705,70 @@ export class TeacherExtraController {
       },
     });
 
-    // Find all eligible students
-    const enrollments = await this.db.studentSchool.findMany({
-      where: {
-        schoolId: assignment.schoolId,
-        isActive: true,
-      },
-      select: { studentId: true, grade: true },
+    // Resolve eligible students and grant retakes in the assignment's school context.
+    const grantedCount = await this.runInSchool(schoolId, async () => {
+      const enrollments = await this.db.studentSchool.findMany({
+        where: {
+          schoolId,
+          isActive: true,
+        },
+        select: { studentId: true, grade: true },
+      });
+
+      let studentIds = enrollments.map((e) => e.studentId);
+
+      if (body.gradeId) {
+        const grade = await this.db.grade.findUnique({
+          where: { id: body.gradeId },
+          select: { name: true },
+        });
+        if (grade) {
+          studentIds = enrollments
+            .filter((e) => e.grade === grade.name)
+            .map((e) => e.studentId);
+        }
+      }
+
+      // Only grant to students who have already submitted at least once
+      const submittedStudentIds = (
+        await this.db.assignmentSubmission.findMany({
+          where: { assignmentId, studentId: { in: studentIds } },
+          distinct: ['studentId'],
+          select: { studentId: true },
+        })
+      ).map((s) => s.studentId);
+
+      if (submittedStudentIds.length > 0) {
+        await Promise.all(
+          submittedStudentIds.map((studentId) =>
+            this.db.retakeGrant.upsert({
+              where: { assignmentId_studentId: { assignmentId, studentId } },
+              create: {
+                assignmentId,
+                studentId,
+                grantedByTeacherId: user.id,
+                isActive: true,
+                specific: false,
+              },
+              update: { isActive: true, grantedAt: new Date() },
+            }),
+          ),
+        );
+        await this.db.notification.createMany({
+          data: submittedStudentIds.map((studentId) => ({
+            userId: studentId,
+            senderId: user.id,
+            title: `Retake now available: ${assignment.title}`,
+            message: `Retake window is now open for "${assignment.title}". Attempts allowed: ${assignment.maxRetakeAttempts ?? 'Unlimited'}.`,
+            mode: 'assignment_due',
+          })),
+        });
+      }
+
+      return submittedStudentIds.length;
     });
 
-    let studentIds = enrollments.map((e) => e.studentId);
-
-    if (body.gradeId) {
-      const grade = await this.db.grade.findUnique({
-        where: { id: body.gradeId },
-        select: { name: true },
-      });
-      if (grade) {
-        studentIds = enrollments
-          .filter((e) => e.grade === grade.name)
-          .map((e) => e.studentId);
-      }
-    }
-
-    // Only grant to students who have already submitted at least once
-    const submittedStudentIds = (
-      await this.db.assignmentSubmission.findMany({
-        where: { assignmentId, studentId: { in: studentIds } },
-        distinct: ['studentId'],
-        select: { studentId: true },
-      })
-    ).map((s) => s.studentId);
-
-    if (submittedStudentIds.length > 0) {
-      await Promise.all(
-        submittedStudentIds.map((studentId) =>
-          this.db.retakeGrant.upsert({
-            where: { assignmentId_studentId: { assignmentId, studentId } },
-            create: {
-              assignmentId,
-              studentId,
-              grantedByTeacherId: user.id,
-              isActive: true,
-              specific: false,
-            },
-            update: { isActive: true, grantedAt: new Date() },
-          }),
-        ),
-      );
-      await this.db.notification.createMany({
-        data: submittedStudentIds.map((studentId) => ({
-          userId: studentId,
-          senderId: user.id,
-          title: `Retake now available: ${assignment.title}`,
-          message: `Retake window is now open for "${assignment.title}". Attempts allowed: ${assignment.maxRetakeAttempts ?? 'Unlimited'}.`,
-          mode: 'assignment_due',
-        })),
-      });
-    }
-
-    return { success: true, retake_granted_count: submittedStudentIds.length };
+    return { success: true, retake_granted_count: grantedCount };
   }
 
   @Post('assignments/:assignmentId/retake-close')
@@ -1895,6 +1824,14 @@ export class TeacherExtraController {
       number,
       { schoolId: string | null; courseId: string | null }
     >();
+    // Collect notifications to batch-insert after grading loop.
+    const pendingNotifications: Array<{
+      userId: number;
+      senderId: number;
+      title: string;
+      message: string;
+      mode: string;
+    }> = [];
 
     for (const g of body.grades) {
       const assignment = await this.db.assignment.findUnique({
@@ -1936,26 +1873,47 @@ export class TeacherExtraController {
         courseId: assignment.courseId ?? null,
       });
 
-      await this.db.notification.create({
-        data: {
-          userId: updated.studentId,
-          senderId: user.id,
-          title: `Assignment graded: ${assignment.title}`,
-          message: `Your assignment "${assignment.title}" has been graded. Score: ${updated.score ?? 0}/${assignment.totalMarks ?? updated.maxScore ?? 0}.`,
-          mode: 'grade_posted',
-        },
+      // Queue notification — inserted in one batch below.
+      pendingNotifications.push({
+        userId: updated.studentId,
+        senderId: user.id,
+        title: `Assignment graded: ${assignment.title}`,
+        message: `Your assignment "${assignment.title}" has been graded. Score: ${updated.score ?? 0}/${assignment.totalMarks ?? updated.maxScore ?? 0}.`,
+        mode: 'grade_posted',
       });
     }
 
-    // Recompute per-student scores and school-wide summary for all affected students
+    // Single batch insert instead of one INSERT per grade.
+    if (pendingNotifications.length) {
+      await this.db.notification.createMany({ data: pendingNotifications });
+    }
+
+    // Recompute per-student scores, then recompute school summary once per school
+    // (not once per student) to avoid scanning the school repeatedly. Each
+    // recompute runs in its student's/school's tenant context because a batch may
+    // span assignments from different schools the teacher belongs to.
     await Promise.all(
-      [...affectedStudents.entries()].map(
-        async ([sid, { schoolId, courseId }]) => {
-          await this.recomputeStudentScores(sid, courseId);
-          await this.recomputeStudentScoreSummary(sid, schoolId);
-        },
+      [...affectedStudents.entries()].map(([sid, { schoolId, courseId }]) =>
+        this.runInSchool(schoolId, () =>
+          this.recomputeStudentScores(sid, courseId),
+        ),
       ),
     );
+    const affectedSchools = new Set(
+      [...affectedStudents.values()]
+        .map((v) => v.schoolId)
+        .filter(Boolean) as string[],
+    );
+    await Promise.all(
+      [...affectedSchools].map((schoolId) =>
+        this.runInSchool(schoolId, () =>
+          this.recomputeStudentScoreSummary(0, schoolId),
+        ),
+      ),
+    );
+
+    // Drop the shared ranking cache so all dashboards reflect the new grades.
+    if (results.length) this.studentRanking.invalidate();
 
     return { success: true, graded_count: results.length };
   }
@@ -1984,25 +1942,42 @@ export class TeacherExtraController {
     const submissions = await this.db.assignmentSubmission.findMany({
       where: { assignmentId },
       orderBy: [{ studentId: 'asc' }, { attemptNumber: 'asc' }],
-      include: { student: { include: { profile: true } } },
+      include: {
+        student: {
+          include: {
+            profile: true,
+            studentSchools: {
+              where: { isActive: true },
+              include: { school: { select: { name: true } } },
+              take: 1,
+            },
+          },
+        },
+      },
     });
     return {
-      submissions: submissions.map((s) => ({
-        id: s.id,
-        student_id: s.studentId,
-        student_name:
-          s.student.profile?.fullName ??
-          s.student.email ??
-          `Student ${s.studentId}`,
-        attempt_number: s.attemptNumber,
-        status: s.status,
-        score: s.score,
-        max_score: s.maxScore,
-        feedback: s.feedback ?? null,
-        submitted_at: s.submittedAt.toISOString(),
-        graded_at: s.gradedAt?.toISOString() ?? null,
-        is_retake: s.isRetake,
-      })),
+      submissions: submissions.map((s) => {
+        const ss = s.student.studentSchools?.[0];
+        return {
+          id: s.id,
+          student_id: s.studentId,
+          student_name:
+            s.student.profile?.fullName ??
+            s.student.email ??
+            `Student ${s.studentId}`,
+          attempt_number: s.attemptNumber,
+          status: s.status,
+          score: s.score,
+          max_score: s.maxScore,
+          feedback: s.feedback ?? null,
+          submitted_at: s.submittedAt.toISOString(),
+          graded_at: s.gradedAt?.toISOString() ?? null,
+          is_retake: s.isRetake,
+          grade: ss?.grade ?? null,
+          section: ss?.section ?? null,
+          school_name: ss?.school?.name ?? null,
+        };
+      }),
     };
   }
 
@@ -2045,12 +2020,18 @@ export class TeacherExtraController {
         gradedByTeacherId: user.id,
       },
     });
-    await this.recomputeStudentScores(updated.studentId, assignment.courseId);
-    // Also update school-wide summary
-    await this.recomputeStudentScoreSummary(
-      updated.studentId,
-      assignment.schoolId ?? null,
-    );
+    // Recompute scores in the assignment's school context so tenant isolation
+    // does not filter out a student who belongs to a non-primary school.
+    await this.runInSchool(assignment.schoolId, async () => {
+      await this.recomputeStudentScores(updated.studentId, assignment.courseId);
+      // Also update school-wide summary
+      await this.recomputeStudentScoreSummary(
+        updated.studentId,
+        assignment.schoolId ?? null,
+      );
+    });
+    // Drop the shared ranking cache so all dashboards reflect the new grade.
+    this.studentRanking.invalidate();
 
     // Notify student
     const fullAssignment = await this.db.assignment.findUnique({
@@ -2094,19 +2075,21 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     const studentIdNum = Number(studentId);
-    const attempts = await this.db.assignmentSubmission.findMany({
-      where: { assignmentId, studentId: studentIdNum },
-      orderBy: { attemptNumber: 'asc' },
-      select: {
-        id: true,
-        attemptNumber: true,
-        status: true,
-        score: true,
-        maxScore: true,
-        submittedAt: true,
-        gradedAt: true,
-      },
-    });
+    const attempts = await this.runInSchool(assignment.schoolId, () =>
+      this.db.assignmentSubmission.findMany({
+        where: { assignmentId, studentId: studentIdNum },
+        orderBy: { attemptNumber: 'asc' },
+        select: {
+          id: true,
+          attemptNumber: true,
+          status: true,
+          score: true,
+          maxScore: true,
+          submittedAt: true,
+          gradedAt: true,
+        },
+      }),
+    );
     return {
       attempts: attempts.map((a) => ({
         id: a.id,
@@ -2183,35 +2166,14 @@ export class TeacherExtraController {
       select: { schoolId: true },
     });
     const schoolIds = teacherSchools.map((s) => s.schoolId);
-    const courseAccess = schoolIds.length
-      ? await this.db.courseAccess.findMany({
-          where: { schoolId: { in: schoolIds } },
-          select: { courseId: true },
-        })
-      : [];
-    const visibleCourseIds = [...new Set(courseAccess.map((c) => c.courseId))];
-    const assignments = await this.db.assignment.findMany({
-      where: {
-        isPublished: true,
-        OR: [
-          { teacherId: user.id },
-          { schoolId: { in: schoolIds } },
-          { courseId: { in: visibleCourseIds } },
-          { chapter: { courseId: { in: visibleCourseIds } } },
-        ],
-      },
-      select: {
-        id: true,
-        title: true,
-        subject: true,
-        totalMarks: true,
-        assignmentType: true,
-        retakeEnabled: true,
-        retakeScoringRule: true,
-      },
-    });
-    const assignmentIds = assignments.map((a) => a.id);
-    if (!assignmentIds.length) {
+
+    // ── Student-centric approach ─────────────────────────────────────────────
+    // Rather than guessing which assignments are visible via courseAccess, we
+    // find the actual students in the teacher's schools and look up every
+    // assignment they have submitted. This captures BOTH Daily assignments
+    // (school-scoped) and Course assignments (course-enrolled) without relying
+    // on courseAccess rows being present.
+    if (!schoolIds.length) {
       return {
         analytics: {
           summary: {},
@@ -2221,14 +2183,92 @@ export class TeacherExtraController {
         },
       };
     }
+
+    const studentSchools = await this.db.studentSchool.findMany({
+      where: { schoolId: { in: schoolIds }, isActive: true },
+      select: { studentId: true },
+    });
+    const studentIds = [...new Set(studentSchools.map((s) => s.studentId))];
+
+    if (!studentIds.length) {
+      return {
+        analytics: {
+          summary: {},
+          assignments: [],
+          top_students: [],
+          subject_breakdown: [],
+        },
+      };
+    }
+
+    // Fetch all submissions by these students ordered for correct dedup.
     const allSubmissions = await this.db.assignmentSubmission.findMany({
-      where: { assignmentId: { in: assignmentIds } },
+      where: { studentId: { in: studentIds } },
       include: { student: { include: { profile: true } } },
       orderBy: [
         { studentId: 'asc' },
         { assignmentId: 'asc' },
         { attemptNumber: 'asc' },
       ],
+    });
+
+    // Resolve the distinct assignment IDs that appear in these submissions.
+    const submittedAssignmentIds = [
+      ...new Set(allSubmissions.map((s) => s.assignmentId)),
+    ];
+
+    // Also include published assignments explicitly created by this teacher or
+    // scoped to teacher's schools (covers assignments with zero submissions yet).
+    const courseAccess = await this.db.courseAccess.findMany({
+      where: { schoolId: { in: schoolIds } },
+      select: { courseId: true },
+    });
+    const visibleCourseIds = [...new Set(courseAccess.map((c) => c.courseId))];
+
+    const directAssignments = await this.db.assignment.findMany({
+      where: {
+        isPublished: true,
+        OR: [
+          { teacherId: user.id },
+          { schoolId: { in: schoolIds } },
+          ...(visibleCourseIds.length
+            ? [
+                { courseId: { in: visibleCourseIds } },
+                { chapter: { courseId: { in: visibleCourseIds } } },
+              ]
+            : []),
+        ],
+      },
+      select: { id: true },
+    });
+    const directIds = directAssignments.map((a) => a.id);
+
+    const allAssignmentIds = [
+      ...new Set([...submittedAssignmentIds, ...directIds]),
+    ];
+
+    if (!allAssignmentIds.length) {
+      return {
+        analytics: {
+          summary: {},
+          assignments: [],
+          top_students: [],
+          subject_breakdown: [],
+        },
+      };
+    }
+
+    const assignments = await this.db.assignment.findMany({
+      where: { id: { in: allAssignmentIds } },
+      select: {
+        id: true,
+        title: true,
+        subject: true,
+        totalMarks: true,
+        assignmentType: true,
+        retakeEnabled: true,
+        retakeScoringRule: true,
+      },
     });
 
     // Canonical deduplication: graded-only, respect retakeScoringRule per assignment
@@ -2288,57 +2328,14 @@ export class TeacherExtraController {
       };
     });
 
-    // Student leaderboard
-    const byStudent = new Map<
-      number,
-      {
-        name: string;
-        courseTotal: number;
-        courseMax: number;
-        dailyTotal: number;
-        dailyMax: number;
-      }
-    >();
-    for (const s of bestSubmissions) {
-      const asgn = assignments.find((a) => a.id === s.assignmentId);
-      const cur = byStudent.get(s.studentId) ?? {
-        name:
-          s.student.profile?.fullName ??
-          s.student.email ??
-          `Student ${s.studentId}`,
-        courseTotal: 0,
-        courseMax: 0,
-        dailyTotal: 0,
-        dailyMax: 0,
-      };
-      const score = Number(s.score ?? 0);
-      const max = Number(s.maxScore ?? 0);
-      if (asgn?.assignmentType === 'COURSE') {
-        cur.courseTotal += score;
-        cur.courseMax += max;
-      } else {
-        cur.dailyTotal += score;
-        cur.dailyMax += max;
-      }
-      byStudent.set(s.studentId, cur);
-    }
-    const ranked = [...byStudent.entries()]
-      .map(([id, row]) => {
-        const coursePercent =
-          row.courseMax > 0 ? (row.courseTotal / row.courseMax) * 100 : 0;
-        const dailyPercent =
-          row.dailyMax > 0 ? (row.dailyTotal / row.dailyMax) * 100 : 0;
-        const overall = coursePercent * 0.6 + dailyPercent * 0.4;
-        return {
-          student_id: id,
-          student_name: row.name,
-          course_score: Number(coursePercent.toFixed(2)),
-          daily_score: Number(dailyPercent.toFixed(2)),
-          overall_score: Number(overall.toFixed(2)),
-        };
-      })
-      .sort((a, b) => b.overall_score - a.overall_score)
-      .map((r, idx) => ({ ...r, rank: idx + 1 }));
+    // Student leaderboard — canonical scores/ranks from the shared service,
+    // scoped to this teacher's school(s). (Ranks across all the teacher's
+    // schools combined, matching the prior behavior.)
+    const { rows: teacherGlobalRows } =
+      await this.studentRanking.getGlobalRanking();
+    const ranked = this.studentRanking.buildLeaderboard(
+      teacherGlobalRows.filter((r) => schoolIds.includes(r.schoolId)),
+    );
 
     // Subject breakdown
     const subjectMap = new Map<

@@ -21,11 +21,12 @@ export class AdminSchoolAdminsController {
 
   @Get('school-admins')
   list(
-    @Query('search') _search?: string,
+    @Query('search') search?: string,
     @Query('status') status?: string,
-    @Query('schoolId') schoolId?: string,
+    @Query('schoolId') schoolIdCamel?: string,
+    @Query('school_id') schoolIdSnake?: string,
   ) {
-    return this.service.list({ search: _search, status, schoolId });
+    return this.service.list({ search, status, schoolId: schoolIdCamel ?? schoolIdSnake });
   }
 
   @Post('school-admins')

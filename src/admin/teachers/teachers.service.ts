@@ -7,7 +7,6 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength } from '../../common/utils/password.util';
-import { AuditService } from '../../common/audit/audit.service';
 
 type SchoolAssignment = {
   school_id: string;
@@ -71,7 +70,6 @@ type UserWithRelations = Awaited<
   teacherSchools: Array<{
     schoolId: string;
     school: { name: string };
-    gradesAssigned: string[];
     subjects: string[];
   }>;
   teacherSectionAssignments: Array<{
@@ -85,7 +83,6 @@ type UserWithRelations = Awaited<
 export class AdminTeachersService {
   constructor(
     private readonly db: DatabaseService,
-    private readonly audit: AuditService,
   ) {}
 
   private buildGradesAssignedFromSectionAssignments(
@@ -429,12 +426,10 @@ export class AdminTeachersService {
           create: {
             teacherId: user.id,
             schoolId,
-            gradesAssigned,
             subjects,
             workingDaysPerWeek,
           },
           update: {
-            gradesAssigned,
             subjects,
             workingDaysPerWeek,
           },
@@ -471,12 +466,6 @@ export class AdminTeachersService {
     if (!created) {
       throw new BadRequestException('Failed to create teacher');
     }
-    this.audit.log({
-      action: 'CREATE_TEACHER',
-      entity: 'Teacher',
-      entityId: String(created.id),
-      details: `Created teacher ${email}`,
-    });
     return this.toTeacherDetail(created as UserWithRelations);
   }
 
@@ -592,12 +581,10 @@ export class AdminTeachersService {
           create: {
             teacherId,
             schoolId,
-            gradesAssigned,
             subjects,
             workingDaysPerWeek,
           },
           update: {
-            gradesAssigned,
             subjects,
             workingDaysPerWeek,
           },
@@ -649,12 +636,6 @@ export class AdminTeachersService {
         },
       },
     });
-    this.audit.log({
-      action: 'UPDATE_TEACHER',
-      entity: 'Teacher',
-      entityId: String(teacherId),
-      details: `Updated teacher ${teacherId}`,
-    });
     return this.toTeacherDetail(user as UserWithRelations);
   }
 
@@ -662,12 +643,6 @@ export class AdminTeachersService {
     try {
       const result = await this.db.user.delete({
         where: { id: parseInt(id, 10) },
-      });
-      this.audit.log({
-        action: 'DELETE_TEACHER',
-        entity: 'Teacher',
-        entityId: id,
-        details: `Deleted teacher ${id}`,
       });
       return result;
     } catch (err: unknown) {
