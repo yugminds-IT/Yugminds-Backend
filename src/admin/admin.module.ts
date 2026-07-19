@@ -30,6 +30,22 @@ import { AdminJoiningCodesService } from './joining-codes/joining-codes.service.
 import { AdminTeacherAttendanceService } from './teacher-attendance/teacher-attendance.service.js';
 import { AdminLeavesService } from './leaves/leaves.service.js';
 import { AdminLicensesService } from './licenses/licenses.service.js';
+import { APP_INTERCEPTOR } from '@nestjs/core';
+import { AuditController } from './audit/audit.controller.js';
+import { ImpersonationController } from './impersonation/impersonation.controller.js';
+import { TrashController } from './trash/trash.controller.js';
+import { TrashService } from './trash/trash.service.js';
+import { AdminSearchController } from './search/search.controller.js';
+import { AdminSearchService } from './search/search.service.js';
+import { SystemControlsController } from './system-controls/system-controls.controller.js';
+import { SystemControlsService } from './system-controls/system-controls.service.js';
+import { AlertsController } from './alerts/alerts.controller.js';
+import { AlertsService } from './alerts/alerts.service.js';
+import { DigestController } from './digest/digest.controller.js';
+import { DigestService } from './digest/digest.service.js';
+import { SavedViewsController } from './saved-views/saved-views.controller.js';
+import { AuditService } from './audit/audit.service.js';
+import { AuditInterceptor } from './audit/audit.interceptor.js';
 
 @Module({
   imports: [
@@ -54,6 +70,14 @@ import { AdminLicensesService } from './licenses/licenses.service.js';
     AdminExtraController,
     CommunityAdminController,
     AdminLicensesController,
+    AuditController,
+    ImpersonationController,
+    TrashController,
+    AdminSearchController,
+    SystemControlsController,
+    AlertsController,
+    DigestController,
+    SavedViewsController,
   ],
   providers: [
     AdminDashboardService,
@@ -68,6 +92,15 @@ import { AdminLicensesService } from './licenses/licenses.service.js';
     AdminTeacherAttendanceService,
     AdminLeavesService,
     AdminLicensesService,
+    AuditService,
+    TrashService,
+    AdminSearchService,
+    SystemControlsService,
+    AlertsService,
+    DigestService,
+    // Global interceptor, but it only logs mutating requests under /admin (see AuditInterceptor).
+    { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
   ],
+  exports: [AuditService],
 })
 export class AdminModule {}

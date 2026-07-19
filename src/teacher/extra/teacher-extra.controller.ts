@@ -646,8 +646,8 @@ export class TeacherExtraController {
     const [courses, schools] = await Promise.all([
       this.db.course.findMany({
         where: courseIdsForQuery.length
-          ? { id: { in: courseIdsForQuery } }
-          : undefined,
+          ? { id: { in: courseIdsForQuery }, deletedAt: null }
+          : { deletedAt: null },
         include: { _count: { select: { chapters: true } } },
       }),
       this.db.school.findMany({
@@ -1913,7 +1913,7 @@ export class TeacherExtraController {
     );
 
     // Drop the shared ranking cache so all dashboards reflect the new grades.
-    if (results.length) this.studentRanking.invalidate();
+    if (results.length) await this.studentRanking.invalidate();
 
     return { success: true, graded_count: results.length };
   }
@@ -2031,7 +2031,7 @@ export class TeacherExtraController {
       );
     });
     // Drop the shared ranking cache so all dashboards reflect the new grade.
-    this.studentRanking.invalidate();
+    await this.studentRanking.invalidate();
 
     // Notify student
     const fullAssignment = await this.db.assignment.findUnique({

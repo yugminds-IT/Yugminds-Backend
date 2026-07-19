@@ -4,6 +4,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '../types/role.type';
+import { AuthCacheService } from '../auth-cache.service';
 
 export interface JwtPayload {
   sub: number;
@@ -21,6 +22,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   constructor(
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
+    private readonly authCache: AuthCacheService,
   ) {
     const accessSecret = config.get<string>('JWT_ACCESS_SECRET');
     if (!accessSecret || !String(accessSecret).trim()) {
@@ -34,6 +36,26 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload) {
+    const cached = await this.authCache.get(payload.sub);
+    const jwtTokenVersion = payload.tokenVersion ?? 0;
+
+    if (cached) {
+      const isGlobalUser = cached.isSuperAdmin || cached.role === 'admin';
+      if (!cached.tenantId && !isGlobalUser) {
+        throw new UnauthorizedException('tenantId missing');
+      }
+      if (jwtTokenVersion !== cached.tokenVersion) {
+        throw new UnauthorizedException('Access token invalidated');
+      }
+      return {
+        id: payload.sub,
+        email: payload.email,
+        role: cached.role,
+        isSuperAdmin: cached.isSuperAdmin,
+        tenantId: cached.tenantId ?? undefined,
+      };
+    }
+
     const user = await (this.db as any).user.findUnique({
       where: { id: payload.sub },
     });
@@ -48,9 +70,15 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('tenantId missing');
     }
 
+    await this.authCache.set(user.id, {
+      tokenVersion: user.tokenVersion,
+      tenantId: user.tenantId ?? null,
+      role: user.role,
+      isSuperAdmin: user.isSuperAdmin,
+    });
+
     // Enforce access-token invalidation via tokenVersion.
     // Missing claim (old tokens) is treated as version 0.
-    const jwtTokenVersion = payload.tokenVersion ?? 0;
     if (jwtTokenVersion !== user.tokenVersion) {
       throw new UnauthorizedException('Access token invalidated');
     }

@@ -6,6 +6,7 @@ import {
 import * as bcrypt from 'bcrypt';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
+import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
 import { ok } from '../../common/api-response';
 import { validatePasswordStrength } from '../../common/utils/password.util';
 
@@ -14,6 +15,7 @@ export class AdminSchoolAdminsService {
   constructor(
     private readonly db: DatabaseService,
     private readonly authService: AuthService,
+    private readonly refreshTokenStore: RefreshTokenStoreService,
   ) {}
 
   async list(params?: { search?: string; status?: string; schoolId?: string }) {
@@ -218,7 +220,7 @@ export class AdminSchoolAdminsService {
         data: { password: hashed, mustChangePassword: false } as never,
       });
       // Invalidate all existing sessions so stale tokens can't be used
-      await this.db.refreshToken.deleteMany({ where: { userId: sa.userId } });
+      await this.refreshTokenStore.revokeAll(sa.userId);
     }
 
     // School admin status is user-level activation.

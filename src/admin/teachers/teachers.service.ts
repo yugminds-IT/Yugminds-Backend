@@ -7,6 +7,8 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength } from '../../common/utils/password.util';
+import { AuthCacheService } from '../../auth/auth-cache.service';
+import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
 
 type SchoolAssignment = {
   school_id: string;
@@ -83,6 +85,8 @@ type UserWithRelations = Awaited<
 export class AdminTeachersService {
   constructor(
     private readonly db: DatabaseService,
+    private readonly authCache: AuthCacheService,
+    private readonly refreshTokenStore: RefreshTokenStoreService,
   ) {}
 
   private buildGradesAssignedFromSectionAssignments(
@@ -148,20 +152,74 @@ export class AdminTeachersService {
 
   async list(
     schoolId?: string,
-  ): Promise<{ teachers: TeacherDetailResponse[] }> {
-    const users = await this.db.user.findMany({
-      where: {
-        role: Role.teacher,
-        ...(schoolId ? { teacherSchools: { some: { schoolId } } } : {}),
-      },
-      include: {
-        profile: true,
-        teacherSchools: { include: { school: true } },
-        teacherSectionAssignments: {
-          include: { section: { include: { grade: true } } },
+    limit?: number,
+    options?: { page?: string; search?: string; sort?: string; order?: string },
+  ): Promise<{
+    teachers: TeacherDetailResponse[];
+    total?: number;
+    page?: number;
+    limit?: number;
+    totalPages?: number;
+  }> {
+    const where = {
+      role: Role.teacher,
+      deletedAt: null, // exclude trashed teachers
+      ...(schoolId ? { teacherSchools: { some: { schoolId } } } : {}),
+      ...(options?.search
+        ? {
+            OR: [
+              {
+                email: {
+                  contains: options.search.trim(),
+                  mode: 'insensitive' as const,
+                },
+              },
+              {
+                profile: {
+                  is: {
+                    fullName: {
+                      contains: options.search.trim(),
+                      mode: 'insensitive' as const,
+                    },
+                  },
+                },
+              },
+            ],
+          }
+        : {}),
+    };
+
+    const orderDir =
+      options?.order === 'asc' ? ('asc' as const) : ('desc' as const);
+    const orderBy =
+      options?.sort === 'name'
+        ? { profile: { fullName: orderDir } }
+        : options?.sort === 'email'
+          ? { email: orderDir }
+          : { createdAt: orderDir };
+
+    // Paged mode when `page` is provided; legacy limit-only mode otherwise.
+    const page = options?.page
+      ? Math.max(1, parseInt(options.page, 10) || 1)
+      : null;
+    const take = page ? Math.min(limit && limit > 0 ? limit : 50, 500) : limit;
+
+    const [users, total] = await Promise.all([
+      this.db.user.findMany({
+        where,
+        orderBy,
+        ...(take ? { take } : {}),
+        ...(page && take ? { skip: (page - 1) * take } : {}),
+        include: {
+          profile: true,
+          teacherSchools: { include: { school: true } },
+          teacherSectionAssignments: {
+            include: { section: { include: { grade: true } } },
+          },
         },
-      },
-    });
+      }),
+      this.db.user.count({ where }),
+    ]);
     const allSchoolIds = [
       ...new Set(
         users.flatMap((u) => (u.teacherSchools ?? []).map((ts) => ts.schoolId)),
@@ -190,12 +248,20 @@ export class AdminTeachersService {
         }
         return this.toTeacherDetail(u as UserWithRelations, otherBySchool);
       }),
+      total,
+      ...(page && take
+        ? {
+            page,
+            limit: take,
+            totalPages: Math.max(1, Math.ceil(total / take)),
+          }
+        : {}),
     };
   }
 
   async get(
     id: string,
-    currentUser?: { id: number; role: Role; schoolId?: string },
+    currentUser?: { id: number; role: Role; tenantId?: string },
   ): Promise<TeacherDetailResponse> {
     const user = await this.db.user.findFirst({
       where: { id: parseInt(id, 10) || 0, role: Role.teacher },
@@ -211,7 +277,7 @@ export class AdminTeachersService {
 
     // SECURITY FIX (HIGH-02): Add authorization check for school admins
     if (currentUser && currentUser.role === Role.school_admin) {
-      const schoolId = currentUser.schoolId;
+      const schoolId = currentUser.tenantId;
       if (!schoolId) {
         throw new BadRequestException(
           'School admin must have a school assigned',
@@ -495,7 +561,7 @@ export class AdminTeachersService {
     });
     // Invalidate stale sessions when password is changed
     if (rawPassword) {
-      await this.db.refreshToken.deleteMany({ where: { userId: teacherId } });
+      await this.refreshTokenStore.revokeAll(teacherId);
     }
     const experienceRaw = body.experience as string | undefined;
     const experienceYears = body.experience_years as number | undefined;
@@ -639,11 +705,71 @@ export class AdminTeachersService {
     return this.toTeacherDetail(user as UserWithRelations);
   }
 
+  /**
+   * Bulk operations over a set of teachers.
+   *  - deactivate / activate: toggle account access without trashing
+   *  - delete: soft-delete (Trash) each teacher
+   */
+  async bulk(body: { action?: string; teacher_ids?: Array<number | string> }) {
+    const ids = (body.teacher_ids ?? [])
+      .map((v) => parseInt(String(v), 10))
+      .filter((n) => Number.isFinite(n) && n > 0);
+    if (ids.length === 0) {
+      throw new BadRequestException('teacher_ids is required');
+    }
+    if (ids.length > 500) {
+      throw new BadRequestException('At most 500 teachers per bulk operation');
+    }
+    const where = { id: { in: ids }, role: Role.teacher };
+
+    switch (body.action) {
+      case 'deactivate': {
+        const result = await this.db.user.updateMany({
+          where,
+          data: { isActive: false, tokenVersion: { increment: 1 } },
+        });
+        await this.authCache.invalidate(ids);
+        return { success: true, updated: result.count };
+      }
+      case 'activate': {
+        const result = await this.db.user.updateMany({
+          where: { ...where, deletedAt: null },
+          data: { isActive: true },
+        });
+        return { success: true, updated: result.count };
+      }
+      case 'delete': {
+        const result = await this.db.user.updateMany({
+          where,
+          data: {
+            deletedAt: new Date(),
+            isActive: false,
+            tokenVersion: { increment: 1 },
+          },
+        });
+        await this.authCache.invalidate(ids);
+        return { success: true, deleted: result.count };
+      }
+      default:
+        throw new BadRequestException(
+          'action must be one of: activate, deactivate, delete',
+        );
+    }
+  }
+
   async delete(id: string) {
     try {
-      const result = await this.db.user.delete({
+      // Soft delete: record lands in the admin Trash and can be restored.
+      // tokenVersion bump invalidates any live sessions immediately.
+      const result = await this.db.user.update({
         where: { id: parseInt(id, 10) },
+        data: {
+          deletedAt: new Date(),
+          isActive: false,
+          tokenVersion: { increment: 1 },
+        },
       });
+      await this.authCache.invalidate(parseInt(id, 10));
       return result;
     } catch (err: unknown) {
       // P2025 = record already deleted — treat as success

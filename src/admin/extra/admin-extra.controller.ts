@@ -31,6 +31,7 @@ import { BatchGenerateCertificatesDto } from './dto/batch-generate-certificates.
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
+import { StorageService } from '../../common/storage/storage.service';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -49,6 +50,7 @@ export class AdminExtraController {
     private readonly monitoringService: MonitoringService,
     private readonly realtimeGateway: RealtimeGateway,
     private readonly notificationsService: NotificationsService,
+    private readonly storage: StorageService,
   ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
@@ -1660,15 +1662,17 @@ export class AdminExtraController {
   ) {
     let schoolName = (body?.school_name ?? '').trim();
     const schoolId = (body?.school_id ?? '').trim() || null;
+    let schoolNumber: number | null = null;
 
     // Resolve school name from school_id when provided
     if (schoolId) {
       const school = await this.db.school.findUnique({
         where: { id: schoolId },
-        select: { name: true },
+        select: { name: true, schoolNumber: true },
       });
       if (!school) throw new BadRequestException('School not found');
       schoolName = school.name;
+      schoolNumber = school.schoolNumber;
     }
 
     if (!schoolName) {
@@ -1690,14 +1694,22 @@ export class AdminExtraController {
     if (dims && (dims.w < 300 || dims.h < 300)) {
       throw new BadRequestException('Minimum image dimensions are 300×300 px');
     }
-    const base64 = file.buffer.toString('base64');
-    const imageUrl = `data:${file.mimetype};base64,${base64}`;
+    const logoKey = this.storage.buildKey(
+      `logos/${schoolNumber ?? 'unassigned'}`,
+      file.originalname ?? 'logo.png',
+    );
+    const imageUrl = await this.storage.uploadBuffer(
+      logoKey,
+      file.buffer,
+      file.mimetype,
+    );
     const logo = await this.db.logo.create({
       data: {
         schoolName,
         schoolId,
         description: body?.description?.trim() || null,
         imageUrl,
+        imageKey: logoKey,
       } as any,
     });
     return {
@@ -1742,11 +1754,20 @@ export class AdminExtraController {
     if (!existing || existing.deletedAt) {
       throw new BadRequestException('Logo not found');
     }
+    const existingSchoolNumber = existing.schoolId
+      ? (
+          await this.db.school.findUnique({
+            where: { id: existing.schoolId },
+            select: { schoolNumber: true },
+          })
+        )?.schoolNumber
+      : null;
     const data: {
       schoolName?: string;
       schoolId?: string | null;
       description?: string | null;
       imageUrl?: string;
+      imageKey?: string;
     } = {};
     const newSchoolId = (body?.school_id ?? '').trim() || null;
     if (newSchoolId !== null) {
@@ -1789,13 +1810,25 @@ export class AdminExtraController {
           'Minimum image dimensions are 300×300 px',
         );
       }
-      const base64 = file.buffer.toString('base64');
-      data.imageUrl = `data:${file.mimetype};base64,${base64}`;
+      const logoKey = this.storage.buildKey(
+        `logos/${existingSchoolNumber ?? 'unassigned'}`,
+        file.originalname ?? 'logo.png',
+      );
+      data.imageUrl = await this.storage.uploadBuffer(
+        logoKey,
+        file.buffer,
+        file.mimetype,
+      );
+      data.imageKey = logoKey;
     }
+    const oldLogoKey = wantsReplace ? existing.imageKey : null;
     const updated = await this.db.logo.update({
       where: { id },
       data: data as any,
     });
+    if (oldLogoKey) {
+      await this.storage.deleteObject(oldLogoKey).catch(() => {});
+    }
     return {
       id: updated.id,
       school_id: (updated as any).schoolId ?? null,
@@ -1815,6 +1848,9 @@ export class AdminExtraController {
     const hardDelete = hard === 'true' || hard === '1';
     if (hardDelete) {
       await this.db.logo.delete({ where: { id } });
+      if (logo.imageKey) {
+        await this.storage.deleteObject(logo.imageKey).catch(() => {});
+      }
     } else {
       await this.db.logo.update({
         where: { id },
@@ -2001,10 +2037,19 @@ export class AdminExtraController {
           { studentName, courseTitle, issuedAt, certificateId: created.id },
           templateSetting?.value ?? null,
         );
-        const dataUrl = await StudentExtraController.svgToJpeg(svg);
+        const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
+        const certKey = this.storage.buildKey(
+          `certificates/${row.studentId}`,
+          `${created.id}.jpg`,
+        );
+        const certUrl = await this.storage.uploadBuffer(
+          certKey,
+          jpegBuffer,
+          'image/jpeg',
+        );
         await this.db.studentCertificate.update({
           where: { id: created.id },
-          data: { certificateUrl: dataUrl },
+          data: { certificateUrl: certUrl, certificateKey: certKey },
         });
       }
     }
@@ -2119,11 +2164,28 @@ export class AdminExtraController {
       },
       templateSetting?.value ?? null,
     );
-    const dataUrl = await StudentExtraController.svgToJpeg(svg);
+    const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
+    const oldCertKey = cert.certificateKey;
+    const certKey = this.storage.buildKey(
+      `certificates/${cert.studentId}`,
+      `${cert.id}-regen-${Date.now()}.jpg`,
+    );
+    const certUrl = await this.storage.uploadBuffer(
+      certKey,
+      jpegBuffer,
+      'image/jpeg',
+    );
     const updated = await this.db.studentCertificate.update({
       where: { id },
-      data: { certificateUrl: dataUrl, issuedBy: admin.id },
+      data: {
+        certificateUrl: certUrl,
+        certificateKey: certKey,
+        issuedBy: admin.id,
+      },
     });
+    if (oldCertKey) {
+      await this.storage.deleteObject(oldCertKey).catch(() => {});
+    }
     return {
       success: true,
       certificate: {

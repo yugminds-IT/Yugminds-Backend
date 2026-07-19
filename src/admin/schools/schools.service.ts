@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
+import { AuthCacheService } from '../../auth/auth-cache.service';
 import { ok } from '../../common/api-response';
 
 @Injectable()
@@ -12,12 +13,23 @@ export class AdminSchoolsService {
   constructor(
     private readonly db: DatabaseService,
     private readonly authService: AuthService,
+    private readonly authCache: AuthCacheService,
   ) {}
 
   async list(_schoolId?: string, limit = 50, offset = 0) {
+    // Exclude soft-deleted (trashed) schools. Tenant has no deletedAt column,
+    // so filter tenants against the School rows that are marked deleted.
+    const trashed = await this.db.school.findMany({
+      where: { deletedAt: { not: null } },
+      select: { id: true },
+    });
+    const trashedIds = trashed.map((s) => s.id);
+    const tenantWhere =
+      trashedIds.length > 0 ? { id: { notIn: trashedIds } } : {};
     const [total, tenants] = await Promise.all([
-      this.db.tenant.count(),
+      this.db.tenant.count({ where: tenantWhere }),
       this.db.tenant.findMany({
+        where: tenantWhere,
         include: { users: true },
         take: limit,
         skip: offset,
@@ -549,6 +561,29 @@ export class AdminSchoolsService {
   }
 
   async delete(id: string) {
+    // Soft delete: the school (and its users) land in the admin Trash and can
+    // be restored. Hard deletion happens only via purge() from the Trash page.
+    await this.ensureSchoolForTenant(id);
+    const now = new Date();
+    // Deactivate all tenant users so nobody can log in while the school is
+    // trashed; tokenVersion bump invalidates live sessions immediately.
+    const affectedUsers = await this.db.user.findMany({
+      where: { tenantId: id, deletedAt: null },
+      select: { id: true },
+    });
+    await this.db.user.updateMany({
+      where: { tenantId: id, deletedAt: null },
+      data: { deletedAt: now, isActive: false, tokenVersion: { increment: 1 } },
+    });
+    await this.authCache.invalidate(affectedUsers.map((u) => u.id));
+    return this.db.school.update({
+      where: { id },
+      data: { deletedAt: now, isActive: false },
+    });
+  }
+
+  /** Permanently delete a trashed school, its users, and cascaded data. */
+  async purge(id: string) {
     // Delete users belonging to this tenant first so the email can be reused (e.g. for a new school)
     const users = await this.db.user.findMany({
       where: { tenantId: id },

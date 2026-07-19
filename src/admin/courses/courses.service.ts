@@ -225,9 +225,15 @@ export class AdminCoursesService {
     };
   }
 
-  async list(): Promise<{ courses: CourseListItem[] }> {
+  async list(limit?: number): Promise<{ courses: CourseListItem[] }> {
+    // Defensive cap: comfortably above any realistic catalog size so normal
+    // callers see every course, but a single request can never pull the
+    // entire table.
+    const take = limit ?? 300;
     const courses = await this.db.course.findMany({
+      where: { deletedAt: null }, // exclude trashed courses
       orderBy: { createdAt: 'desc' },
+      take,
       include: {
         courseAccess: { include: { school: { select: { name: true } }, gradeAccess: true } },
         chapters: {
@@ -704,7 +710,12 @@ export class AdminCoursesService {
   }
 
   async delete(id: string): Promise<{ success: true }> {
-    await this.db.course.delete({ where: { id } });
+    // Soft delete: unpublish so students lose access immediately; the record
+    // lands in the admin Trash and can be restored from there.
+    await this.db.course.update({
+      where: { id },
+      data: { deletedAt: new Date(), isPublished: false },
+    });
     return { success: true };
   }
 

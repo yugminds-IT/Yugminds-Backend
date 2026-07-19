@@ -4,6 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { DatabaseService } from '../database/database.service';
 import { RealtimeGateway } from '../common/realtime/realtime.gateway';
+import { AuthCacheService } from './auth-cache.service';
+import { RefreshTokenStoreService } from './refresh-token-store.service';
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -27,6 +29,17 @@ describe('AuthService', () => {
     emitNotificationRead: jest.fn(),
     emitUnreadCount: jest.fn(),
   };
+  const mockAuthCache = {
+    get: jest.fn(),
+    set: jest.fn(),
+    invalidate: jest.fn(),
+  };
+  const mockRefreshTokenStore = {
+    store: jest.fn(),
+    findMatch: jest.fn(),
+    revoke: jest.fn(),
+    revokeAll: jest.fn(),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -36,6 +49,8 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: mockJwtService },
         { provide: ConfigService, useValue: mockConfigService },
         { provide: RealtimeGateway, useValue: mockRealtimeGateway },
+        { provide: AuthCacheService, useValue: mockAuthCache },
+        { provide: RefreshTokenStoreService, useValue: mockRefreshTokenStore },
       ],
     }).compile();
 

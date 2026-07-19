@@ -18,6 +18,7 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { PublicSchoolsQueryDto } from './dto/public-schools-query.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
+import { StorageService } from '../storage/storage.service';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -28,7 +29,10 @@ interface PlaceholderResponse {
 @Controller()
 @Public()
 export class CommonExtraController {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly storage: StorageService,
+  ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
     return {
@@ -352,7 +356,7 @@ export class CommonExtraController {
       limits: { fileSize: 100 * 1024 * 1024 }, // 100MB
     }),
   )
-  adminUpload(
+  async adminUpload(
     @Body() body: Record<string, unknown>,
     @UploadedFile()
     file?: {
@@ -361,7 +365,7 @@ export class CommonExtraController {
       size: number;
       buffer: Buffer;
     },
-  ): {
+  ): Promise<{
     success: boolean;
     file: {
       url: string;
@@ -370,7 +374,7 @@ export class CommonExtraController {
       mime_type: string;
       size: number;
     };
-  } {
+  }> {
     if (!file) throw new BadRequestException('file is required');
 
     const type = String(body?.type ?? '').trim();
@@ -398,23 +402,43 @@ export class CommonExtraController {
       );
     }
 
-    // No external storage configured in this repo; store as data URL for now
-    // (consistent with `/student/assignments/upload` and logo uploads).
-    const base64 = file.buffer.toString('base64');
-    const dataUrl = `data:${file.mimetype};base64,${base64}`;
-
-    const safeCoursePart = courseId ? `course-${courseId}` : 'course-unknown';
-    const safeChapterPart = chapterId
-      ? `chapter-${chapterId}`
-      : 'chapter-unknown';
+    const courseNumber = courseId
+      ? (
+          await this.db.course.findUnique({
+            where: { id: courseId },
+            select: { courseNumber: true },
+          })
+        )?.courseNumber
+      : null;
+    const chapterNumber = chapterId
+      ? (
+          await this.db.chapter.findUnique({
+            where: { id: chapterId },
+            select: { chapterNumber: true },
+          })
+        )?.chapterNumber
+      : null;
+    const safeCoursePart = courseNumber ? `course-${courseNumber}` : 'unassigned';
+    const safeChapterPart = chapterNumber
+      ? `chapter-${chapterNumber}`
+      : 'unassigned';
     const filename = file.originalname || `upload-${Date.now()}`;
-    const path = `uploads/${type}/${safeCoursePart}/${safeChapterPart}/${Date.now()}-${filename}`;
+
+    const key = this.storage.buildKey(
+      `course-uploads/${type}/${safeCoursePart}/${safeChapterPart}`,
+      filename,
+    );
+    const url = await this.storage.uploadBuffer(
+      key,
+      file.buffer,
+      file.mimetype,
+    );
 
     return {
       success: true,
       file: {
-        url: dataUrl,
-        path,
+        url,
+        path: key,
         filename,
         mime_type: file.mimetype,
         size: file.size,

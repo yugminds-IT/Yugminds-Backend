@@ -1,5 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import type Redis from 'ioredis';
+import { REDIS_CLIENT } from '../redis/redis.constants';
 
 /**
  * Canonical, system-wide student ranking.
@@ -60,14 +62,13 @@ export type LeaderboardRow = {
 
 @Injectable()
 export class StudentRankingService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+  ) {}
 
-  private cache: {
-    rows: GlobalRankRow[];
-    schoolCount: number;
-    expiry: number;
-  } | null = null;
-  private readonly TTL_MS = 10 * 60 * 1000;
+  private readonly CACHE_KEY = 'ranking:global';
+  private readonly TTL_SECONDS = 10 * 60;
 
   static computeBadge(score: number): string {
     if (score >= 90) return 'GOLD';
@@ -77,21 +78,25 @@ export class StudentRankingService {
   }
 
   /** Drop the cache so the next read recomputes (call after grading). */
-  invalidate(): void {
-    this.cache = null;
+  async invalidate(): Promise<void> {
+    await this.redis.del(this.CACHE_KEY);
   }
 
   /**
    * One row per active enrollment with the student's canonical scores.
-   * Scans every graded submission in the system; cached for 10 minutes and
-   * shared across all dashboards (the service is a singleton).
+   * Scans every graded submission in the system; cached in Redis for 10
+   * minutes and shared across all dashboards AND all backend instances.
    */
   async getGlobalRanking(): Promise<{
     rows: GlobalRankRow[];
     schoolCount: number;
   }> {
-    if (this.cache && Date.now() < this.cache.expiry) {
-      return { rows: this.cache.rows, schoolCount: this.cache.schoolCount };
+    const cached = await this.redis.get(this.CACHE_KEY);
+    if (cached) {
+      return JSON.parse(cached) as {
+        rows: GlobalRankRow[];
+        schoolCount: number;
+      };
     }
 
     const enrollments = await this.db.studentSchool.findMany({
@@ -213,8 +218,14 @@ export class StudentRankingService {
     });
 
     const schoolCount = new Set(enrollments.map((e) => e.schoolId)).size;
-    this.cache = { rows, schoolCount, expiry: Date.now() + this.TTL_MS };
-    return { rows, schoolCount };
+    const result = { rows, schoolCount };
+    await this.redis.set(
+      this.CACHE_KEY,
+      JSON.stringify(result),
+      'EX',
+      this.TTL_SECONDS,
+    );
+    return result;
   }
 
   /** Position of `studentId` within an arbitrary cohort, by overall score. */

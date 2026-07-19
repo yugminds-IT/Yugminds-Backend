@@ -38,7 +38,12 @@ export class SchoolAdminStatsService {
       attendanceAgg,
     ] = await Promise.all([
       this.db.studentSchool.count({ where: { schoolId, isActive: true } }),
-      this.db.teacherSchool.count({ where: { schoolId } }),
+      // Only active teacher accounts — an unfiltered teacherSchool count kept
+      // deactivated teachers in the total and disagreed with the admin
+      // dashboard, which counts active users only.
+      this.db.teacherSchool.count({
+        where: { schoolId, teacher: { isActive: true } },
+      }),
       this.db.courseAccess.count({
         where: {
           schoolId,

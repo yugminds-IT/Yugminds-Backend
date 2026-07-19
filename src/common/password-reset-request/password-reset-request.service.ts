@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import * as bcrypt from 'bcrypt';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
 
 export interface ListOptions {
   status?: string;
@@ -26,6 +27,7 @@ export class PasswordResetRequestService {
   constructor(
     private readonly db: DatabaseService,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly refreshTokenStore: RefreshTokenStoreService,
   ) {}
 
   private async hashPassword(password: string): Promise<string> {
@@ -169,9 +171,7 @@ export class PasswordResetRequestService {
       });
 
       // Invalidate all existing sessions so the old password can't be used
-      await this.db.refreshToken.deleteMany({
-        where: { userId: request.userId },
-      });
+      await this.refreshTokenStore.revokeAll(request.userId);
 
       // Mark request as approved
       await this.db.passwordResetRequest.update({
@@ -299,7 +299,7 @@ export class PasswordResetRequestService {
     // Atomic: fetch, verify, and consume the token inside a single transaction.
     // This prevents a TOCTOU race where two concurrent requests both pass verify
     // but then both update the user's password.
-    await this.db.$transaction(async (tx) => {
+    const resetUserId = await this.db.$transaction(async (tx) => {
       const request = await tx.passwordResetRequest.findUnique({
         where: { id: requestId },
       });
@@ -336,8 +336,10 @@ export class PasswordResetRequestService {
         data: { password: hashedPassword, mustChangePassword: false } as never,
       });
 
-      await tx.refreshToken.deleteMany({ where: { userId: request.userId } });
+      return request.userId;
     });
+
+    await this.refreshTokenStore.revokeAll(resetUserId);
   }
 
   async delete(id: string): Promise<void> {

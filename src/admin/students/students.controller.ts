@@ -22,14 +22,30 @@ export class AdminStudentsController {
   constructor(private readonly service: AdminStudentsService) {}
 
   @Get()
-  list(@Query('school_id') schoolId?: string, @Query('limit') limit?: string) {
-    return this.service.list(schoolId, limit);
+  list(
+    @Query('school_id') schoolId?: string,
+    @Query('limit') limit?: string,
+    @Query('page') page?: string,
+    @Query('search') search?: string,
+    @Query('grade') grade?: string,
+    @Query('section') section?: string,
+    @Query('sort') sort?: string,
+    @Query('order') order?: string,
+  ) {
+    return this.service.list(schoolId, limit, {
+      page,
+      search,
+      grade,
+      section,
+      sort,
+      order,
+    });
   }
 
   @Get(':studentId')
   get(
     @Param('studentId') studentId: string,
-    @CurrentUser() currentUser: { id: number; role: Role; schoolId?: string },
+    @CurrentUser() currentUser: { id: number; role: Role; tenantId?: string },
   ) {
     return this.service.get(studentId, currentUser);
   }
@@ -37,6 +53,20 @@ export class AdminStudentsController {
   @Post()
   create(@Body() body: Record<string, unknown>) {
     return this.service.create(body);
+  }
+
+  @Post('bulk')
+  bulk(
+    @Body()
+    body: {
+      action?: string;
+      student_ids?: Array<number | string>;
+      school_id?: string;
+      grade?: string;
+      section?: string;
+    },
+  ) {
+    return this.service.bulk(body);
   }
 
   @Post('sync-enrollments')

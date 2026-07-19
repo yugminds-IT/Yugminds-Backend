@@ -1,7 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule, ThrottlerStorage } from '@nestjs/throttler';
+import { ScheduleModule } from '@nestjs/schedule';
 import { UserOrIpThrottlerGuard } from './common/throttler/user-or-ip-throttler.guard';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
@@ -20,10 +21,15 @@ import { MonitoringInterceptor } from './common/monitoring/monitoring.intercepto
 import { InternalModule } from './modules/internal/internal.module';
 import { TenantContextInterceptor } from './tenants/tenant-context.interceptor';
 import { SeedModule } from './common/seed/seed.module';
+import { StorageModule } from './common/storage/storage.module';
+import { RedisModule } from './common/redis/redis.module';
+import { ThrottlerStorageRedisService } from './common/throttler/throttler-storage-redis.service';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
+    // Cron scheduling (weekly admin digest — see admin/digest).
+    ScheduleModule.forRoot(),
     // SECURITY: Rate limiting to prevent brute force / abuse.
     //
     // Requests are tracked PER AUTHENTICATED USER (see UserOrIpThrottlerGuard),
@@ -37,18 +43,26 @@ import { SeedModule } from './common/seed/seed.module';
     // after 5 hits/min. Auth endpoints instead override the default tracker
     // to a stricter limit via `@Throttle({ default: { limit: N, ttl: 60000 } })`.
     //
-    // NOTE: storage is in-memory, so with multiple backend instances each keeps
-    // its own counters (limits are effectively per-instance). If/when this scales
-    // horizontally, wire a shared Redis ThrottlerStorage here for exact limits.
-    ThrottlerModule.forRoot([
-      {
-        name: 'default',
-        ttl: 60000, // 1 minute
-        limit: 1200, // per user/min — generous for data-heavy dashboards firing many parallel calls
-      },
-    ]),
+    // Backed by Redis (ThrottlerStorageRedisService) so counters are shared
+    // across every backend instance instead of tracked per-process.
+    ThrottlerModule.forRootAsync({
+      imports: [RedisModule],
+      inject: [ThrottlerStorageRedisService],
+      useFactory: (storage: ThrottlerStorage) => ({
+        throttlers: [
+          {
+            name: 'default',
+            ttl: 60000, // 1 minute
+            limit: 1200, // per user/min — generous for data-heavy dashboards firing many parallel calls
+          },
+        ],
+        storage,
+      }),
+    }),
     AuthModule,
     DatabaseModule,
+    StorageModule,
+    RedisModule,
     AdminModule,
     TeacherModule,
     SchoolAdminModule,

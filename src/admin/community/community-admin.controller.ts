@@ -21,9 +21,9 @@ import {
   COMMUNITY_SECTION_TYPES,
   CommunitySectionType,
   DEFAULT_COMMUNITY_CONFIG,
-  fileToDataUrl,
   mediaMaxSize,
 } from './community.constants';
+import { StorageService } from '../../common/storage/storage.service';
 import {
   itemSnapshot,
   mapCommunityConfig,
@@ -34,7 +34,10 @@ import {
 @UseGuards(RolesGuard)
 @Roles('admin')
 export class CommunityAdminController {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly storage: StorageService,
+  ) {}
 
   private async ensureConfig() {
     let config = await this.db.communityPageConfig.findUnique({
@@ -57,7 +60,7 @@ export class CommunityAdminController {
     return config;
   }
 
-  private validateMedia(file: any, optional = false) {
+  private async validateMedia(file: any, optional = false) {
     if (!file) {
       if (optional) return null;
       throw new BadRequestException('media file is required');
@@ -71,7 +74,13 @@ export class CommunityAdminController {
         `File too large (max ${file.mimetype.startsWith('video/') ? '100MB' : '5MB'})`,
       );
     }
-    return fileToDataUrl(file);
+    // Flat key is intentional here: community CMS media is site-wide content,
+    // not owned by any student/school/course, so no owner segment applies.
+    return this.storage.uploadBuffer(
+      this.storage.buildKey('community', file.originalname ?? 'media'),
+      file.buffer,
+      file.mimetype,
+    );
   }
 
   private parseSectionType(raw?: string): CommunitySectionType {
@@ -118,7 +127,7 @@ export class CommunityAdminController {
     const existing = await this.ensureConfig();
     let heroImageUrl = existing.heroImageUrl;
     if (heroFile) {
-      heroImageUrl = this.validateMedia(heroFile, true);
+      heroImageUrl = await this.validateMedia(heroFile, true);
     }
 
     const updated = await this.db.communityPageConfig.update({
@@ -219,7 +228,7 @@ export class CommunityAdminController {
     );
     let mediaUrl: string | null = null;
     if (mediaFile) {
-      mediaUrl = this.validateMedia(mediaFile, true);
+      mediaUrl = await this.validateMedia(mediaFile, true);
     }
     const hasExternalUrl = !!body.external_url?.trim();
     if (needsMedia && !mediaUrl && !hasExternalUrl) {
@@ -298,7 +307,7 @@ export class CommunityAdminController {
 
       let mediaUrl = existing.mediaUrl;
       if (mediaFile) {
-        mediaUrl = this.validateMedia(mediaFile, true);
+        mediaUrl = await this.validateMedia(mediaFile, true);
       }
 
       const sectionType = body.section_type
@@ -385,7 +394,7 @@ export class CommunityAdminController {
   @Post('items/:id/thumbnail')
   @UseInterceptors(FileInterceptor('thumbnail'))
   async uploadThumbnail(@Param('id') id: string, @UploadedFile() file: any) {
-    const thumbnailUrl = this.validateMedia(file);
+    const thumbnailUrl = await this.validateMedia(file);
     const updated = await this.db.communityItem.update({
       where: { id },
       data: { thumbnailUrl },
@@ -396,7 +405,7 @@ export class CommunityAdminController {
   @Post('items/:id/avatar')
   @UseInterceptors(FileInterceptor('avatar'))
   async uploadAvatar(@Param('id') id: string, @UploadedFile() file: any) {
-    const creatorAvatarUrl = this.validateMedia(file);
+    const creatorAvatarUrl = await this.validateMedia(file);
     const updated = await this.db.communityItem.update({
       where: { id },
       data: { creatorAvatarUrl },

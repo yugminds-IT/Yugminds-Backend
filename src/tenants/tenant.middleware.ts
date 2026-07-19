@@ -6,6 +6,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { DatabaseService } from '../database/database.service';
 import type { Request, Response, NextFunction } from 'express';
+import { isIP } from 'net';
 
 /**
  * Extract tenant identifier from:
@@ -31,7 +32,12 @@ export class TenantMiddleware implements NestMiddleware {
     const host = String(hostHeader).split(':')[0]; // strip port
 
     // subdomain extraction: tenant.example.com => tenant
-    const hostnameParts = host.split('.').filter(Boolean);
+    // A bare IPv4 host (e.g. "127.0.0.1", accessed directly by IP — health
+    // checks, staging-by-IP, local tooling) also has 4 dot-separated parts
+    // and must NOT be mistaken for a 3+-level subdomain, or every request
+    // fails with "Invalid tenant" before auth even runs.
+    const hostnameParts =
+      isIP(host) === 0 ? host.split('.').filter(Boolean) : [];
     const subdomainTenant = hostnameParts.length >= 3 ? hostnameParts[0] : null;
 
     // header tenant extraction: accept either tenantId (uuid) or tenant domain slug

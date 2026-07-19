@@ -31,10 +31,10 @@ model User {
   isSuperAdmin             Boolean                     @default(false)
   isActive                 Boolean                     @default(true)
   mustChangePassword       Boolean                     @default(false)
+  deletedAt                DateTime?
   tokenVersion             Int                         @default(0)
   tenantId                 String?
   tenant                   Tenant?                     @relation(fields: [tenantId], references: [id])
-  refreshTokens            RefreshToken[]
   profile                  Profile?
   teacherSchools           TeacherSchool[]
   teacherSectionAssignments TeacherSectionAssignment[]
@@ -54,16 +54,9 @@ model User {
   authActivities           AuthActivity[]
   passwordResetRequests    PasswordResetRequest[]
   approvedPasswordResets   PasswordResetRequest[]      @relation("ApprovedBy")
+  auditLogs                AuditLog[]                  @relation("AuditActor")
+  savedViews               AdminSavedView[]
   createdAt                DateTime                    @default(now())
-}
-
-model RefreshToken {
-  id        String   @id @default(uuid())
-  userId    Int
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  token     String   @unique
-  expiresAt DateTime
-  @@index([userId])
 }
 
 // ============ Profile (extended user info) ============
@@ -99,6 +92,9 @@ model Profile {
 // ============ School (extends Tenant concept) ============
 model School {
   id                    String   @id @default(uuid())
+  // Sequential numeric id, used only for S3 storage paths (e.g. logos/<schoolNumber>/...)
+  // so bucket folders read "1, 2, 3" instead of raw UUIDs. Not a primary key.
+  schoolNumber          Int      @unique @default(autoincrement())
   name                  String
   schoolCode            String?  @unique
   email                 String?
@@ -115,6 +111,7 @@ model School {
   totalStudentsEstimate Int?
   totalTeachersEstimate Int?
   isActive              Boolean  @default(true)
+  deletedAt             DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
   teacherSchools TeacherSchool[]
@@ -235,12 +232,15 @@ model SchoolAdmin {
 // ============ Courses ============
 model Course {
   id          String   @id @default(uuid())
+  // Sequential numeric id, used only for S3 storage paths. Not a primary key.
+  courseNumber Int     @unique @default(autoincrement())
   title       String
   description String?
   // Store potentially large base64/data URLs for thumbnails.
   // Without `@db.Text`, Postgres rejects uploads with "value too long".
   thumbnailUrl String? @db.Text
   isPublished Boolean  @default(false)
+  deletedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   chapters    Chapter[]
@@ -260,6 +260,7 @@ model StudentCertificate {
   course         Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
   certificateName String
   certificateUrl  String   @db.Text
+  certificateKey String?  @db.Text
   issuedAt       DateTime @default(now())
   issuedBy       Int?
   issuedByUser   User?    @relation("StudentCertificateIssuedBy", fields: [issuedBy], references: [id], onDelete: SetNull)
@@ -283,6 +284,8 @@ model CourseVersion {
 
 model Chapter {
   id        String   @id @default(uuid())
+  // Sequential numeric id, used only for S3 storage paths. Not a primary key.
+  chapterNumber Int  @unique @default(autoincrement())
   courseId  String
   course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
   title     String
@@ -655,6 +658,7 @@ model Logo {
   schoolId    String?
   description String?  @db.Text
   imageUrl    String
+  imageKey    String?  @db.Text
   createdAt   DateTime @default(now())
   deletedAt   DateTime?
   @@index([createdAt])
@@ -881,4 +885,47 @@ model ContactSubmission {
   @@index([status])
   @@index([email])
   @@index([createdAt])
+}
+
+// ============ Admin Audit Log ============
+// Records every admin-surface mutation (who did what, to which entity, from where).
+// Written by AuditInterceptor; queried by /admin/audit-logs.
+model AuditLog {
+  id         String   @id @default(uuid())
+  actorId    Int?
+  actor      User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  actorEmail String?
+  actorRole  String?
+  method     String // POST | PUT | PATCH | DELETE
+  path       String
+  entityType String? // schools | students | teachers | courses | ...
+  entityId   String?
+  payload    Json? // sanitized request body (passwords stripped)
+  statusCode Int?
+  success    Boolean  @default(true)
+  ipAddress  String?
+  userAgent  String?  @db.Text
+  createdAt  DateTime @default(now())
+
+  @@index([actorId])
+  @@index([entityType])
+  @@index([createdAt])
+  @@index([method])
+}
+
+// ============ Admin Saved Table Views ============
+// A named filter/sort/column combination for an admin data table (students, teachers, ...).
+model AdminSavedView {
+  id        String   @id @default(uuid())
+  userId    Int
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tableKey  String // students | teachers | schools | courses
+  name      String
+  state     Json // arbitrary filter/sort/column state owned by the frontend
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, tableKey, name])
+  @@index([userId, tableKey])
 }

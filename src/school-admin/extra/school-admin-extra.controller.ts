@@ -459,8 +459,10 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId) return { teachers: [] };
+    // Cap raised to 500: the teachers management page needs the full roster to
+    // compute its own counts and filters, and 100 silently truncated it.
     const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
+      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500)
       : 50;
 
     const teacherSchools = await this.db.teacherSchool.findMany({
@@ -1201,6 +1203,9 @@ export class SchoolAdminExtraController {
       where: studentWhere,
       include: { profile: true, studentSchools: true },
       orderBy: { createdAt: 'desc' },
+      // Defensive cap — protects against a pathologically large school
+      // without affecting any realistically sized school's results.
+      take: 5000,
     });
     const studentIds = allStudentsFiltered.map((u) => u.id);
     if (studentIds.length === 0) {
@@ -1237,8 +1242,8 @@ export class SchoolAdminExtraController {
     const [courses, schools] = await Promise.all([
       this.db.course.findMany({
         where: courseIdsForQuery.length
-          ? { id: { in: courseIdsForQuery } }
-          : undefined,
+          ? { id: { in: courseIdsForQuery }, deletedAt: null }
+          : { deletedAt: null },
       }),
       this.db.school.findMany({
         where: { id: schoolId },
@@ -2555,8 +2560,11 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId) return { reports: [] };
+    // Cap raised to 500: the reports management page derives its own
+    // Total/Pending/Approved/Rejected counts and per-teacher coverage from this
+    // list, so a 100-row ceiling produced wrong numbers for busy schools.
     const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
+      ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 500)
       : 50;
     const where: { schoolId: string; status?: string } = { schoolId };
     if (pending === '1' || pending === 'true') where.status = 'submitted';

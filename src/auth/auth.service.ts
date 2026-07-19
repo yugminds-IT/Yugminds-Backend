@@ -1,6 +1,8 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -20,8 +22,9 @@ export interface CreateUserOptions {
 }
 import * as bcrypt from 'bcrypt';
 import { tenantContext } from '../tenants/tenant-context';
-import { tenantScopedQuery } from '../tenants/tenant-scoped-query';
 import { RealtimeGateway } from '../common/realtime/realtime.gateway';
+import { AuthCacheService } from './auth-cache.service';
+import { RefreshTokenStoreService } from './refresh-token-store.service';
 
 export interface AuthTokens {
   accessToken: string;
@@ -46,6 +49,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly authCache: AuthCacheService,
+    private readonly refreshTokenStore: RefreshTokenStoreService,
   ) {}
 
   private async hashPassword(password: string): Promise<string> {
@@ -58,15 +63,6 @@ export class AuthService {
     hash: string,
   ): Promise<boolean> {
     return bcrypt.compare(password, hash);
-  }
-
-  /**
-   * Hash refresh tokens before storing in DB.
-   * We intentionally never persist the raw refresh token value.
-   */
-  private async hashRefreshToken(refreshToken: string): Promise<string> {
-    const saltRounds = 10;
-    return bcrypt.hash(refreshToken, saltRounds);
   }
 
   /**
@@ -133,27 +129,82 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 
-  /** Store refresh token in database (call after generating tokens) */
+  /**
+   * Issue a short-lived access token for a non-admin user so an admin can see
+   * the app exactly as that user does. No refresh token is issued — the
+   * impersonated session dies with the access token, and the admin's own
+   * refresh cookie (untouched) restores their session on exit.
+   */
+  async impersonate(
+    admin: { id: number; email: string },
+    targetUserId: number,
+  ): Promise<{
+    accessToken: string;
+    expiresIn: number;
+    user: { id: number; email: string; role: Role; full_name: string | null };
+  }> {
+    const target = await this.db.user.findUnique({
+      where: { id: targetUserId },
+      include: { profile: { select: { fullName: true } } },
+    });
+    if (!target || !target.isActive) {
+      throw new NotFoundException('User not found or inactive');
+    }
+    if (target.role === Role.admin || target.isSuperAdmin) {
+      throw new ForbiddenException('Cannot impersonate another admin');
+    }
+    if (!target.tenantId) {
+      throw new BadRequestException(
+        'Target user has no school/tenant assigned and cannot be impersonated',
+      );
+    }
+
+    const expiresInSeconds = 15 * 60;
+    const accessToken = await this.jwtService.signAsync(
+      {
+        sub: target.id,
+        email: target.email,
+        role: target.role,
+        isSuperAdmin: false,
+        tenantId: target.tenantId,
+        tokenVersion: target.tokenVersion,
+        impersonatorId: admin.id,
+        impersonatorEmail: admin.email,
+      },
+      {
+        secret: this.config.get<string>('JWT_ACCESS_SECRET'),
+        expiresIn: expiresInSeconds,
+      },
+    );
+
+    return {
+      accessToken,
+      expiresIn: expiresInSeconds,
+      user: {
+        id: target.id,
+        email: target.email,
+        role: target.role,
+        full_name: target.profile?.fullName ?? null,
+      },
+    };
+  }
+
+  /** Store refresh token in Redis (call after generating tokens) */
   private async storeRefreshToken(
     userId: number,
     refreshToken: string,
   ): Promise<void> {
-    const hashedRefreshToken = await this.hashRefreshToken(refreshToken);
     const refreshExpiry =
       this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
     const refreshTtlMs = this.parseExpiryToMs(
       refreshExpiry,
       'REFRESH_TOKEN_EXPIRY',
     );
-    const expiresAt = new Date(Date.now() + refreshTtlMs);
-
-    await this.db.refreshToken.create({
-      data: {
-        userId,
-        token: hashedRefreshToken,
-        expiresAt,
-      },
-    });
+    await this.refreshTokenStore.store(
+      userId,
+      refreshToken,
+      Math.ceil(refreshTtlMs / 1000),
+    );
   }
 
   private buildAuthResponse(user: User, tokens: AuthTokens): AuthResponse {
@@ -216,26 +267,7 @@ export class AuthService {
         });
 
         const tokens = await this.generateTokens(user);
-
-        // Store refresh token within transaction
-        const hashedRefreshToken = await this.hashRefreshToken(
-          tokens.refreshToken!,
-        );
-        const refreshExpiry =
-          this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
-        const refreshTtlMs = this.parseExpiryToMs(
-          refreshExpiry,
-          'REFRESH_TOKEN_EXPIRY',
-        );
-        const expiresAt = new Date(Date.now() + refreshTtlMs);
-
-        await tx.refreshToken.create({
-          data: {
-            userId: user.id,
-            token: hashedRefreshToken,
-            expiresAt,
-          },
-        });
+        await this.storeRefreshToken(user.id, tokens.refreshToken!);
 
         return this.buildAuthResponse(user, tokens);
       });
@@ -264,6 +296,22 @@ export class AuthService {
     const valid = await this.validatePassword(dto.password, user.password);
     if (!valid) {
       throw new UnauthorizedException('Invalid email or password');
+    }
+
+    // Maintenance mode (admin System Controls): block non-admin sign-ins.
+    if (user.role !== 'admin' && !user.isSuperAdmin) {
+      const maintenance = await this.db.systemSetting.findUnique({
+        where: { key: 'maintenance_mode' },
+      });
+      if (maintenance?.value === 'true') {
+        const msg = await this.db.systemSetting.findUnique({
+          where: { key: 'maintenance_message' },
+        });
+        throw new UnauthorizedException(
+          msg?.value ||
+            'Yugminds is undergoing scheduled maintenance. Please check back shortly.',
+        );
+      }
     }
 
     // Auto-heal teachers whose tenantId was never set (e.g. created via older code paths).
@@ -417,107 +465,49 @@ export class AuthService {
     const isGlobalUser =
       Boolean(payload.isSuperAdmin) || payload.role === 'admin';
 
-    if (isGlobalUser) {
-      return tenantContext.runSuperAdmin(async () => {
-        // SECURITY: Do not query DB by raw token.
-        // We fetch all refresh-token hashes for this user and bcrypt-compare in memory.
-        const now = new Date();
-        const storedTokensQuery = { where: { userId: payload.sub } };
-        const storedTokens = await this.db.refreshToken.findMany({
-          ...storedTokensQuery,
-          include: { user: true },
-        });
-
-        if (!storedTokens.length) {
-          throw new UnauthorizedException('Invalid refresh token');
-        }
-
-        // Compare all non-expired tokens in parallel to avoid serialising
-        // bcrypt (which is intentionally slow) across multiple device sessions.
-        const validCandidates = storedTokens.filter(
-          (row) => row.user && row.expiresAt >= now,
-        );
-        const comparisons = await Promise.all(
-          validCandidates.map(async (row) => ({
-            row,
-            ok: await bcrypt.compare(refreshToken, row.token),
-          })),
-        );
-        const matchedEntry = comparisons.find((c) => c.ok);
-        if (!matchedEntry) {
-          throw new UnauthorizedException('Invalid refresh token');
-        }
-        const matched = {
-          id: matchedEntry.row.id,
-          user: matchedEntry.row.user as User,
-        };
-
-        // Rotation: delete the matched refresh token hash, store a new one.
-        await this.db.refreshToken.delete({ where: { id: matched.id } });
-
-        const tokens = await this.generateTokens(matched.user);
-        await this.storeRefreshToken(matched.user.id, tokens.refreshToken!);
-
-        return this.buildAuthResponse(matched.user, tokens);
-      });
+    // SECURITY: Do not look up by raw token. We hold only bcrypt hashes in
+    // Redis, keyed by userId, and compare in memory.
+    const matchedTokenId = await this.refreshTokenStore.findMatch(
+      payload.sub,
+      refreshToken,
+    );
+    if (!matchedTokenId) {
+      throw new UnauthorizedException('Invalid refresh token');
     }
 
-    const tenantId =
-      payload.tenantId ??
-      (
-        await this.db.user.findUnique({
-          where: { id: payload.sub },
-          select: { tenantId: true },
-        })
-      )?.tenantId;
+    const runInTenantContext = async <T>(fn: () => Promise<T>): Promise<T> => {
+      if (isGlobalUser) {
+        return tenantContext.runSuperAdmin(fn);
+      }
+      const tenantId =
+        payload.tenantId ??
+        (
+          await this.db.user.findUnique({
+            where: { id: payload.sub },
+            select: { tenantId: true },
+          })
+        )?.tenantId;
+      if (!tenantId) {
+        throw new UnauthorizedException('tenantId missing');
+      }
+      return tenantContext.run(tenantId, fn);
+    };
 
-    if (!tenantId) {
-      throw new UnauthorizedException('tenantId missing');
-    }
-
-    return tenantContext.run(tenantId, async () => {
-      // SECURITY: Do not query DB by raw token.
-      // We fetch all refresh-token hashes for this user and bcrypt-compare in memory.
-      const now = new Date();
-      const storedTokensQuery = tenantScopedQuery(
-        { tenantId },
-        { where: { userId: payload.sub } },
-      );
-      const storedTokens = await this.db.refreshToken.findMany({
-        ...storedTokensQuery,
-        include: { user: true },
+    return runInTenantContext(async () => {
+      const user = await this.db.user.findUnique({
+        where: { id: payload.sub },
       });
-
-      if (!storedTokens.length) {
+      if (!user) {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
-      const validCandidates2 = storedTokens.filter(
-        (row) => row.user && row.expiresAt >= now,
-      );
-      const comparisons2 = await Promise.all(
-        validCandidates2.map(async (row) => ({
-          row,
-          ok: await bcrypt.compare(refreshToken, row.token),
-        })),
-      );
-      const matchedEntry2 = comparisons2.find((c) => c.ok);
-      if (!matchedEntry2) {
-        throw new UnauthorizedException('Invalid refresh token');
-      }
-      const matched = {
-        id: matchedEntry2.row.id,
-        user: matchedEntry2.row.user as User,
-      };
+      // Rotation: revoke the matched refresh token, issue and store a new one.
+      await this.refreshTokenStore.revoke(payload.sub, matchedTokenId);
 
-      // Rotation: delete the matched refresh token hash, store a new one.
-      // delete uses a unique selector; we already validated tenant via the matched user's tenantId.
-      await this.db.refreshToken.delete({ where: { id: matched.id } });
+      const tokens = await this.generateTokens(user);
+      await this.storeRefreshToken(user.id, tokens.refreshToken!);
 
-      const tokens = await this.generateTokens(matched.user);
-      await this.storeRefreshToken(matched.user.id, tokens.refreshToken!);
-
-      return this.buildAuthResponse(matched.user, tokens);
+      return this.buildAuthResponse(user, tokens);
     });
   }
 
@@ -563,23 +553,7 @@ export class AuthService {
     });
 
     // Invalidate all refresh tokens for the user (force re-login in other sessions)
-    const isGlobalUser = user.isSuperAdmin || user.role === 'admin';
-    if (isGlobalUser) {
-      await this.db.refreshToken.deleteMany({ where: { userId } });
-    } else {
-      const userTenantId = (
-        await this.db.user.findUnique({
-          where: { id: userId },
-          select: { tenantId: true },
-        })
-      )?.tenantId;
-      if (!userTenantId) throw new UnauthorizedException('tenantId missing');
-      const q = tenantScopedQuery(
-        { tenantId: userTenantId },
-        { where: { userId } },
-      );
-      await this.db.refreshToken.deleteMany(q);
-    }
+    await this.refreshTokenStore.revokeAll(userId);
   }
 
   /**
@@ -602,23 +576,7 @@ export class AuthService {
       data: { password: hashed, mustChangePassword: false } as never,
     });
 
-    const isGlobalUser = user.isSuperAdmin || user.role === 'admin';
-    if (isGlobalUser) {
-      await this.db.refreshToken.deleteMany({ where: { userId } });
-    } else {
-      const userTenantId = (
-        await this.db.user.findUnique({
-          where: { id: userId },
-          select: { tenantId: true },
-        })
-      )?.tenantId;
-      if (!userTenantId) throw new UnauthorizedException('tenantId missing');
-      const q = tenantScopedQuery(
-        { tenantId: userTenantId },
-        { where: { userId } },
-      );
-      await this.db.refreshToken.deleteMany(q);
-    }
+    await this.refreshTokenStore.revokeAll(userId);
   }
 
   async logout(userId: number, refreshToken?: string): Promise<void> {
@@ -629,79 +587,20 @@ export class AuthService {
       where: { id: userId },
       data: { tokenVersion: { increment: 1 } },
     });
+    await this.authCache.invalidate(userId);
 
     if (refreshToken && refreshToken.trim()) {
       const raw = refreshToken.trim();
-      const user = await this.db.user.findUnique({
-        where: { id: userId },
-        select: { isSuperAdmin: true, tenantId: true, role: true },
-      });
-      if (!user) throw new UnauthorizedException('User not found');
-
-      const isGlobalUser = user.isSuperAdmin || user.role === 'admin';
-      if (isGlobalUser) {
-        const storedTokens = await this.db.refreshToken.findMany({
-          where: { userId },
-          select: { id: true, token: true },
-        });
-
-        const logoutComparisons = await Promise.all(
-          storedTokens.map(async (row) => ({
-            row,
-            ok: await bcrypt.compare(raw, row.token),
-          })),
-        );
-        const logoutMatch = logoutComparisons.find((c) => c.ok);
-        if (logoutMatch) {
-          await this.db.refreshToken
-            .delete({ where: { id: logoutMatch.row.id } })
-            .catch(() => {});
-        }
-        return;
-      }
-
-      const userTenantId = user.tenantId;
-      if (!userTenantId) throw new UnauthorizedException('tenantId missing');
-      const storedTokensQ = tenantScopedQuery(
-        { tenantId: userTenantId },
-        { where: { userId } },
+      const matchedTokenId = await this.refreshTokenStore.findMatch(
+        userId,
+        raw,
       );
-      const storedTokens = await this.db.refreshToken.findMany({
-        ...storedTokensQ,
-        select: { id: true, token: true },
-      });
-
-      const logoutComparisons2 = await Promise.all(
-        storedTokens.map(async (row) => ({
-          row,
-          ok: await bcrypt.compare(raw, row.token),
-        })),
-      );
-      const logoutMatch2 = logoutComparisons2.find((c) => c.ok);
-      if (logoutMatch2) {
-        await this.db.refreshToken
-          .delete({ where: { id: logoutMatch2.row.id } })
-          .catch(() => {});
+      if (matchedTokenId) {
+        await this.refreshTokenStore.revoke(userId, matchedTokenId);
       }
       return;
     }
-    const user = await this.db.user.findUnique({
-      where: { id: userId },
-      select: { isSuperAdmin: true, tenantId: true, role: true },
-    });
-    if (!user) throw new UnauthorizedException('User not found');
 
-    const isGlobalUser = user.isSuperAdmin || user.role === 'admin';
-    if (isGlobalUser) {
-      await this.db.refreshToken.deleteMany({ where: { userId } });
-    } else {
-      const userTenantId = user.tenantId;
-      if (!userTenantId) throw new UnauthorizedException('tenantId missing');
-      const q = tenantScopedQuery(
-        { tenantId: userTenantId },
-        { where: { userId } },
-      );
-      await this.db.refreshToken.deleteMany(q);
-    }
+    await this.refreshTokenStore.revokeAll(userId);
   }
 }

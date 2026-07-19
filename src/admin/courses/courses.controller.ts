@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { Roles } from '../../auth/decorators/roles.decorator';
@@ -20,8 +21,9 @@ export class AdminCoursesController {
   constructor(private readonly service: AdminCoursesService) {}
 
   @Get()
-  list() {
-    return this.service.list();
+  list(@Query('limit') limit?: string) {
+    const parsed = limit ? parseInt(limit, 10) : undefined;
+    return this.service.list(parsed && parsed > 0 ? parsed : undefined);
   }
 
   @Get(':courseId/versions')

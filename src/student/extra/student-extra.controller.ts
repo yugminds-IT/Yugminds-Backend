@@ -24,6 +24,7 @@ import { AssignmentsHierarchyQueryDto } from './dto/assignments-hierarchy-query.
 import { SimpleProgressDto } from './dto/simple-progress.dto';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
+import { StorageService } from '../../common/storage/storage.service';
 
 @Controller('student')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -35,6 +36,7 @@ export class StudentExtraController {
     private readonly studentRanking: StudentRankingService,
     private readonly notificationsService: NotificationsService,
     private readonly dailyAssignments: StudentDailyAssignmentsService,
+    private readonly storage: StorageService,
   ) {}
 
   // ─── Notifications ────────────────────────────────────────────────────────
@@ -208,13 +210,12 @@ export class StudentExtraController {
     return 'YM-' + fullId.replace(/-/g, '').slice(0, 8).toUpperCase();
   }
 
-  static async svgToJpeg(svg: string): Promise<string> {
+  static async svgToJpegBuffer(svg: string): Promise<Buffer> {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const sharp = require('sharp') as typeof import('sharp');
-    const buffer = await sharp(Buffer.from(svg))
+    return sharp(Buffer.from(svg))
       .jpeg({ quality: 92, mozjpeg: true })
       .toBuffer();
-    return `data:image/jpeg;base64,${buffer.toString('base64')}`;
   }
 
   static buildCertificateSvg(
@@ -285,7 +286,7 @@ export class StudentExtraController {
       limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
     }),
   )
-  uploadAssignmentFile(
+  async uploadAssignmentFile(
     @CurrentUser() user: { id: number },
     @UploadedFile()
     file?: {
@@ -297,9 +298,11 @@ export class StudentExtraController {
   ) {
     if (!file) throw new BadRequestException('file is required');
     const mime = file.mimetype || 'application/octet-stream';
-    const b64 = file.buffer.toString('base64');
-    const dataUrl = `data:${mime};base64,${b64}`;
-    // No external storage configured; store as data URL for now (consistent with other media in this repo)
+    const key = this.storage.buildKey(
+      `assignment-submissions/${user.id}`,
+      file.originalname,
+    );
+    const fileUrl = await this.storage.uploadBuffer(key, file.buffer, mime);
     return {
       success: true,
       file: {
@@ -307,7 +310,7 @@ export class StudentExtraController {
         filename: file.originalname,
         mime_type: mime,
         size: file.size,
-        fileUrl: dataUrl,
+        fileUrl,
       },
     };
   }
@@ -324,7 +327,7 @@ export class StudentExtraController {
     const [courseList, chapters, contents, progress, studentSchool] =
       await Promise.all([
         this.db.course.findMany({
-          where: { id: { in: courseIds } },
+          where: { id: { in: courseIds }, deletedAt: null },
         }),
         this.db.chapter.findMany({
           where: { courseId: { in: courseIds } },
@@ -437,7 +440,12 @@ export class StudentExtraController {
     }
 
     const grade = studentSchool?.grade ?? '';
-    const courses = enrollments.map((e) => {
+    // Enrollments whose course was excluded by the deletedAt:null filter
+    // above (i.e. trashed by an admin) must not surface here — otherwise a
+    // trashed course keeps appearing in "My Courses" with a blank title.
+    const courses = enrollments
+      .filter((e) => courseById.has(e.courseId))
+      .map((e) => {
       const course = courseById.get(e.courseId);
       const courseChapters = chaptersByCourse.get(e.courseId) ?? [];
       const totalChapters = courseChapters.length;
@@ -874,7 +882,7 @@ export class StudentExtraController {
       chapters.map((c) => [c.id, c.courseId] as const),
     );
     const courses = await this.db.course.findMany({
-      where: { id: { in: courseIds } },
+      where: { id: { in: courseIds }, deletedAt: null },
     });
     const courseById = new Map(courses.map((c) => [c.id, c] as const));
     const assignments = await this.db.assignment.findMany({
@@ -988,7 +996,7 @@ export class StudentExtraController {
 
     const [courses, chapters, assignments] = await Promise.all([
       this.db.course.findMany({
-        where: { id: { in: courseIds } },
+        where: { id: { in: courseIds }, deletedAt: null },
         select: { id: true, title: true },
       }),
       this.db.chapter.findMany({
@@ -1451,7 +1459,7 @@ export class StudentExtraController {
     // When auto-graded, also update the school-wide StudentScoreSummary so ranks stay current
     if (canAutoGrade) {
       // Drop the shared ranking cache so all dashboards reflect the new score.
-      this.studentRanking.invalidate();
+      await this.studentRanking.invalidate();
       const studentEnrollment = await this.db.studentSchool.findFirst({
         where: { studentId: user.id, isActive: true },
         select: { schoolId: true },
@@ -1612,10 +1620,19 @@ export class StudentExtraController {
       },
       templateSetting?.value ?? null,
     );
-    const dataUrl = await StudentExtraController.svgToJpeg(svg);
+    const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
+    const certKey = this.storage.buildKey(
+      `certificates/${user.id}`,
+      `${created.id}.jpg`,
+    );
+    const certUrl = await this.storage.uploadBuffer(
+      certKey,
+      jpegBuffer,
+      'image/jpeg',
+    );
     const updated = await this.db.studentCertificate.update({
       where: { id: created.id },
-      data: { certificateUrl: dataUrl },
+      data: { certificateUrl: certUrl, certificateKey: certKey },
     });
     return {
       success: true,
