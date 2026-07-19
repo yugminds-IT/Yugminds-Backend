@@ -457,7 +457,8 @@ export class TeacherExtraController {
         where: {
           teacherId: user.id,
           schoolId: { in: schoolIds },
-          createdAt: { gte: safeFrom, lte: safeTo },
+          startDate: { lte: safeTo },
+          endDate: { gte: safeFrom },
         },
         select: { status: true, createdAt: true },
       }),

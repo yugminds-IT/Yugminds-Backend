@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type Redis from 'ioredis';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
 
@@ -19,6 +19,7 @@ export interface CachedAuthUser {
 @Injectable()
 export class AuthCacheService {
   private readonly TTL_SECONDS = 120;
+  private readonly logger = new Logger(AuthCacheService.name);
 
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
@@ -26,23 +27,40 @@ export class AuthCacheService {
     return `authuser:${userId}`;
   }
 
+  // This is purely a performance cache — JwtStrategy always falls back to a
+  // direct Postgres lookup on a miss. So a Redis error here should degrade
+  // to "cache miss" (slower, still correct) rather than fail the request.
+
   async get(userId: number): Promise<CachedAuthUser | null> {
-    const cached = await this.redis.get(this.key(userId));
-    return cached ? (JSON.parse(cached) as CachedAuthUser) : null;
+    try {
+      const cached = await this.redis.get(this.key(userId));
+      return cached ? (JSON.parse(cached) as CachedAuthUser) : null;
+    } catch (err) {
+      this.logger.warn(`Redis GET failed, falling back to DB: ${err instanceof Error ? err.message : String(err)}`);
+      return null;
+    }
   }
 
   async set(userId: number, data: CachedAuthUser): Promise<void> {
-    await this.redis.set(
-      this.key(userId),
-      JSON.stringify(data),
-      'EX',
-      this.TTL_SECONDS,
-    );
+    try {
+      await this.redis.set(
+        this.key(userId),
+        JSON.stringify(data),
+        'EX',
+        this.TTL_SECONDS,
+      );
+    } catch (err) {
+      this.logger.warn(`Redis SET failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   async invalidate(userId: number | number[]): Promise<void> {
     const ids = Array.isArray(userId) ? userId : [userId];
     if (!ids.length) return;
-    await this.redis.del(...ids.map((id) => this.key(id)));
+    try {
+      await this.redis.del(...ids.map((id) => this.key(id)));
+    } catch (err) {
+      this.logger.warn(`Redis DEL failed (non-fatal, entry will expire via TTL): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 }
