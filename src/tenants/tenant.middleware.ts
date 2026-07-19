@@ -45,6 +45,13 @@ export class TenantMiddleware implements NestMiddleware {
       ? String(req.headers[headerName])
       : null;
 
+    // Header-based tenant is an explicit, deliberate claim from the caller —
+    // failing to resolve it is a real error. Subdomain-based tenant is a
+    // heuristic guess (e.g. the app's own host "devbackend.yugminds.org" has
+    // 3 dot-separated parts and looks exactly like "<tenant>.yugminds.org",
+    // but isn't one) — failing to resolve it must NOT block the request,
+    // since `TenantContextInterceptor` only ever treats this value as an
+    // optional best-effort cross-check, never a requirement.
     const tenantKey = (headerTenant ?? subdomainTenant ?? '').trim();
     if (!tenantKey) {
       // Leave undefined; interceptor will decide how strict to be.
@@ -68,7 +75,12 @@ export class TenantMiddleware implements NestMiddleware {
         )?.id;
 
     if (!expectedTenantId) {
-      throw new UnauthorizedException('Invalid tenant');
+      if (headerTenant) {
+        throw new UnauthorizedException('Invalid tenant');
+      }
+      // Unresolved subdomain guess — not a real tenant slug, just proceed.
+      (req as any).tenantIdExpected = undefined;
+      return next();
     }
 
     (req as any).tenantIdExpected = expectedTenantId;
