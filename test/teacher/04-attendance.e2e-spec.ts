@@ -9,14 +9,29 @@ import {
   QaFixture,
 } from '../admin/support/fixtures';
 
+/**
+ * Next Monday on/after `from` (UTC date-only), formatted YYYY-MM-DD. The
+ * fixture's teacher-working-days history only starts "today" (set up fresh
+ * by createQaFixture at test-run time) and its ClassSchedule is pinned to
+ * Monday — a report date must be BOTH on/after today AND a Monday, or the
+ * "today" status reads back as "Not-Scheduled" instead of "Present". A
+ * hardcoded past date breaks this the moment it's no longer within the
+ * fixture's (freshly-created) working-days window.
+ */
+function nextMonday(from: Date): string {
+  const d = new Date(from);
+  const day = d.getUTCDay();
+  const daysUntilMonday = (8 - day) % 7 || 7;
+  d.setUTCDate(d.getUTCDate() + (day === 1 ? 0 : daysUntilMonday));
+  return d.toISOString().split('T')[0];
+}
+
 describe('Teacher attendance', () => {
   let app: INestApplication;
   let fixture: QaFixture;
   let teacherAuth: [string, string];
-  // Fixture schedule is pinned to Monday; pick a fixed non-Monday date so
-  // report-driven attendance marking doesn't depend on the schedule lining up.
-  const reportDate = '2026-01-06'; // Tuesday
-  const reportDateYearMonth = '2026-01';
+  const reportDate = nextMonday(new Date());
+  const reportDateYearMonth = reportDate.slice(0, 7);
 
   beforeAll(async () => {
     app = await bootstrapApp();

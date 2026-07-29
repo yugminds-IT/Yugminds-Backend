@@ -6,7 +6,7 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { validatePasswordStrength } from '../../common/utils/password.util';
+import { validatePasswordStrength, deriveFriendlyPassword } from '../../common/utils/password.util';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
@@ -28,6 +28,8 @@ export type StudentDetailResponse = {
   tenantId: string | null;
   createdAt: Date;
   student_schools: StudentSchoolDto[];
+  /** Plaintext initial password — present only until the student changes it. */
+  initial_password: string | null;
 };
 
 type UserWithRelations = Awaited<
@@ -67,6 +69,7 @@ export class AdminStudentsService {
       parent_phone: profile?.parentPhone ?? null,
       tenantId: u.tenantId ?? null,
       createdAt: u.createdAt,
+      initial_password: (u as { initialPassword?: string | null }).initialPassword ?? null,
       student_schools: (u.studentSchools ?? []).map((ss) => ({
         school_id: ss.schoolId,
         school_name: ss.school?.name ?? null,
@@ -226,6 +229,8 @@ export class AdminStudentsService {
       data: {
         email,
         password: hash,
+        initialPassword: password,
+        mustChangePassword: true,
         role: Role.student,
         tenantId: schoolId,
       },
@@ -273,6 +278,7 @@ export class AdminStudentsService {
       user.id,
       schoolId,
       grade,
+      section,
     );
 
     const created = await this.db.user.findFirst({
@@ -283,6 +289,170 @@ export class AdminStudentsService {
       },
     });
     return this.toStudentDetail(created as UserWithRelations);
+  }
+
+  private genPassword(fullName: string | undefined | null): string {
+    return deriveFriendlyPassword(fullName);
+  }
+
+  /**
+   * Bulk-creates students from a parsed CSV/Excel row array for a single
+   * school. Mirrors the school-admin equivalent (bulkImportStudents in
+   * school-admin-extra.controller.ts) but takes an explicit schoolId since
+   * admin isn't tenant-scoped. `dryRun` validates every row (including
+   * password strength for any row-supplied password) without writing
+   * anything, so a large import can be checked end-to-end before committing.
+   */
+  async bulkImport(
+    schoolId: string | undefined,
+    rows: Array<Record<string, unknown>>,
+    dryRun: boolean,
+  ) {
+    if (!schoolId) throw new BadRequestException('school_id is required');
+    if (!Array.isArray(rows) || rows.length === 0) {
+      throw new BadRequestException('No students provided');
+    }
+    if (rows.length > 500) {
+      throw new BadRequestException(
+        'Bulk import limit is 500 students per request',
+      );
+    }
+
+
+    const results: Array<{
+      index: number;
+      email: string | null;
+      success: boolean;
+      error?: string;
+      student_id?: number;
+      generated_password?: string;
+    }> = [];
+
+    // Rows sharing an email within the same request never touch the DB (a
+    // duplicate email doesn't exist there yet), so this catches what the
+    // per-row findUnique below can't — independent of any frontend check.
+    const seenEmails = new Set<string>();
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i] ?? {};
+      const email = String(r.email ?? '').trim().toLowerCase();
+      const suppliedPassword = String(r.password ?? '').trim();
+
+      if (!email) {
+        results.push({ index: i, email: null, success: false, error: 'Email is required' });
+        continue;
+      }
+
+      if (seenEmails.has(email)) {
+        results.push({ index: i, email, success: false, error: 'Duplicate email within this import' });
+        continue;
+      }
+      seenEmails.add(email);
+
+      const exists = await this.db.user.findUnique({ where: { email } });
+      if (exists) {
+        results.push({ index: i, email, success: false, error: 'Email already exists' });
+        continue;
+      }
+
+      let effectivePassword: string;
+      try {
+        if (suppliedPassword) {
+          validatePasswordStrength(suppliedPassword);
+          effectivePassword = suppliedPassword;
+        } else {
+          effectivePassword = this.genPassword(r.full_name as string | undefined);
+        }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Invalid password';
+        results.push({ index: i, email, success: false, error: msg });
+        continue;
+      }
+
+      if (dryRun) {
+        results.push({
+          index: i,
+          email,
+          success: true,
+          generated_password: suppliedPassword ? undefined : effectivePassword,
+        });
+        continue;
+      }
+
+      try {
+        const hash = await bcrypt.hash(effectivePassword, 10);
+        const grade = (r.grade as string | undefined) ?? null;
+        const rowSection = (r.section as string | undefined) ?? null;
+        const created = await this.db.$transaction(async (tx) => {
+          const newUser = await tx.user.create({
+            data: {
+              email,
+              password: hash,
+              initialPassword: effectivePassword,
+              mustChangePassword: true,
+              role: Role.student,
+              tenantId: schoolId,
+            },
+          });
+
+          await tx.profile.upsert({
+            where: { userId: newUser.id },
+            create: {
+              userId: newUser.id,
+              fullName: (r.full_name as string | undefined) ?? null,
+              parentName: (r.parent_name as string | undefined) ?? null,
+              parentPhone: (r.parent_phone as string | undefined) ?? null,
+              schoolId,
+            },
+            update: {
+              fullName: (r.full_name as string | undefined) ?? null,
+              parentName: (r.parent_name as string | undefined) ?? null,
+              parentPhone: (r.parent_phone as string | undefined) ?? null,
+            },
+          });
+
+          await tx.studentSchool.create({
+            data: {
+              studentId: newUser.id,
+              schoolId,
+              grade,
+              section: rowSection,
+              isActive: true,
+            },
+          });
+
+          return { userId: newUser.id };
+        });
+
+        await this.enrollmentService.enrollStudentInRelevantCourses(
+          created.userId,
+          schoolId,
+          grade,
+          rowSection,
+        );
+
+        results.push({
+          index: i,
+          email,
+          success: true,
+          student_id: created.userId,
+          generated_password: suppliedPassword ? undefined : effectivePassword,
+        });
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : 'Failed to create student';
+        results.push({ index: i, email, success: false, error: msg });
+      }
+    }
+
+    const summary = {
+      total: results.length,
+      success: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+      generated_passwords: results.filter((r) => r.success && r.generated_password).length,
+      dry_run: dryRun,
+    };
+
+    return { success: true, summary, results };
   }
 
   async update(
@@ -299,6 +469,8 @@ export class AdminStudentsService {
       const rawPw = String(body.password).trim();
       validatePasswordStrength(rawPw);
       data.password = await bcrypt.hash(rawPw, 10);
+      data.initialPassword = rawPw;
+      data.mustChangePassword = true;
     }
 
     const schoolId = (body.school_id ?? body.tenantId) as string | undefined;
@@ -408,6 +580,7 @@ export class AdminStudentsService {
         studentId,
         ss.schoolId,
         ss.grade,
+        ss.section,
       );
     }
     const after = await this.db.studentCourse.count({ where: { studentId } });
@@ -501,38 +674,66 @@ export class AdminStudentsService {
         return { success: errors.length === 0, enrolled: succeeded, errors };
       }
       case 'delete': {
-        const result = await this.db.user.updateMany({
-          where: { id: { in: ids }, role: Role.student },
-          data: {
-            deletedAt: new Date(),
-            isActive: false,
-            tokenVersion: { increment: 1 },
-          },
-        });
+        // Permanent delete, matching the single-student delete() behavior —
+        // frees emails for reuse immediately rather than leaving them
+        // reserved by a soft-deleted row.
         await this.authCache.invalidate(ids);
+        const result = await this.db.user.deleteMany({
+          where: { id: { in: ids }, role: Role.student },
+        });
         return { success: true, deleted: result.count };
+      }
+      case 'reset_password': {
+        // Issues each student a brand-new password, immediately invalidating
+        // their old one (tokenVersion bump + auth cache clear) — this is a
+        // real mutation, only ever triggered by an explicit admin opt-in.
+        // Also stored as initialPassword/mustChangePassword, same as at
+        // creation, so it's retrievable again until the student changes it.
+        const namesById = new Map(
+          (
+            await this.db.profile.findMany({
+              where: { userId: { in: ids } },
+              select: { userId: true, fullName: true },
+            })
+          ).map((p) => [p.userId, p.fullName]),
+        );
+
+        const results: Array<{ id: number; new_password: string }> = [];
+        for (const id of ids) {
+          const newPassword = this.genPassword(namesById.get(id));
+          const hash = await bcrypt.hash(newPassword, 10);
+          await this.db.user.update({
+            where: { id },
+            data: {
+              password: hash,
+              initialPassword: newPassword,
+              mustChangePassword: true,
+              tokenVersion: { increment: 1 },
+            },
+          });
+          await this.authCache.invalidate(id);
+          results.push({ id, new_password: newPassword });
+        }
+        return { success: true, results };
       }
       default:
         throw new BadRequestException(
-          'action must be one of: move, enroll, delete',
+          'action must be one of: move, enroll, delete, reset_password',
         );
     }
   }
 
+  /**
+   * Permanently removes the student: the row is deleted outright (not
+   * soft-deleted), immediately freeing their email for reuse — e.g. by a
+   * later bulk import. Mirrors the same permanent-delete choice already
+   * made for schools (AdminSchoolsService.delete).
+   */
   async delete(id: string) {
     const studentId = parseInt(id, 10);
     try {
-      // Soft delete: record lands in the admin Trash and can be restored.
-      // tokenVersion bump invalidates any live sessions immediately.
-      await this.db.user.update({
-        where: { id: studentId },
-        data: {
-          deletedAt: new Date(),
-          isActive: false,
-          tokenVersion: { increment: 1 },
-        },
-      });
       await this.authCache.invalidate(studentId);
+      await this.db.user.delete({ where: { id: studentId } });
     } catch (err: unknown) {
       // P2025 = record already deleted — treat as success
       if ((err as { code?: string })?.code !== 'P2025') throw err;

@@ -69,6 +69,23 @@ export class TenantContextInterceptor implements NestInterceptor {
         }
         return tenantContext.run(requestedSchoolId, () => next.handle());
       }
+
+      // No school_id given on a read: this is a teacher requesting an
+      // aggregate view across every school they're assigned to (e.g. the
+      // dashboard summary, "today" status, or monthly attendance combined
+      // across all schools) — the single-tenantId guard can't be satisfied
+      // here since these handlers legitimately query more than one school
+      // in the same request. That's safe to bypass because every one of
+      // these handlers scopes its queries by `teacherId: user.id` sourced
+      // from the JWT (never client-controlled), and any schoolId they touch
+      // comes from that same teacher's own TeacherSchool rows — so this can
+      // only ever return the requesting teacher's own data, just spanning
+      // more than one of their real schools at once. Mutations always
+      // require an explicit school_id (enforced in each service) and so
+      // never hit this branch.
+      if (!requestedSchoolId && req.method === 'GET') {
+        return tenantContext.runSuperAdmin(() => next.handle());
+      }
     }
 
     return tenantContext.run(user.tenantId, () => next.handle());

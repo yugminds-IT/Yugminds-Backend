@@ -21,8 +21,9 @@ export class AdminDashboardController {
   getAnalytics(
     @Query('from') from?: string,
     @Query('to') to?: string,
+    @Query('force') force?: string,
   ) {
-    return this.service.getAnalytics(from, to);
+    return this.service.getAnalytics(from, to, force === 'true' || force === '1');
   }
 
   @Get('assignment-analytics')

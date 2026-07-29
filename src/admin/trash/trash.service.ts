@@ -131,6 +131,16 @@ export class TrashService {
           where: { id: userId, deletedAt: { not: null } },
         });
         if (!user) throw new NotFoundException('Trashed user not found');
+        // TeacherReport.teacherId has no FK relation to User (a report must
+        // survive a teacher being soft-deleted so history stays visible), so
+        // a hard delete here would otherwise leave orphaned report rows that
+        // can never resolve a teacher name again ("Unknown" in the admin UI).
+        await this.db.teacherReport.deleteMany({ where: { teacherId: userId } });
+        // Same gap for TeacherLeave — its teacherId relation isn't enforced
+        // at the DB level either, so it would otherwise survive as a
+        // permanently-orphaned "pending" leave request no admin can ever
+        // resolve (inflates the dashboard's pending-leaves count forever).
+        await this.db.teacherLeave.deleteMany({ where: { teacherId: userId } });
         await this.db.user.delete({ where: { id: userId } });
         return { success: true };
       }

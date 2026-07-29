@@ -1,9 +1,13 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 
 @Injectable()
 export class TeacherDashboardService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly teacherSchedule: TeacherScheduleService,
+  ) {}
 
   private toDateOnly(dateStr: string): Date | null {
     const d = new Date(dateStr + 'T12:00:00.000Z');
@@ -85,17 +89,29 @@ export class TeacherDashboardService {
     );
     const totalStudents = studentCounts.reduce((sum, n) => sum + n, 0);
 
-    // Today's classes = distinct scheduled periods for this teacher today
+    // Today's classes = distinct scheduled periods for this teacher today,
+    // restricted to schools the teacher is actually on duty at today (per
+    // TeacherWorkingDaysHistory + SchoolCalendar) — not just wherever
+    // ClassSchedule happens to have a same-weekday row, which can go stale
+    // after a reassignment or ignore a declared holiday.
     const dayOfWeek = dayStart.getUTCDay();
-    const schedulesToday = await this.db.classSchedule.findMany({
-      where: {
-        teacherId,
-        schoolId: { in: schoolIds },
-        dayOfWeek,
-        isActive: true,
-      },
-      select: { periodId: true },
-    });
+    const workStatus = await this.teacherSchedule.getWorkStatusForDate(
+      teacherId,
+      schoolIds,
+      dayStart,
+    );
+    const schedulesToday =
+      workStatus.workingSchoolIds.length > 0
+        ? await this.db.classSchedule.findMany({
+            where: {
+              teacherId,
+              schoolId: { in: workStatus.workingSchoolIds },
+              dayOfWeek,
+              isActive: true,
+            },
+            select: { periodId: true },
+          })
+        : [];
     const todaysClasses = new Set(schedulesToday.map((s) => s.periodId)).size;
 
     // Pending reports = submitted reports today (awaiting approval)
@@ -166,7 +182,13 @@ export class TeacherDashboardService {
         pendingLeaves,
         totalStudents,
       },
-      meta: { school_ids: schoolIds, date: dateStr },
+      meta: {
+        school_ids: schoolIds,
+        date: dateStr,
+        working_school_ids_today: workStatus.workingSchoolIds,
+        holiday_school_ids_today: workStatus.holidaySchoolIds,
+        off_schedule_school_ids_today: workStatus.offScheduleSchoolIds,
+      },
     };
   }
 }

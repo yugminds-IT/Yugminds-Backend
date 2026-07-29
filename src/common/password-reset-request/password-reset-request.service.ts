@@ -7,6 +7,8 @@ import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service
 export interface ListOptions {
   status?: string;
   limit?: number;
+  offset?: number;
+  search?: string;
   schoolId?: string | null;
 }
 
@@ -35,12 +37,17 @@ export class PasswordResetRequestService {
   }
 
   async list(opts: ListOptions = {}) {
-    const { status, limit = 100, schoolId } = opts;
+    const { status, limit = 100, offset = 0, search, schoolId } = opts;
     const take = Math.min(limit, 200);
+    const skip = Math.max(offset, 0);
 
     const where: any = {};
 
-    if (status && status !== 'all') {
+    // 'resolved' is a sentinel meaning "anything but pending" — used by the
+    // History tab, which has no single matching status of its own.
+    if (status === 'resolved') {
+      where.status = { not: 'pending' };
+    } else if (status && status !== 'all') {
       where.status = status;
     }
 
@@ -48,23 +55,61 @@ export class PasswordResetRequestService {
       where.schoolId = schoolId;
     }
 
-    const requests = await this.db.passwordResetRequest.findMany({
-      where,
-      take,
-      orderBy: { requestedAt: 'desc' },
-      include: {
-        user: {
-          include: {
-            profile: true,
+    const q = (search ?? '').trim();
+    if (q) {
+      // Role is an enum, so it can't take a `contains` filter — instead match
+      // against whichever enum values textually contain the search term
+      // (e.g. "teach" -> ['teacher']), and OR that in alongside the other
+      // free-text matches (requester email/name, approver email/name, school name).
+      const ROLES = ['admin', 'school_admin', 'teacher', 'student'] as const;
+      const matchedRoles = ROLES.filter((r) =>
+        r.replace(/_/g, ' ').toLowerCase().includes(q.toLowerCase()),
+      );
+      const matchingSchools = await this.db.school.findMany({
+        where: { name: { contains: q, mode: 'insensitive' } },
+        select: { id: true },
+      });
+      const schoolIdMatches = matchingSchools.map((s) => s.id);
+
+      where.OR = [
+        { user: { email: { contains: q, mode: 'insensitive' } } },
+        { user: { profile: { fullName: { contains: q, mode: 'insensitive' } } } },
+        { approvedByUser: { email: { contains: q, mode: 'insensitive' } } },
+        {
+          approvedByUser: {
+            profile: { fullName: { contains: q, mode: 'insensitive' } },
           },
         },
-        approvedByUser: {
-          include: {
-            profile: true,
+        ...(matchedRoles.length > 0
+          ? [{ user: { role: { in: matchedRoles as any } } }]
+          : []),
+        ...(schoolIdMatches.length > 0
+          ? [{ schoolId: { in: schoolIdMatches } }]
+          : []),
+      ];
+    }
+
+    const [total, requests] = await Promise.all([
+      this.db.passwordResetRequest.count({ where }),
+      this.db.passwordResetRequest.findMany({
+        where,
+        take,
+        skip,
+        orderBy: { requestedAt: 'desc' },
+        include: {
+          user: {
+            include: {
+              profile: true,
+            },
+          },
+          approvedByUser: {
+            include: {
+              profile: true,
+            },
           },
         },
-      },
-    });
+      }),
+    ]);
 
     const schoolIds = [
       ...new Set(requests.map((r) => r.schoolId).filter(Boolean)),
@@ -109,6 +154,7 @@ export class PasswordResetRequestService {
             ? { id: r.schoolId, name: schoolMap.get(r.schoolId)! }
             : undefined,
       })),
+      total,
     };
   }
 
@@ -167,7 +213,11 @@ export class PasswordResetRequestService {
       // Set new password and force password change on next login
       await this.db.user.update({
         where: { id: request.userId },
-        data: { password: hashedPassword, mustChangePassword: true } as never,
+        data: {
+          password: hashedPassword,
+          mustChangePassword: true,
+          initialPassword: tempPassword,
+        } as never,
       });
 
       // Invalidate all existing sessions so the old password can't be used
@@ -258,93 +308,25 @@ export class PasswordResetRequestService {
     throw new BadRequestException('status must be "approved" or "rejected"');
   }
 
-  async verifyResetToken(
-    requestId: string,
-    token: string,
-  ): Promise<{ valid: boolean }> {
-    if (!requestId || !token) return { valid: false };
-
-    const request = await this.db.passwordResetRequest.findUnique({
-      where: { id: requestId },
-    });
-
-    if (
-      !request ||
-      !request.resetToken ||
-      !request.resetTokenExpiresAt ||
-      request.status !== 'pending'
-    ) {
-      return { valid: false };
-    }
-
-    if (request.resetTokenExpiresAt < new Date()) {
-      return { valid: false };
-    }
-
-    const matches = await bcrypt.compare(token, request.resetToken);
-    return { valid: matches };
-  }
-
-  async completePasswordReset(
-    requestId: string,
-    token: string,
-    newPassword: string,
-  ): Promise<void> {
-    if (!requestId || !token || !newPassword) {
-      throw new BadRequestException('Missing required fields');
-    }
-
-    const hashedPassword = await this.hashPassword(newPassword);
-
-    // Atomic: fetch, verify, and consume the token inside a single transaction.
-    // This prevents a TOCTOU race where two concurrent requests both pass verify
-    // but then both update the user's password.
-    const resetUserId = await this.db.$transaction(async (tx) => {
-      const request = await tx.passwordResetRequest.findUnique({
-        where: { id: requestId },
-      });
-
-      if (
-        !request ||
-        !request.resetToken ||
-        !request.resetTokenExpiresAt ||
-        request.status !== 'pending'
-      ) {
-        throw new BadRequestException('Invalid or expired reset token');
-      }
-
-      if (request.resetTokenExpiresAt < new Date()) {
-        throw new BadRequestException('Invalid or expired reset token');
-      }
-
-      const matches = await bcrypt.compare(token, request.resetToken);
-      if (!matches)
-        throw new BadRequestException('Invalid or expired reset token');
-
-      // Consume the token first — prevents a second concurrent request from also succeeding.
-      await tx.passwordResetRequest.update({
-        where: { id: requestId },
-        data: {
-          status: 'completed',
-          resetToken: null,
-          resetTokenExpiresAt: null,
-        },
-      });
-
-      await tx.user.update({
-        where: { id: request.userId },
-        data: { password: hashedPassword, mustChangePassword: false } as never,
-      });
-
-      return request.userId;
-    });
-
-    await this.refreshTokenStore.revokeAll(resetUserId);
-  }
-
   async delete(id: string): Promise<void> {
     const trimmed = (id ?? '').trim();
     if (!trimmed) throw new BadRequestException('id is required');
+
+    const request = await this.db.passwordResetRequest.findUnique({
+      where: { id: trimmed },
+      select: { status: true },
+    });
+    if (!request)
+      throw new BadRequestException('Password reset request not found');
+    // A pending request must be approved or rejected first — both paths
+    // notify the requester — rather than silently discarded via delete,
+    // which the requester would never learn happened.
+    if (request.status === 'pending') {
+      throw new BadRequestException(
+        'Cannot delete a pending request — approve or reject it first',
+      );
+    }
+
     await this.db.passwordResetRequest
       .delete({ where: { id: trimmed } })
       .catch((e: { code?: string }) => {

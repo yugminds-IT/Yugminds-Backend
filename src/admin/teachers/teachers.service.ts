@@ -4,11 +4,12 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { Role } from '@prisma/client';
+import { Role, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength } from '../../common/utils/password.util';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { getTodayIstDateStr } from '../../common/utils/date.util';
 
 type SchoolAssignment = {
   school_id: string;
@@ -17,9 +18,30 @@ type SchoolAssignment = {
   grade_sections_assigned?: Array<{ grade: string; sections: string[] }>;
   subjects?: string[];
   working_days_per_week?: number;
+  /** Which weekdays the teacher works at this school — 0=Sun..6=Sat. */
+  working_days?: number[];
+  /** When this working-days pattern takes effect (YYYY-MM-DD); defaults to today. */
+  effective_from?: string;
   max_students_per_session?: number;
   is_primary?: boolean;
 };
+
+/** Dedupe/sort/clamp to 0-6; falls back to Mon-Fri when absent or empty. */
+function normalizeWorkingDays(input?: number[]): number[] {
+  if (!Array.isArray(input)) return [1, 2, 3, 4, 5];
+  const days = [...new Set(input.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort(
+    (a, b) => a - b,
+  );
+  return days.length > 0 ? days : [1, 2, 3, 4, 5];
+}
+
+/** Clamp/validate an effective-from date string; falls back to today (IST). */
+function normalizeEffectiveFrom(input?: string): Date {
+  if (input && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return new Date(`${input}T00:00:00.000Z`);
+  }
+  return new Date(`${getTodayIstDateStr()}T00:00:00.000Z`);
+}
 
 /** Per-school grade with sections for API response */
 export type GradeAssignedDto = {
@@ -55,6 +77,7 @@ export type TeacherDetailResponse = {
     schoolName: string;
     gradesAssigned: GradeAssignedDto[];
     subjects: string[];
+    workingDays: number[];
     sectionsAssignedToOtherTeachers?: SectionAssignedToOtherDto[];
   }>;
 };
@@ -73,6 +96,7 @@ type UserWithRelations = Awaited<
     schoolId: string;
     school: { name: string };
     subjects: string[];
+    workingDays: number[];
   }>;
   teacherSectionAssignments: Array<{
     sectionId: string;
@@ -128,6 +152,7 @@ export class AdminTeachersService {
         ts.schoolId,
       ),
       subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
+      workingDays: normalizeWorkingDays(ts.workingDays),
       sectionsAssignedToOtherTeachers:
         otherAssignmentsBySchool?.[ts.schoolId] ?? [],
     }));
@@ -366,7 +391,64 @@ export class AdminTeachersService {
     );
   }
 
-  async create(body: Record<string, unknown>): Promise<TeacherDetailResponse> {
+  /**
+   * A teacher-school pair's earliest recorded `effectiveFrom` IS that
+   * assignment's real start date — nothing before it should ever count as a
+   * working day for attendance, leave routing, or the teacher calendar (see
+   * `resolveWorkingDaysForDate`). Rejects any write that would push a new
+   * entry earlier than that floor, since doing so would silently move the
+   * assignment's apparent start date backward for every already-computed
+   * date in between. Re-saving the SAME `effectiveFrom` as the existing
+   * earliest entry is still allowed — that corrects it in place via the
+   * upsert below, it doesn't add an earlier one.
+   */
+  private async assertEffectiveFromNotBeforeStart(
+    db: DatabaseService | Prisma.TransactionClient,
+    teacherId: number,
+    schoolId: string,
+    effectiveFrom: Date,
+  ): Promise<void> {
+    const earliest = await db.teacherWorkingDaysHistory.aggregate({
+      where: { teacherId, schoolId },
+      _min: { effectiveFrom: true },
+    });
+    const floor = earliest._min.effectiveFrom;
+    if (floor && effectiveFrom < floor) {
+      throw new BadRequestException(
+        `Effective date cannot be before ${floor.toISOString().split('T')[0]} — this teacher's assignment at this school starts then. To change the start date itself, edit that entry instead of adding an earlier one.`,
+      );
+    }
+  }
+
+  /**
+   * Records a dated working-days change — upserted on
+   * [teacherId, schoolId, effectiveFrom] so re-saving the same effective
+   * date corrects that entry instead of duplicating it. Accepts either the
+   * plain DatabaseService or a $transaction client so create() (transactional)
+   * and update() (not) can share this.
+   */
+  private async recordWorkingDaysChange(
+    db: DatabaseService | Prisma.TransactionClient,
+    teacherId: number,
+    schoolId: string,
+    workingDays: number[],
+    effectiveFrom: Date,
+    actorId?: number,
+  ): Promise<void> {
+    await this.assertEffectiveFromNotBeforeStart(db, teacherId, schoolId, effectiveFrom);
+    await db.teacherWorkingDaysHistory.upsert({
+      where: {
+        teacherId_schoolId_effectiveFrom: { teacherId, schoolId, effectiveFrom },
+      },
+      create: { teacherId, schoolId, workingDays, effectiveFrom, createdByUserId: actorId },
+      update: { workingDays },
+    });
+  }
+
+  async create(
+    body: Record<string, unknown>,
+    actorId?: number,
+  ): Promise<TeacherDetailResponse> {
     const email = String(body.email ?? '').trim();
     const password = (body.password ?? body.temp_password) as string;
     const fullName = body.full_name as string | undefined;
@@ -412,7 +494,9 @@ export class AdminTeachersService {
       schoolId: string;
       gradesAssigned: string[];
       subjects: string[];
+      workingDays: number[];
       workingDaysPerWeek: number;
+      effectiveFrom: Date;
       sectionIdsToAssign: string[];
     }> = [];
     for (const assignment of schoolAssignments) {
@@ -420,7 +504,9 @@ export class AdminTeachersService {
       const gradesAssigned = assignment.grades_assigned ?? [];
       const gradeSectionsAssigned = assignment.grade_sections_assigned ?? [];
       const subjects = assignment.subjects ?? [];
-      const workingDaysPerWeek = Number(assignment.working_days_per_week) || 5;
+      const workingDays = normalizeWorkingDays(assignment.working_days);
+      const workingDaysPerWeek = workingDays.length;
+      const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
 
       const sectionIdsToAssign: string[] = [];
       for (const gs of gradeSectionsAssigned) {
@@ -438,7 +524,9 @@ export class AdminTeachersService {
         schoolId,
         gradesAssigned,
         subjects,
+        workingDays,
         workingDaysPerWeek,
+        effectiveFrom,
         sectionIdsToAssign,
       });
     }
@@ -478,7 +566,9 @@ export class AdminTeachersService {
         schoolId,
         gradesAssigned,
         subjects,
+        workingDays,
         workingDaysPerWeek,
+        effectiveFrom,
         sectionIdsToAssign,
       } of resolvedAssignments) {
         await this.checkDuplicateSectionAssignments(
@@ -493,13 +583,24 @@ export class AdminTeachersService {
             teacherId: user.id,
             schoolId,
             subjects,
+            workingDays,
             workingDaysPerWeek,
           },
           update: {
             subjects,
+            workingDays,
             workingDaysPerWeek,
           },
         });
+        // Brand-new assignment — always record an initial history entry.
+        await this.recordWorkingDaysChange(
+          tx,
+          user.id,
+          schoolId,
+          workingDays,
+          effectiveFrom,
+          actorId,
+        );
 
         await tx.teacherSectionAssignment.deleteMany({
           where: { teacherId: user.id, schoolId },
@@ -538,6 +639,7 @@ export class AdminTeachersService {
   async update(
     id: string,
     body: Record<string, unknown>,
+    actorId?: number,
   ): Promise<TeacherDetailResponse> {
     const teacherId = parseInt(id, 10);
     const data: Record<string, unknown> = {};
@@ -619,6 +721,13 @@ export class AdminTeachersService {
       const existingSchoolLinks = await this.db.teacherSchool.findMany({
         where: { teacherId },
       });
+      // "Before" snapshot per school so the assignment loop below can tell
+      // whether working_days actually changed and only then record new
+      // history — a plain re-save without edits shouldn't add a duplicate
+      // history entry.
+      const beforeWorkingDaysBySchool = new Map(
+        existingSchoolLinks.map((l) => [l.schoolId, l.workingDays] as const),
+      );
       for (const link of existingSchoolLinks) {
         if (!keepSchoolIds.has(link.schoolId)) {
           await this.db.teacherSectionAssignment.deleteMany({
@@ -639,22 +748,63 @@ export class AdminTeachersService {
         const gradesAssigned = assignment.grades_assigned ?? [];
         const gradeSectionsAssigned = assignment.grade_sections_assigned ?? [];
         const subjects = assignment.subjects ?? [];
-        const workingDaysPerWeek =
-          Number(assignment.working_days_per_week) || 5;
+        const workingDays = normalizeWorkingDays(assignment.working_days);
+        const workingDaysPerWeek = workingDays.length;
 
-        await this.db.teacherSchool.upsert({
-          where: { teacherId_schoolId: { teacherId, schoolId } },
-          create: {
+        // Only record a new dated history entry when the pattern actually
+        // changed (or this is a brand-new school for this teacher) — this is
+        // what makes a mid-month change (e.g. Mon-Thu -> Mon-Fri) apply only
+        // from its effective date forward instead of rewriting the whole
+        // month's attendance retroactively.
+        const before = beforeWorkingDaysBySchool.get(schoolId);
+        const changed =
+          !before ||
+          before.length !== workingDays.length ||
+          before.some((d, i) => d !== workingDays[i]);
+        const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
+
+        if (changed) {
+          await this.assertEffectiveFromNotBeforeStart(
+            this.db,
             teacherId,
             schoolId,
-            subjects,
-            workingDaysPerWeek,
-          },
-          update: {
-            subjects,
-            workingDaysPerWeek,
-          },
-        });
+            effectiveFrom,
+          );
+        }
+
+        // TeacherSchool (the "current" cache) and the history entry must
+        // land together — if the upsert succeeded but the history write
+        // failed, every attendance calculation (which reads history, not
+        // TeacherSchool.workingDays) would silently keep using the old
+        // pattern while the UI shows the new one as saved.
+        await this.db.$transaction([
+          this.db.teacherSchool.upsert({
+            where: { teacherId_schoolId: { teacherId, schoolId } },
+            create: {
+              teacherId,
+              schoolId,
+              subjects,
+              workingDays,
+              workingDaysPerWeek,
+            },
+            update: {
+              subjects,
+              workingDays,
+              workingDaysPerWeek,
+            },
+          }),
+          ...(changed
+            ? [
+                this.db.teacherWorkingDaysHistory.upsert({
+                  where: {
+                    teacherId_schoolId_effectiveFrom: { teacherId, schoolId, effectiveFrom },
+                  },
+                  create: { teacherId, schoolId, workingDays, effectiveFrom, createdByUserId: actorId },
+                  update: { workingDays },
+                }),
+              ]
+            : []),
+        ]);
 
         const sectionIdsToAssign: string[] = [];
         for (const gs of gradeSectionsAssigned) {
@@ -778,5 +928,23 @@ export class AdminTeachersService {
       }
       throw err;
     }
+  }
+
+  /** Dated working-days entries for one teacher+school, oldest first. */
+  async getWorkingDaysHistory(id: string, schoolId: string) {
+    const teacherId = parseInt(id, 10);
+    if (!schoolId) {
+      throw new BadRequestException('school_id is required');
+    }
+    const entries = await this.db.teacherWorkingDaysHistory.findMany({
+      where: { teacherId, schoolId },
+      orderBy: { effectiveFrom: 'asc' },
+    });
+    return {
+      history: entries.map((e) => ({
+        effective_from: e.effectiveFrom.toISOString().split('T')[0],
+        working_days: e.workingDays,
+      })),
+    };
   }
 }

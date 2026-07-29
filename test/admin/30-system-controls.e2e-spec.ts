@@ -120,4 +120,29 @@ describe('Admin system-controls: maintenance mode (extreme care, always restored
       .send({ announcement: { enabled: false, text: '', level: 'info' } })
       .expect(200);
   });
+
+  it('feature flags are readable from the public /system-status endpoint, as the admin UI advertises', async () => {
+    const before = await request(app.getHttpServer())
+      .get('/admin/system-controls')
+      .set(...adminAuth)
+      .expect(200);
+    const originalFlags = before.body.feature_flags;
+
+    try {
+      await request(app.getHttpServer())
+        .patch('/admin/system-controls')
+        .set(...adminAuth)
+        .send({ feature_flags: { qa_test_flag: true } })
+        .expect(200);
+
+      const status = await request(app.getHttpServer()).get('/system-status').expect(200);
+      expect(status.body.feature_flags).toMatchObject({ qa_test_flag: true });
+    } finally {
+      await request(app.getHttpServer())
+        .patch('/admin/system-controls')
+        .set(...adminAuth)
+        .send({ feature_flags: originalFlags })
+        .expect(200);
+    }
+  });
 });

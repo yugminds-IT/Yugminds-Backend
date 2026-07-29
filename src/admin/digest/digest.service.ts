@@ -49,7 +49,13 @@ export class DigestService {
         where: { submittedAt: { gte: weekAgo } },
       }),
       this.db.passwordResetRequest.count({ where: { status: 'pending' } }),
-      this.db.teacherLeave.count({ where: { status: 'pending' } }),
+      // TeacherLeave has no enforced FK — exclude rows orphaned by a
+      // hard-deleted teacher/school (see AdminDashboardService.getStats()).
+      this.db
+        .$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
+        .then((rows) => Number(rows[0]?.count ?? 0)),
       this.db.contactSubmission.count({
         where: { status: 'new', createdAt: { gte: weekAgo } },
       }),
@@ -81,7 +87,34 @@ export class DigestService {
     };
   }
 
-  async sendWeeklyDigest(): Promise<{ recipients: number }> {
+  /**
+   * Idempotency guard: reachable both from the Monday 08:00 cron and the
+   * on-demand `POST /admin/digest/run` button, so without a guard a manual
+   * click (or a second server instance running the same cron) produces
+   * duplicate "Weekly platform digest" notifications for every admin. A
+   * digest is considered "already sent this week" if the last recorded send
+   * was within the last 6 days.
+   */
+  private static readonly DIGEST_LOCK_KEY = 'digest:last_sent_at';
+  private static readonly DIGEST_MIN_INTERVAL_MS = 6 * 24 * 60 * 60 * 1000;
+
+  async sendWeeklyDigest(): Promise<{
+    recipients: number;
+    skipped?: boolean;
+  }> {
+    const lock = await this.db.systemSetting.findUnique({
+      where: { key: DigestService.DIGEST_LOCK_KEY },
+    });
+    if (lock) {
+      const elapsed = Date.now() - new Date(lock.value).getTime();
+      if (elapsed < DigestService.DIGEST_MIN_INTERVAL_MS) {
+        this.logger.log(
+          `Weekly digest skipped — already sent ${Math.round(elapsed / 3_600_000)}h ago`,
+        );
+        return { recipients: 0, skipped: true };
+      }
+    }
+
     const { title, message } = await this.buildDigest();
     const admins = await this.db.user.findMany({
       where: { role: Role.admin, isActive: true },
@@ -97,6 +130,11 @@ export class DigestService {
         mode: 'system_alert',
         allowReplies: false,
       })),
+    });
+    await this.db.systemSetting.upsert({
+      where: { key: DigestService.DIGEST_LOCK_KEY },
+      create: { key: DigestService.DIGEST_LOCK_KEY, value: new Date().toISOString() },
+      update: { value: new Date().toISOString() },
     });
     this.logger.log(`Weekly digest sent to ${admins.length} admin(s)`);
     return { recipients: admins.length };

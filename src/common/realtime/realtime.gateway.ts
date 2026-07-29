@@ -146,7 +146,14 @@ export class RealtimeGateway
         this.db.user.count({ where: { role: Role.teacher, isActive: true } }),
         this.db.user.count({ where: { role: Role.student, isActive: true } }),
         this.db.course.count({ where: { isPublished: true } }),
-        this.db.teacherLeave.count({ where: { status: 'pending' } }),
+        // See AdminDashboardService.getStats() — TeacherLeave rows have no
+        // enforced FK, so a plain status count can include orphaned rows
+        // left behind by a hard-deleted teacher or school.
+        this.db
+          .$queryRaw<
+            Array<{ count: bigint }>
+          >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
+          .then((rows) => Number(rows[0]?.count ?? 0)),
       ]);
       return {
         totalSchools,
@@ -191,7 +198,14 @@ export class RealtimeGateway
         this.db.teacherReport.count({
           where: { schoolId, status: 'submitted' },
         }),
-        this.db.teacherLeave.count({ where: { schoolId, status: 'pending' } }),
+        // schoolId here is real (sourced from the requesting school_admin's
+        // own SchoolAdmin row), but teacherId can still be orphaned — see
+        // note above.
+        this.db
+          .$queryRaw<
+            Array<{ count: bigint }>
+          >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`
+          .then((rows) => Number(rows[0]?.count ?? 0)),
         this.db.attendance.groupBy({
           by: ['status'],
           where: { schoolId, date: { gte: since } },

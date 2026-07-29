@@ -19,7 +19,7 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { PasswordResetRequestService } from '../../common/password-reset-request/password-reset-request.service';
 import * as bcrypt from 'bcrypt';
-import { randomBytes } from 'crypto';
+import { deriveFriendlyPassword } from '../../common/utils/password.util';
 import { ResourceIdParamDto } from './dto/resource-id-param.dto';
 import { DataImportDto } from './dto/data-import.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
@@ -565,6 +565,13 @@ export class SchoolAdminExtraController {
                     .filter(Boolean),
                 ),
               ],
+              sections_assigned: [
+                ...new Set(
+                  (u?.teacherSectionAssignments ?? [])
+                    .map((a: any) => a.section?.name)
+                    .filter(Boolean),
+                ),
+              ],
               subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
               working_days_per_week: ts.workingDaysPerWeek ?? 5,
               max_students_per_session: 30,
@@ -696,6 +703,8 @@ export class SchoolAdminExtraController {
       data: {
         email,
         password: hash,
+        initialPassword: password,
+        mustChangePassword: true,
         role: Role.student,
         tenantId: schoolId,
       },
@@ -731,6 +740,7 @@ export class SchoolAdminExtraController {
       newUser.id,
       schoolId,
       body?.grade ?? null,
+      body?.section ?? null,
     );
     return {
       success: true,
@@ -787,11 +797,6 @@ export class SchoolAdminExtraController {
 
     const dryRun = Boolean(body?.dry_run);
 
-    const genPassword = () => {
-      const buf = randomBytes(9).toString('base64').replace(/[+/=]/g, '');
-      return `Ym${buf}A1!`;
-    };
-
     const results: Array<{
       index: number;
       email: string | null;
@@ -829,7 +834,7 @@ export class SchoolAdminExtraController {
         continue;
       }
 
-      const effectivePassword = password || genPassword();
+      const effectivePassword = password || deriveFriendlyPassword(r.full_name);
       const hash = await bcrypt.hash(effectivePassword, 10);
 
       if (dryRun) {
@@ -848,6 +853,8 @@ export class SchoolAdminExtraController {
             data: {
               email,
               password: hash,
+              initialPassword: effectivePassword,
+              mustChangePassword: true,
               role: Role.student,
               tenantId: schoolId,
               isActive: typeof r.is_active === 'boolean' ? r.is_active : true,
@@ -894,6 +901,7 @@ export class SchoolAdminExtraController {
             newUser.id,
             schoolId,
             r.grade ?? null,
+            r.section ?? null,
           );
 
           return { userId: newUser.id, profileId: profile.id };
@@ -1041,12 +1049,18 @@ export class SchoolAdminExtraController {
       return { u, p, ss };
     });
 
-    // If grade changed, auto-enroll in courses for the new grade
-    if (body.grade !== undefined && body.grade !== enrollment.grade) {
+    // If grade or section changed, auto-enroll in courses now accessible to
+    // the new grade/section (section-gated courses depend on section too).
+    const gradeChanged =
+      body.grade !== undefined && body.grade !== enrollment.grade;
+    const sectionChanged =
+      body.section !== undefined && body.section !== enrollment.section;
+    if (gradeChanged || sectionChanged) {
       await this.enrollmentService.enrollStudentInRelevantCourses(
         studentId,
         schoolId,
-        body.grade,
+        updated.ss.grade,
+        updated.ss.section,
       );
     }
 
@@ -1103,7 +1117,7 @@ export class SchoolAdminExtraController {
     const hash = await bcrypt.hash(password, 10);
     await this.db.user.update({
       where: { id: studentId },
-      data: { password: hash },
+      data: { password: hash, initialPassword: password, mustChangePassword: true },
     });
     return { success: true };
   }
@@ -1515,6 +1529,7 @@ export class SchoolAdminExtraController {
       where: { schoolId },
       take,
       include: {
+        gradeAccess: { select: { gradeName: true } },
         course: {
           include: {
             chapters: {
@@ -1528,32 +1543,12 @@ export class SchoolAdminExtraController {
       orderBy: { createdAt: 'desc' },
     });
 
-    // derive grades from enrolled students' school enrollment
-    const courseIds = access.map((a) => a.courseId);
-    const enrollments = courseIds.length
-      ? await this.db.studentCourse.findMany({
-          where: { courseId: { in: courseIds } },
-        })
-      : [];
-    const studentIds = Array.from(new Set(enrollments.map((e) => e.studentId)));
-    const studentSchools = studentIds.length
-      ? await this.db.studentSchool.findMany({
-          where: { schoolId, studentId: { in: studentIds } },
-          select: { studentId: true, grade: true },
-        })
-      : [];
-    const gradeByStudentId = new Map(
-      studentSchools.map((ss) => [ss.studentId, ss.grade ?? '']),
-    );
-
     let courses = access.map((a) => {
-      const enrolled = enrollments.filter((e) => e.courseId === a.courseId);
+      // The course's own configured grades (CourseAccessGrade) — not derived
+      // from enrollment, so a freshly created course with zero students
+      // enrolled still reports the grade(s) it was actually set up for.
       const grades = Array.from(
-        new Set(
-          enrolled
-            .map((e) => gradeByStudentId.get(e.studentId) ?? '')
-            .filter((g) => String(g).trim().length > 0),
-        ),
+        new Set(a.gradeAccess.map((g) => g.gradeName).filter(Boolean)),
       ).sort();
       return {
         id: a.course.id,
@@ -2435,12 +2430,12 @@ export class SchoolAdminExtraController {
       }
     }
 
-    const notifications = await this.notificationsService.listWithProfiles(user.id, {
+    const { items } = await this.notificationsService.listWithProfiles(user.id, {
       mode: m,
       limit: take,
       allowedRecipientIds,
     });
-    return { notifications };
+    return { notifications: items };
   }
 
   @Post('notifications')
@@ -3010,12 +3005,16 @@ export class SchoolAdminExtraController {
     @CurrentUser() user: { id: number },
     @Query('status') status?: string,
     @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('search') search?: string,
   ) {
     const schoolId = await this.getSchoolId(user.id);
-    if (!schoolId) return { requests: [] };
+    if (!schoolId) return { requests: [], total: 0 };
     return this.passwordResetRequestService.list({
       status: status && status !== 'all' ? status : undefined,
       limit: limit ? Math.min(parseInt(limit, 10) || 100, 200) : 100,
+      offset: offset ? Math.max(parseInt(offset, 10) || 0, 0) : 0,
+      search: search || undefined,
       schoolId,
     });
   }
@@ -3096,11 +3095,6 @@ export class SchoolAdminExtraController {
           'Import limit is 500 records per request',
         );
 
-      const genPassword = () => {
-        const buf = randomBytes(9).toString('base64').replace(/[+/=]/g, '');
-        return `Ym${buf}A1!`;
-      };
-
       const results: Array<{
         index: number;
         email: string | null;
@@ -3134,7 +3128,7 @@ export class SchoolAdminExtraController {
           continue;
         }
         const rawPassword = String(r.password ?? '').trim();
-        const effectivePassword = rawPassword || genPassword();
+        const effectivePassword = rawPassword || deriveFriendlyPassword(r.full_name as string | undefined);
         const hash = await bcrypt.hash(effectivePassword, 10);
         try {
           await this.db.$transaction(async (tx) => {
@@ -3142,6 +3136,8 @@ export class SchoolAdminExtraController {
               data: {
                 email,
                 password: hash,
+                initialPassword: effectivePassword,
+                mustChangePassword: true,
                 role: Role.student,
                 tenantId: schoolId,
                 isActive: true,
@@ -3184,6 +3180,7 @@ export class SchoolAdminExtraController {
               newUser.id,
               schoolId,
               r.grade != null ? String(r.grade) : null,
+              r.section != null ? String(r.section) : null,
             );
           });
           results.push({

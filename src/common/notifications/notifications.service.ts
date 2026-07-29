@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { randomUUID } from 'crypto';
 
 export interface NotificationDto {
   id: string;
@@ -20,6 +21,7 @@ export interface NotificationDto {
 export interface NotificationWithProfileDto extends NotificationDto {
   user_id: number;
   sender_id: number | null;
+  broadcast_id: string | null;
   reply_count?: number;
   profiles?: {
     id: string;
@@ -57,6 +59,7 @@ export class NotificationsService {
     if (ids.length === 0) return { sent: 0 };
 
     const now = new Date();
+    const broadcastId = randomUUID();
     await this.db.notification.createMany({
       data: ids.map((uid) => ({
         userId: uid,
@@ -65,13 +68,14 @@ export class NotificationsService {
         message: data.message,
         mode: data.type ?? 'general',
         allowReplies: data.allowReplies !== false,
+        broadcastId,
         createdAt: now,
       })),
     });
 
     // Fetch created rows so we have real IDs for WS payload.
     const created = await this.db.notification.findMany({
-      where: { userId: { in: ids }, senderId, createdAt: now },
+      where: { broadcastId },
       select: {
         id: true,
         userId: true,
@@ -201,12 +205,24 @@ export class NotificationsService {
     opts: {
       mode: 'received' | 'sent' | 'all';
       limit: number;
+      offset?: number;
+      search?: string;
+      status?: 'all' | 'read' | 'unread';
       allowedRecipientIds?: number[];
       excludePasswordReset?: boolean;
     },
-  ): Promise<NotificationWithProfileDto[]> {
-    const { mode, limit, allowedRecipientIds, excludePasswordReset } = opts;
+  ): Promise<{ items: NotificationWithProfileDto[]; total: number }> {
+    const {
+      mode,
+      limit,
+      offset = 0,
+      search,
+      status = 'all',
+      allowedRecipientIds,
+      excludePasswordReset,
+    } = opts;
     const take = Math.min(Math.max(limit, 1), 100);
+    const skip = Math.max(offset, 0);
 
     const recipientFilter =
       allowedRecipientIds && allowedRecipientIds.length > 0
@@ -233,24 +249,62 @@ export class NotificationsService {
       }
     }
 
-    const list = await this.db.notification.findMany({
-      where: where as any,
-      orderBy: { createdAt: 'desc' },
-      take,
-      include: {
-        user: { include: { profile: { select: { fullName: true } } } },
-        sender: { include: { profile: { select: { fullName: true } } } },
-        _count: { select: { replies: true } },
-      },
-    });
+    // "received" is the only mode with a per-row read state — "sent" rows
+    // reflect the recipient's read state, not the sender's, so a status
+    // filter there wouldn't mean what the caller expects.
+    if (mode !== 'sent' && status !== 'all') {
+      where.readAt = status === 'read' ? { not: null } : null;
+    }
+
+    const q = (search ?? '').trim();
+    if (q) {
+      where.OR = [
+        { title: { contains: q, mode: 'insensitive' } },
+        { message: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
+    const [total, list] = await Promise.all([
+      this.db.notification.count({ where: where as any }),
+      this.db.notification.findMany({
+        where: where as any,
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take,
+        include: {
+          user: { include: { profile: { select: { fullName: true } } } },
+          sender: { include: { profile: { select: { fullName: true } } } },
+          _count: { select: { replies: true } },
+        },
+      }),
+    ]);
 
     const isSent = mode === 'sent';
-    return list.map((n) => {
+    const items = list.map((n) => {
       const profileUser = isSent ? n.user : n.sender;
+      // System-generated notifications (weekly digest, auto-issued
+      // certificates, etc.) have no senderId — without this fallback the
+      // "From" column renders a bare, unexplained "—".
+      const profiles = profileUser
+        ? {
+            id: String(profileUser.id),
+            full_name: profileUser.profile?.fullName ?? profileUser.email,
+            email: profileUser.email,
+            role: profileUser.role,
+          }
+        : !isSent
+          ? {
+              id: '0',
+              full_name: 'Yugminds System',
+              email: 'system@yugminds.com',
+              role: 'system',
+            }
+          : undefined;
       return {
         id: n.id,
         user_id: n.userId,
         sender_id: n.senderId ?? null,
+        broadcast_id: n.broadcastId ?? null,
         title: n.title,
         message: n.message,
         type: n.mode ?? 'general',
@@ -258,16 +312,11 @@ export class NotificationsService {
         allow_replies: n.allowReplies,
         created_at: n.createdAt.toISOString(),
         reply_count: n._count?.replies ?? 0,
-        profiles: profileUser
-          ? {
-              id: String(profileUser.id),
-              full_name: profileUser.profile?.fullName ?? profileUser.email,
-              email: profileUser.email,
-              role: profileUser.role,
-            }
-          : undefined,
+        profiles,
       };
     });
+
+    return { items, total };
   }
 
   // ─── Updating ─────────────────────────────────────────────────────────────

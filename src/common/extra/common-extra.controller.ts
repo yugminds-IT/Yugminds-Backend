@@ -11,6 +11,7 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../../auth/decorators/public.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
@@ -110,8 +111,12 @@ export class CommonExtraController {
     return { csrfToken: 'not-required' };
   }
 
-  // Contact form submission — saves to DB for admin review
+  // Contact form submission — saves to DB for admin review. Unauthenticated
+  // and public, so it needs its own tight limit; the global default (1200/min,
+  // sized for authenticated dashboards) would otherwise let a single IP spam
+  // the admin's Contact Submissions inbox.
   @Post('contact')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async contact(
     @Body()
     body: {
@@ -480,7 +485,27 @@ export class CommonExtraController {
     }
 
     const cert = certs[0];
-    const isActive = !cert.certificateUrl.startsWith('pending');
+
+    if (cert.status === 'revoked') {
+      return {
+        valid: false,
+        certificate: {
+          id: cert.id,
+          short_id: StudentExtraController.shortCertId(cert.id),
+          student_name:
+            cert.student?.profile?.fullName ??
+            cert.student?.email ??
+            'Student',
+          course_title: cert.course?.title ?? '',
+          certificate_name: cert.certificateName,
+          issued_at: cert.issuedAt.toISOString(),
+          status: 'revoked',
+        },
+      };
+    }
+
+    const isActive =
+      !cert.certificateUrl.startsWith('pending') && cert.status !== 'broken';
 
     return {
       valid: isActive,
@@ -492,7 +517,11 @@ export class CommonExtraController {
         course_title: cert.course?.title ?? '',
         certificate_name: cert.certificateName,
         issued_at: cert.issuedAt.toISOString(),
-        status: isActive ? 'active' : 'pending',
+        status: isActive
+          ? 'active'
+          : cert.status === 'broken'
+            ? 'broken'
+            : 'pending',
       },
     };
   }

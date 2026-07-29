@@ -248,11 +248,19 @@ export async function createQaFixture(
       );
     }
 
+    // School admins no longer have calendar write access (moved to
+    // admin-only, see AdminCalendarService's class doc) — this must go
+    // through the admin endpoint with an explicit school_id. The date must
+    // fall on a day the fixture's teachers actually work (default Mon-Fri,
+    // set up above via the Monday schedule) — AdminCalendarService rejects
+    // marking a holiday on a day nobody's scheduled to work at all.
+    // 2026-08-17 is a Monday.
     const calendarRes = await request(http)
-      .post('/school-admin/calendar')
-      .set(...schoolAdminAuth)
+      .post('/admin/calendar')
+      .set(...adminAuth)
       .send({
-        date: '2026-08-15',
+        school_id: schoolId,
+        date: '2026-08-17',
         name: `${CALL_PREFIX} Holiday`,
         type: 'Holiday',
         academic_year: currentAcademicYearForFixture(),
@@ -260,7 +268,7 @@ export async function createQaFixture(
       .expect(201);
     calendarId =
       calendarRes.body?.entry?.id ??
-      calendarRes.body?.calendar?.id ??
+      calendarRes.body?.calendar?.[0]?.id ??
       calendarRes.body?.id;
     if (!calendarId) {
       throw new Error(

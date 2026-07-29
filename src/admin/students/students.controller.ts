@@ -69,6 +69,22 @@ export class AdminStudentsController {
     return this.service.bulk(body);
   }
 
+  @Post('bulk-import')
+  bulkImport(
+    @Body()
+    body: {
+      school_id?: string;
+      students?: Array<Record<string, unknown>>;
+      dry_run?: boolean;
+    },
+  ) {
+    return this.service.bulkImport(
+      body.school_id,
+      body.students ?? [],
+      Boolean(body.dry_run),
+    );
+  }
+
   @Post('sync-enrollments')
   syncEnrollments(@Query('school_id') schoolId?: string) {
     return this.service.syncEnrollments(schoolId);

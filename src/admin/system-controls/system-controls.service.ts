@@ -118,9 +118,11 @@ export class SystemControlsService {
     maintenance_mode: boolean;
     maintenance_message: string;
     announcement: Announcement;
+    feature_flags: Record<string, boolean>;
   }> {
-    const { maintenance_mode, maintenance_message, announcement } = await this.readAll();
-    return { maintenance_mode, maintenance_message, announcement };
+    const { maintenance_mode, maintenance_message, announcement, feature_flags } =
+      await this.readAll();
+    return { maintenance_mode, maintenance_message, announcement, feature_flags };
   }
 
   /** Used by the login flow to block non-admin sign-ins during maintenance. */

@@ -169,6 +169,12 @@ export class CommunityAdminController {
       },
     });
 
+    // Delete the replaced hero image only after the write commits.
+    if (heroFile && existing.heroImageUrl) {
+      const oldKey = this.storage.keyFromUrl(existing.heroImageUrl);
+      if (oldKey) await this.storage.deleteObject(oldKey).catch(() => {});
+    }
+
     return { config: mapCommunityConfig(updated) };
   }
 
@@ -279,7 +285,7 @@ export class CommunityAdminController {
 
   @Put('items/:id')
   @UseInterceptors(FileInterceptor('media'))
-  updateItem(
+  async updateItem(
     @Param('id') id: string,
     @UploadedFile() mediaFile: any,
     @Body()
@@ -301,13 +307,15 @@ export class CommunityAdminController {
       is_featured?: string;
     },
   ) {
-    return this.db.$transaction(async (tx) => {
+    let oldMediaUrl: string | null = null;
+    const result = await this.db.$transaction(async (tx) => {
       const existing = await tx.communityItem.findUnique({ where: { id } });
       if (!existing) throw new BadRequestException('Item not found');
 
       let mediaUrl = existing.mediaUrl;
       if (mediaFile) {
         mediaUrl = await this.validateMedia(mediaFile, true);
+        oldMediaUrl = existing.mediaUrl;
       }
 
       const sectionType = body.section_type
@@ -389,39 +397,72 @@ export class CommunityAdminController {
 
       return { item: mapCommunityItem(updated) };
     });
+
+    // Delete the replaced media object only after the write commits — never
+    // before, so a failed update can't leave the item pointing at a
+    // just-deleted file.
+    if (oldMediaUrl) {
+      const oldKey = this.storage.keyFromUrl(oldMediaUrl);
+      if (oldKey) await this.storage.deleteObject(oldKey).catch(() => {});
+    }
+
+    return result;
   }
 
   @Post('items/:id/thumbnail')
   @UseInterceptors(FileInterceptor('thumbnail'))
   async uploadThumbnail(@Param('id') id: string, @UploadedFile() file: any) {
+    const existing = await this.db.communityItem.findUnique({ where: { id } });
+    if (!existing) throw new BadRequestException('Item not found');
     const thumbnailUrl = await this.validateMedia(file);
     const updated = await this.db.communityItem.update({
       where: { id },
       data: { thumbnailUrl },
     });
+    if (existing.thumbnailUrl) {
+      const oldKey = this.storage.keyFromUrl(existing.thumbnailUrl);
+      if (oldKey) await this.storage.deleteObject(oldKey).catch(() => {});
+    }
     return { item: mapCommunityItem(updated) };
   }
 
   @Post('items/:id/avatar')
   @UseInterceptors(FileInterceptor('avatar'))
   async uploadAvatar(@Param('id') id: string, @UploadedFile() file: any) {
+    const existing = await this.db.communityItem.findUnique({ where: { id } });
+    if (!existing) throw new BadRequestException('Item not found');
     const creatorAvatarUrl = await this.validateMedia(file);
     const updated = await this.db.communityItem.update({
       where: { id },
       data: { creatorAvatarUrl },
     });
+    if (existing.creatorAvatarUrl) {
+      const oldKey = this.storage.keyFromUrl(existing.creatorAvatarUrl);
+      if (oldKey) await this.storage.deleteObject(oldKey).catch(() => {});
+    }
     return { item: mapCommunityItem(updated) };
   }
 
   @Delete('items/:id')
   async deleteItem(@Param('id') id: string) {
-    await this.db.communityItem
+    const existing = await this.db.communityItem
       .delete({ where: { id } })
       .catch((e: { code?: string }) => {
         if (e?.code === 'P2025')
           throw new BadRequestException('Item not found');
         throw e;
       });
+
+    // Best-effort cleanup of any S3 objects this item owned. keyFromUrl
+    // returns null for URLs we didn't upload (e.g. an admin-typed external
+    // avatar link), so this never tries to delete something we don't own.
+    await Promise.all(
+      [existing.mediaUrl, existing.thumbnailUrl, existing.creatorAvatarUrl]
+        .map((url) => (url ? this.storage.keyFromUrl(url) : null))
+        .filter((key): key is string => !!key)
+        .map((key) => this.storage.deleteObject(key).catch(() => {})),
+    );
+
     return { success: true };
   }
 

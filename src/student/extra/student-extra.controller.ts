@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Query,
+  Res,
   UseGuards,
   NotFoundException,
   BadRequestException,
@@ -18,6 +19,7 @@ import { Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { RankingService } from '../../common/assignment/ranking.service';
+import { computeCourseProgress } from '../../common/utils/course-progress.util';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AssignmentsHierarchyQueryDto } from './dto/assignments-hierarchy-query.dto';
@@ -25,6 +27,9 @@ import { SimpleProgressDto } from './dto/simple-progress.dto';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 import { StorageService } from '../../common/storage/storage.service';
+import { RetakeRequestTeacherResolver } from '../../common/assignment/retake-request-teacher-resolver.service';
+import * as certificateSvgUtil from '../../common/utils/certificate-svg.util';
+import { CertificateService } from '../../common/certificates/certificate.service';
 
 @Controller('student')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -37,6 +42,8 @@ export class StudentExtraController {
     private readonly notificationsService: NotificationsService,
     private readonly dailyAssignments: StudentDailyAssignmentsService,
     private readonly storage: StorageService,
+    private readonly retakeTeacherResolver: RetakeRequestTeacherResolver,
+    private readonly certificateService: CertificateService,
   ) {}
 
   // ─── Notifications ────────────────────────────────────────────────────────
@@ -178,9 +185,11 @@ export class StudentExtraController {
     return {
       certificates: certs.map((c) => ({
         id: c.id,
+        short_id: certificateSvgUtil.shortCertId(c.id),
         course_id: c.courseId,
         certificate_name: c.certificateName,
         certificate_url: c.certificateUrl,
+        status: c.status,
         issued_at: c.issuedAt.toISOString(),
         courses: {
           id: c.courseId,
@@ -196,28 +205,42 @@ export class StudentExtraController {
     };
   }
 
-  private static escapeXml(s: string) {
-    return s
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;');
+  @Get('certificates/:id/download')
+  async downloadCertificate(
+    @CurrentUser() user: { id: number },
+    @Param('id') id: string,
+    @Res() res: any,
+  ) {
+    const cert = await this.db.studentCertificate.findUnique({
+      where: { id },
+      select: { studentId: true, certificateKey: true, certificateUrl: true, id: true },
+    });
+    if (!cert || cert.studentId !== user.id) {
+      throw new NotFoundException('Certificate not found');
+    }
+    const key = cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
+    if (!key) throw new BadRequestException('Certificate file is unavailable');
+
+    const { body, contentType } = await this.storage.getObject(key);
+    res.setHeader('Content-Type', contentType ?? 'image/jpeg');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${certificateSvgUtil.shortCertId(cert.id)}.jpg"`,
+    );
+    return res.send(body);
   }
 
-  /** Derives a short, human-readable certificate code from a UUID (e.g. "YM-A1B2C3D4") */
+  /** @deprecated use the exported `shortCertId` from certificate-svg.util directly */
   static shortCertId(fullId: string): string {
-    return 'YM-' + fullId.replace(/-/g, '').slice(0, 8).toUpperCase();
+    return certificateSvgUtil.shortCertId(fullId);
   }
 
+  /** @deprecated use the exported `svgToJpegBuffer` from certificate-svg.util directly */
   static async svgToJpegBuffer(svg: string): Promise<Buffer> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const sharp = require('sharp') as typeof import('sharp');
-    return sharp(Buffer.from(svg))
-      .jpeg({ quality: 92, mozjpeg: true })
-      .toBuffer();
+    return certificateSvgUtil.svgToJpegBuffer(svg);
   }
 
+  /** @deprecated use the exported `buildCertificateSvg` from certificate-svg.util directly */
   static buildCertificateSvg(
     params: {
       studentName: string;
@@ -227,52 +250,7 @@ export class StudentExtraController {
     },
     templateSvg?: string | null,
   ) {
-    const student = StudentExtraController.escapeXml(params.studentName);
-    const course = StudentExtraController.escapeXml(params.courseTitle);
-    const issued = StudentExtraController.escapeXml(params.issuedAt);
-    const shortId = StudentExtraController.escapeXml(
-      StudentExtraController.shortCertId(params.certificateId),
-    );
-
-    // If a custom template is provided, replace placeholders and return it
-    if (templateSvg) {
-      return templateSvg
-        .replace(/\{\{studentName\}\}/g, student)
-        .replace(/\{\{courseTitle\}\}/g, course)
-        .replace(/\{\{issuedAt\}\}/g, issued)
-        .replace(/\{\{certificateId\}\}/g, shortId);
-    }
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="850" viewBox="0 0 1200 850">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#0f2a6d"/>
-      <stop offset="1" stop-color="#4f46e5"/>
-    </linearGradient>
-  </defs>
-  <rect x="0" y="0" width="1200" height="850" fill="#f8fafc"/>
-  <rect x="40" y="40" width="1120" height="770" rx="28" fill="white" stroke="#e2e8f0" stroke-width="4"/>
-  <rect x="40" y="40" width="1120" height="140" rx="28" fill="url(#g)"/>
-  <text x="600" y="125" font-family="Inter, Arial" font-size="44" font-weight="700" text-anchor="middle" fill="white">Certificate of Achievement</text>
-
-  <text x="600" y="260" font-family="Inter, Arial" font-size="22" text-anchor="middle" fill="#334155">This certifies that</text>
-  <text x="600" y="340" font-family="Georgia, 'Times New Roman'" font-size="56" font-weight="700" text-anchor="middle" fill="#0f172a">${student}</text>
-  <text x="600" y="410" font-family="Inter, Arial" font-size="20" text-anchor="middle" fill="#475569">has successfully completed</text>
-  <text x="600" y="470" font-family="Inter, Arial" font-size="34" font-weight="700" text-anchor="middle" fill="#111827">${course}</text>
-
-  <g>
-    <circle cx="150" cy="670" r="54" fill="#fef3c7" stroke="#f59e0b" stroke-width="6"/>
-    <path d="M150 630 L162 656 L190 659 L168 677 L175 705 L150 690 L125 705 L132 677 L110 659 L138 656 Z" fill="#f59e0b"/>
-  </g>
-
-  <text x="600" y="615" font-family="Inter, Arial" font-size="18" text-anchor="middle" fill="#475569">Issued: ${issued}</text>
-  <text x="600" y="648" font-family="Inter, Arial" font-size="15" font-weight="600" text-anchor="middle" fill="#1e40af">Certificate ID: ${shortId}</text>
-  <text x="600" y="675" font-family="Inter, Arial" font-size="12" text-anchor="middle" fill="#64748b">Verify at: yugminds.com/robocoders/lms/verify/${shortId}</text>
-
-  <line x1="820" y1="710" x2="1080" y2="710" stroke="#cbd5e1" stroke-width="2"/>
-  <text x="950" y="740" font-family="Inter, Arial" font-size="16" text-anchor="middle" fill="#334155">Yugminds</text>
-</svg>`;
+    return certificateSvgUtil.buildCertificateSvg(params, templateSvg);
   }
 
   private static daysUntil(due: Date, now: Date) {
@@ -459,95 +437,20 @@ export class StudentExtraController {
       );
       const totalContentItems = courseContents.length;
 
-      // Get completed content IDs and completed chapter IDs
-      const completedContentIds = new Set(
-        courseProgress
-          .filter(
-            (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
-          )
-          .map((p) => (p as any).contentId as string),
+      const computed = computeCourseProgress(
+        courseChapters,
+        courseContents,
+        courseProgress as unknown as Array<{
+          contentId: string | null;
+          chapterId: string | null;
+          progress: number;
+          completedAt: Date | null;
+          updatedAt: Date;
+        }>,
       );
-
-      const completedChapterIds = new Set(
-        courseProgress
-          .filter((p) => {
-            const cid = (p as any).contentId;
-            const isChapterRecord =
-              !cid || cid === '' || cid === 'null' || cid === 'undefined';
-            return (
-              isChapterRecord &&
-              p.chapterId &&
-              (p.progress >= 99 || p.completedAt)
-            );
-          })
-          .map((p) => p.chapterId as string),
-      );
-
-      // Calculate actual completed count using hybrid logic
-      let hybridCompletedCount = 0;
-      courseContents.forEach((c) => {
-        // Content is completed if its own record says so, OR if its parent chapter is marked completed (legacy fallback)
-        // We also check progress >= 99 OR completedAt being non-null for maximum resilience
-        const contentIsDone = completedContentIds.has(c.id);
-        const chapterIsDone = completedChapterIds.has(c.chapterId);
-
-        if (contentIsDone || chapterIsDone) {
-          hybridCompletedCount++;
-        }
-      });
-
-      // Calculate progress percentage based on actual contents in this course
-      const progressPercentage =
-        totalContentItems > 0
-          ? Math.min(
-              100,
-              Math.round((hybridCompletedCount / totalContentItems) * 100),
-            )
-          : courseProgress.some((p) => p.progress >= 99)
-            ? 100
-            : 0;
-
-      // A chapter is completed if all its contents are completed
-      const chapterContentsMap = new Map<string, string[]>();
-      courseContents.forEach((c) => {
-        const list = chapterContentsMap.get(c.chapterId) || [];
-        list.push(c.id);
-        chapterContentsMap.set(c.chapterId, list);
-      });
-
-      let completedChapters = 0;
-      courseChapters.forEach((ch) => {
-        const chContents = chapterContentsMap.get(ch.id) || [];
-        const chapterIsExplicitlyCompleted = completedChapterIds.has(ch.id);
-
-        if (chContents.length > 0) {
-          const allContentsDone = chContents.every((cid) =>
-            completedContentIds.has(cid),
-          );
-          if (allContentsDone || chapterIsExplicitlyCompleted) {
-            completedChapters++;
-          }
-        } else if (chapterIsExplicitlyCompleted) {
-          // Fallback for empty chapters that are marked done
-          completedChapters++;
-        }
-      });
-
-      const last = courseProgress.reduce<Date | null>((latest, p) => {
-        const ts = p.completedAt ?? p.updatedAt;
-        return !latest || ts > latest ? ts : latest;
-      }, null);
-
-      const status: 'active' | 'completed' | 'not_started' =
-        totalChapters > 0 && completedChapters >= totalChapters
-          ? 'completed'
-          : progressPercentage > 0
-            ? 'active'
-            : 'not_started';
-
-      // Force 100% if status is completed for UI consistency
-      const finalProgressPercentage =
-        status === 'completed' ? 100 : progressPercentage;
+      const { completedChapters, status } = computed;
+      const last = computed.lastAccessed;
+      const finalProgressPercentage = computed.progressPercentage;
 
       return {
         id: e.courseId,
@@ -568,10 +471,7 @@ export class StudentExtraController {
         // Derived metadata for a richer "My Courses" catalog (no schema change):
         // total lessons, estimated duration (sum of content durations), last updated.
         total_lessons: totalContentItems,
-        estimated_minutes: courseContents.reduce(
-          (sum, c) => sum + (c.durationMinutes ?? 0),
-          0,
-        ),
+        estimated_minutes: computed.estimatedMinutes,
         last_updated: (course?.updatedAt ?? e.enrolledAt).toISOString(),
         average_grade: (() => {
           const agg = gradeAggByCourse.get(e.courseId);
@@ -1113,6 +1013,18 @@ export class StudentExtraController {
       where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
       select: { isActive: true },
     });
+    const latestRetakeRequest = await this.db.retakeRequest.findFirst({
+      where: { assignmentId, studentId: user.id },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        status: true,
+        reason: true,
+        teacherRemarks: true,
+        createdAt: true,
+        decidedAt: true,
+      },
+    });
     const maxMarks = assignment.questions.reduce(
       (sum, q) =>
         sum +
@@ -1226,6 +1138,131 @@ export class StudentExtraController {
             (assignment.maxRetakeAttempts === null ||
               !!assignment.retakeWindowOpen ||
               !!retakeGrant?.isActive)),
+      },
+      retake_request: latestRetakeRequest
+        ? {
+            id: latestRetakeRequest.id,
+            status: latestRetakeRequest.status,
+            reason: latestRetakeRequest.reason,
+            teacher_remarks: latestRetakeRequest.teacherRemarks,
+            created_at: latestRetakeRequest.createdAt.toISOString(),
+            decided_at: latestRetakeRequest.decidedAt?.toISOString() ?? null,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * Student asks to be granted a retake. Routed to the teacher(s) who
+   * actually teach the student's grade/section at the assignment's school
+   * (RetakeRequestTeacherResolver) rather than any teacher at the school.
+   */
+  @Post('assignments/:assignmentId/retake-request')
+  async requestRetake(
+    @CurrentUser() user: { id: number },
+    @Param('assignmentId') assignmentId: string,
+    @Body() body: { reason?: string },
+  ) {
+    const assignment = await this.db.assignment.findUnique({
+      where: { id: assignmentId },
+      select: {
+        id: true,
+        title: true,
+        teacherId: true,
+        schoolId: true,
+        chapterId: true,
+        courseId: true,
+        retakeEnabled: true,
+        retakeWindowOpen: true,
+        retakeAccessScope: true,
+        maxRetakeAttempts: true,
+      },
+    });
+    if (!assignment) throw new NotFoundException('Assignment not found');
+
+    const attemptsCount = await this.db.assignmentSubmission.count({
+      where: { assignmentId, studentId: user.id },
+    });
+    if (attemptsCount === 0) {
+      throw new BadRequestException(
+        'Submit the assignment at least once before requesting a retake',
+      );
+    }
+
+    const retakeGrant = await this.db.retakeGrant.findUnique({
+      where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
+      select: { isActive: true },
+    });
+    // Same formula as getAssignment()/submitAssignment() — no point
+    // requesting when a retake is already allowed.
+    const alreadyAllowed =
+      !!assignment.retakeEnabled &&
+      (assignment.maxRetakeAttempts == null ||
+        attemptsCount < (assignment.maxRetakeAttempts ?? 0) + 1) &&
+      ((assignment.retakeAccessScope ?? 'all') === 'all' ||
+        !!retakeGrant?.isActive) &&
+      (assignment.maxRetakeAttempts === null ||
+        !!assignment.retakeWindowOpen ||
+        !!retakeGrant?.isActive);
+    if (alreadyAllowed) {
+      throw new BadRequestException('A retake is already available for this assignment');
+    }
+
+    const existingPending = await this.db.retakeRequest.findFirst({
+      where: { assignmentId, studentId: user.id, status: 'pending' },
+      select: { id: true },
+    });
+    if (existingPending) {
+      throw new BadRequestException(
+        'You already have a pending retake request for this assignment',
+      );
+    }
+
+    const { schoolId, teacherIds: targetTeacherIds } = await this.retakeTeacherResolver.resolve(
+      user.id,
+      {
+        teacherId: assignment.teacherId,
+        schoolId: assignment.schoolId,
+        chapterId: assignment.chapterId,
+        courseId: assignment.courseId,
+      },
+    );
+
+    const created = await this.db.retakeRequest.create({
+      data: {
+        assignmentId,
+        studentId: user.id,
+        reason: body.reason?.trim() || null,
+        schoolId,
+        targetTeacherIds,
+      },
+    });
+
+    if (targetTeacherIds.length > 0) {
+      const studentName =
+        (
+          await this.db.profile.findUnique({
+            where: { userId: user.id },
+            select: { fullName: true },
+          })
+        )?.fullName ?? 'A student';
+      await this.notificationsService.sendBroadcast(user.id, targetTeacherIds, {
+        title: `Retake requested: ${assignment.title}`,
+        message: `${studentName} has requested a retake for "${assignment.title}".${
+          created.reason ? ` Reason: ${created.reason}` : ''
+        }`,
+        type: 'assignment_retake_request',
+      });
+    }
+
+    return {
+      retake_request: {
+        id: created.id,
+        status: created.status,
+        reason: created.reason,
+        teacher_remarks: created.teacherRemarks,
+        created_at: created.createdAt.toISOString(),
+        decided_at: null,
       },
     };
   }
@@ -1390,28 +1427,37 @@ export class StudentExtraController {
 
         const options = Array.isArray(q.options) ? (q.options as string[]) : [];
         const givenIndex = parseInt(given, 10);
-        const expectedIndex = parseInt(expected, 10);
-        const expectedIsIndex =
-          !Number.isNaN(expectedIndex) &&
-          expectedIndex >= 0 &&
-          expectedIndex < options.length;
+
+        // The question builder stores `correctAnswer` as the option's TEXT
+        // (see AssignmentBuilder.tsx), not its index — so prefer an exact
+        // text match against `options` first. That match is unambiguous.
+        // Only fall back to treating `expected` as a raw numeric index for
+        // legacy rows where no option's text matches it at all — otherwise
+        // a numeric-looking option (e.g. options ["1","2","3","4"] with "1"
+        // marked correct) gets misread as index 1 ("2") instead of index 0
+        // ("1"), silently grading the actually-correct answer as wrong.
+        const textMatchIndex = options.findIndex((o) => norm(o) === norm(expected));
+        let expectedIndex: number;
+        if (textMatchIndex !== -1) {
+          expectedIndex = textMatchIndex;
+        } else {
+          const parsed = parseInt(expected, 10);
+          expectedIndex =
+            !Number.isNaN(parsed) && parsed >= 0 && parsed < options.length
+              ? parsed
+              : -1;
+        }
 
         if (
           !Number.isNaN(givenIndex) &&
           givenIndex >= 0 &&
           givenIndex < options.length
         ) {
-          if (expectedIsIndex) {
-            isCorrect = givenIndex === expectedIndex;
-          } else {
-            // expected is the option text
-            isCorrect = norm(options[givenIndex]) === norm(expected);
-          }
+          isCorrect = givenIndex === expectedIndex;
         } else {
-          // Legacy: student stored the option text directly
-          const expectedText = expectedIsIndex
-            ? norm(options[expectedIndex])
-            : norm(expected);
+          // Legacy: student answer stored as raw option text instead of index.
+          const expectedText =
+            expectedIndex !== -1 ? norm(options[expectedIndex]) : norm(expected);
           isCorrect = norm(given) === expectedText;
         }
       } else {
@@ -1501,145 +1547,29 @@ export class StudentExtraController {
     const courseId = String(body?.courseId ?? '').trim();
     if (!courseId) throw new BadRequestException('courseId is required');
 
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: { studentId_courseId: { studentId: user.id, courseId } },
-    });
-    if (!enrolled) throw new BadRequestException('Not enrolled in this course');
-
-    const [course, chapters, contents, progress, profile] = await Promise.all([
-      this.db.course.findUnique({ where: { id: courseId } }),
-      this.db.chapter.findMany({ where: { courseId }, select: { id: true } }),
-      this.db.chapterContent.findMany({
-        where: { chapter: { courseId } },
-        select: { id: true, chapterId: true },
-      }),
-      this.db.courseProgress.findMany({
-        where: { studentId: user.id, courseId },
-      }),
-      this.db.profile.findUnique({ where: { userId: user.id } }),
-    ]);
-    if (!course) throw new BadRequestException('Course not found');
-
-    const totalContentItems = contents.length;
-
-    // Use the same hybrid logic as the courses list:
-    // Content is complete if its own record says so OR if its parent chapter is marked complete.
-    const completedContentIds = new Set(
-      progress
-        .filter(
-          (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
-        )
-        .map((p) => (p as any).contentId as string),
+    const result = await this.certificateService.issueIfEligible(
+      user.id,
+      courseId,
+      user.id,
     );
-    const completedChapterIds = new Set(
-      progress
-        .filter((p) => {
-          const cid = (p as any).contentId;
-          const isChapterRecord =
-            !cid || cid === '' || cid === 'null' || cid === 'undefined';
-          return (
-            isChapterRecord &&
-            p.chapterId &&
-            (p.progress >= 99 || p.completedAt)
-          );
-        })
-        .map((p) => p.chapterId as string),
-    );
-
-    let hybridCompletedCount = 0;
-    contents.forEach((c) => {
-      if (
-        completedContentIds.has(c.id) ||
-        completedChapterIds.has(c.chapterId)
-      ) {
-        hybridCompletedCount++;
-      }
-    });
-
-    // Also honour explicit chapter completion: if all chapters are done, treat as 100%
-    const allChaptersDone =
-      chapters.length > 0 &&
-      chapters.every((ch) => completedChapterIds.has(ch.id));
-
-    const overallProgressPercent = allChaptersDone
-      ? 100
-      : totalContentItems > 0
-        ? Math.min(
-            100,
-            Math.round((hybridCompletedCount / totalContentItems) * 100),
-          )
-        : progress.some((p) => p.progress >= 99 || p.completedAt)
-          ? 100
-          : 0;
-
-    const eligible = overallProgressPercent >= 80;
-    if (!eligible) {
+    if (!result.issued) {
       throw new BadRequestException(
-        'Course not eligible for certificate (requires 80%+ completion).',
+        result.reason === 'not_enrolled'
+          ? 'Not enrolled in this course'
+          : 'Course not eligible for certificate (requires 80%+ completion).',
       );
     }
 
-    const existing = await this.db.studentCertificate.findUnique({
-      where: { studentId_courseId: { studentId: user.id, courseId } },
-    });
-    if (existing) {
-      return {
-        success: true,
-        certificate: {
-          id: existing.id,
-          certificate_url: existing.certificateUrl,
-        },
-      };
-    }
-
-    const studentName = profile?.fullName ?? '';
-    const issuedAt = new Date().toISOString().split('T')[0];
-    const certificateName = `${course.title} Certificate`;
-
-    // Load custom template if one has been uploaded
-    const templateSetting = await this.db.systemSetting.findUnique({
-      where: { key: 'certificate:template' },
-    });
-
-    // Create first to get an ID we can embed
-    const created = await this.db.studentCertificate.create({
-      data: {
-        studentId: user.id,
-        courseId,
-        certificateName,
-        certificateUrl: 'pending',
-        issuedBy: null,
-      },
-    });
-    const svg = StudentExtraController.buildCertificateSvg(
-      {
-        studentName: studentName || 'Student',
-        courseTitle: course.title,
-        issuedAt,
-        certificateId: created.id,
-      },
-      templateSetting?.value ?? null,
-    );
-    const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
-    const certKey = this.storage.buildKey(
-      `certificates/${user.id}`,
-      `${created.id}.jpg`,
-    );
-    const certUrl = await this.storage.uploadBuffer(
-      certKey,
-      jpegBuffer,
-      'image/jpeg',
-    );
-    const updated = await this.db.studentCertificate.update({
-      where: { id: created.id },
-      data: { certificateUrl: certUrl, certificateKey: certKey },
+    const cert = await this.db.studentCertificate.findUniqueOrThrow({
+      where: { id: result.certificateId },
+      select: { id: true, certificateUrl: true },
     });
     return {
       success: true,
       certificate: {
-        id: updated.id,
-        short_id: StudentExtraController.shortCertId(updated.id),
-        certificate_url: updated.certificateUrl,
+        id: cert.id,
+        short_id: certificateSvgUtil.shortCertId(cert.id),
+        certificate_url: cert.certificateUrl,
       },
     };
   }
@@ -1754,6 +1684,16 @@ export class StudentExtraController {
       });
     }
 
+    // Fire-and-forget: this content item may have just pushed the course
+    // over the 80% eligibility line. issueIfEligible is idempotent (no-ops
+    // if already issued or still under 80%), and a failure here must never
+    // fail the progress save itself.
+    if (value >= 99) {
+      this.certificateService
+        .issueIfEligible(user.id, courseId)
+        .catch(() => {});
+    }
+
     return { success: true, progress: value };
   }
 
@@ -1810,6 +1750,14 @@ export class StudentExtraController {
         },
       });
     }
+
+    // Fire-and-forget: see identical note in saveSimpleProgress above.
+    if (value >= 99) {
+      this.certificateService
+        .issueIfEligible(user.id, courseId)
+        .catch(() => {});
+    }
+
     return { success: true, progress: value };
   }
 

@@ -48,8 +48,11 @@ export class AdminTeachersController {
 
   @Post()
   @Roles(Role.admin) // Only admins can create teachers
-  create(@Body() body: Record<string, unknown>) {
-    return this.service.create(body);
+  create(
+    @Body() body: Record<string, unknown>,
+    @CurrentUser() user: { id: number },
+  ) {
+    return this.service.create(body, user.id);
   }
 
   @Post('bulk')
@@ -59,8 +62,20 @@ export class AdminTeachersController {
   }
 
   @Put(':id')
-  update(@Param('id') id: string, @Body() body: Record<string, unknown>) {
-    return this.service.update(id, body);
+  update(
+    @Param('id') id: string,
+    @Body() body: Record<string, unknown>,
+    @CurrentUser() user: { id: number },
+  ) {
+    return this.service.update(id, body, user.id);
+  }
+
+  @Get(':id/working-days-history')
+  workingDaysHistory(
+    @Param('id') id: string,
+    @Query('school_id') schoolId: string,
+  ) {
+    return this.service.getWorkingDaysHistory(id, schoolId);
   }
 
   @Delete(':id')

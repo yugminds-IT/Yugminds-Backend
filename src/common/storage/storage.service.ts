@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
+  HeadObjectCommand,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
@@ -72,9 +74,43 @@ export class StorageService {
     return `${this.publicUrl}/${key}`;
   }
 
+  /** Recovers the object key from a public URL — for rows persisted before `certificateKey` existed. */
+  keyFromUrl(url: string): string | null {
+    if (!this.publicUrl || !url.startsWith(`${this.publicUrl}/`)) return null;
+    return url.slice(this.publicUrl.length + 1);
+  }
+
   async deleteObject(key: string): Promise<void> {
     await this.client.send(
       new DeleteObjectCommand({ Bucket: this.bucket, Key: key }),
     );
+  }
+
+  /**
+   * Fetches an object's bytes server-side, for proxying a download to the
+   * browser. Direct browser `fetch()` of the public S3 URL fails unless the
+   * bucket has CORS configured for the frontend origin — proxying through
+   * the backend (which already has S3 credentials) sidesteps that entirely.
+   */
+  async getObject(
+    key: string,
+  ): Promise<{ body: Buffer; contentType: string | undefined }> {
+    const res = await this.client.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+    );
+    const bytes = await res.Body?.transformToByteArray();
+    return { body: Buffer.from(bytes ?? []), contentType: res.ContentType };
+  }
+
+  /** True if the object is actually present in the bucket — a real health check, not inferred from a stored URL. */
+  async objectExists(key: string): Promise<boolean> {
+    try {
+      await this.client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

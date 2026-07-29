@@ -29,7 +29,15 @@ export class AdminDashboardService {
       this.db.user.count({ where: { role: Role.teacher, isActive: true } }),
       this.db.user.count({ where: { role: Role.student, isActive: true } }),
       this.db.course.count({ where: { isPublished: true } }),
-      this.db.teacherLeave.count({ where: { status: 'pending' } }),
+      // TeacherLeave.teacherId/schoolId have no enforced DB-level FK (see
+      // schema comment history), so hard-deleting a teacher or school can
+      // leave orphaned "pending" rows behind — a plain status count would
+      // include leave requests for teachers/schools that no longer exist.
+      this.db
+        .$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
+        .then((rows) => Number(rows[0]?.count ?? 0)),
     ]);
 
     return {
@@ -61,10 +69,15 @@ export class AdminDashboardService {
     return `${MONTHS[date.getMonth()]} ${String(date.getFullYear()).slice(-2)}`;
   }
 
-  async getAnalytics(from?: string, to?: string) {
+  async getAnalytics(from?: string, to?: string, force = false) {
     // Serve from cache when no date range is specified (default dashboard view)
     const isDefaultRange = !from && !to;
-    if (isDefaultRange && this.analyticsCache && Date.now() < this.analyticsCache.expiresAt) {
+    if (
+      !force &&
+      isDefaultRange &&
+      this.analyticsCache &&
+      Date.now() < this.analyticsCache.expiresAt
+    ) {
       return this.analyticsCache.data;
     }
 
@@ -82,6 +95,41 @@ export class AdminDashboardService {
           this.db.user.count({ where: { role: Role.student, isActive: true } }),
           this.db.course.count({ where: { isPublished: true } }),
         ]);
+
+      // ── "as of last month" totals, for the trend % shown next to each
+      // Total card. These must be CUMULATIVE totals as of a month ago, not
+      // this month's vs last month's new-signup counts (which is a
+      // different metric — see monthlyGrowth below) — otherwise the
+      // percentage next to "Total Schools: 3" doesn't answer the question
+      // the card's own "from last month" label asks.
+      const startOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const [
+        schoolsAsOfLastMonth,
+        teachersAsOfLastMonth,
+        studentsAsOfLastMonth,
+        coursesAsOfLastMonth,
+      ] = await Promise.all([
+        this.db.tenant.count({
+          where: { createdAt: { lt: startOfThisMonth } },
+        }),
+        this.db.user.count({
+          where: {
+            role: Role.teacher,
+            isActive: true,
+            createdAt: { lt: startOfThisMonth },
+          },
+        }),
+        this.db.user.count({
+          where: {
+            role: Role.student,
+            isActive: true,
+            createdAt: { lt: startOfThisMonth },
+          },
+        }),
+        this.db.course.count({
+          where: { isPublished: true, createdAt: { lt: startOfThisMonth } },
+        }),
+      ]);
 
       const attendance30 = await this.db.attendance.findMany({
         where: { date: { gte: last30Days } },
@@ -377,15 +425,17 @@ export class AdminDashboardService {
         courseEngagement.push({ name: label, engagement, completion });
       }
 
-      // Calculate real month-over-month % changes from monthlyGrowth
-      const calcChange = (curr: number, prev: number) =>
+      // % change of the CUMULATIVE total vs a month ago — matches what the
+      // "Total X" cards' "from last month" label actually claims. Returns
+      // null (not a flat 100) when there's no prior-month baseline to
+      // compare against, since "0 -> 1" and "0 -> 1000" are both
+      // mathematically undefined growth, not interchangeably "100%".
+      const calcChange = (curr: number, prev: number): number | null =>
         prev === 0
           ? curr > 0
-            ? 100
+            ? null
             : 0
           : Math.round(((curr - prev) / prev) * 100);
-      const cur = monthlyGrowth[monthlyGrowth.length - 1];
-      const prv = monthlyGrowth[monthlyGrowth.length - 2];
 
       // Derive real system health from monitoring success rate (last N requests)
       const monitorSnapshot = this.monitoring.getSnapshot();
@@ -396,6 +446,7 @@ export class AdminDashboardService {
           : 100;
 
       const result = {
+        generatedAt: new Date().toISOString(),
         analytics: {
           totalSchools: schoolCount,
           totalTeachers: teacherCount,
@@ -406,10 +457,10 @@ export class AdminDashboardService {
           completionRate,
         },
         trends: {
-          schoolsChange: calcChange(cur?.schools ?? 0, prv?.schools ?? 0),
-          teachersChange: calcChange(cur?.teachers ?? 0, prv?.teachers ?? 0),
-          studentsChange: calcChange(cur?.students ?? 0, prv?.students ?? 0),
-          coursesChange: calcChange(cur?.courses ?? 0, prv?.courses ?? 0),
+          schoolsChange: calcChange(schoolCount, schoolsAsOfLastMonth),
+          teachersChange: calcChange(teacherCount, teachersAsOfLastMonth),
+          studentsChange: calcChange(studentCount, studentsAsOfLastMonth),
+          coursesChange: calcChange(activeCourses, coursesAsOfLastMonth),
         },
         monthlyGrowth,
         schoolDistribution,
@@ -426,6 +477,7 @@ export class AdminDashboardService {
     } catch (err) {
       console.error('[AdminDashboardService] getAnalytics failed:', err);
       return {
+        generatedAt: new Date().toISOString(),
         analytics: {
           totalSchools: 0,
           totalTeachers: 0,
@@ -475,6 +527,8 @@ export class AdminDashboardService {
         id: true,
         title: true,
         schoolId: true,
+        courseId: true,
+        chapterId: true,
         retakeEnabled: true,
         assignmentType: true,
       },
@@ -506,21 +560,72 @@ export class AdminDashboardService {
     const submittingStudentIds = [
       ...new Set(submissions.map((s) => s.studentId)),
     ];
-    const [schools, enrollmentCounts, studentSchoolRows] = await Promise.all([
-      // All schools — the leaderboard shows the full platform, not just ones with submissions.
-      this.db.school.findMany({ select: { id: true, name: true } }),
-      this.db.studentSchool.groupBy({
-        by: ['schoolId'],
-        where: { isActive: true },
-        _count: { studentId: true },
-      }),
-      submittingStudentIds.length
-        ? this.db.studentSchool.findMany({
-            where: { studentId: { in: submittingStudentIds }, isActive: true },
-            select: { studentId: true, schoolId: true },
-          })
-        : Promise.resolve([]),
-    ]);
+    // COURSE-type assignments almost always link via `chapterId` — their own
+    // `courseId` column is legacy/rarely populated (confirmed: real course
+    // assignments in production have courseId=null and only chapterId set,
+    // resolved through Chapter.courseId below). Resolving only off the
+    // direct courseId column would treat every real course assignment as
+    // "not linked to any school."
+    const chapterIds = [
+      ...new Set(assignments.map((a) => a.chapterId).filter((c): c is string => !!c)),
+    ];
+    const chapters = chapterIds.length
+      ? await this.db.chapter.findMany({
+          where: { id: { in: chapterIds } },
+          select: { id: true, courseId: true },
+        })
+      : [];
+    const courseIdByChapter = new Map(chapters.map((c) => [c.id, c.courseId]));
+    const courseIdOf = (a: { courseId: string | null; chapterId: string | null }) =>
+      a.courseId ?? (a.chapterId ? (courseIdByChapter.get(a.chapterId) ?? null) : null);
+
+    const courseIds = [
+      ...new Set(
+        assignments.map((a) => courseIdOf(a)).filter((c): c is string => !!c),
+      ),
+    ];
+    const [schools, enrollmentCounts, studentSchoolRows, courseAccessRows] =
+      await Promise.all([
+        // All schools — the leaderboard shows the full platform, not just ones with submissions.
+        this.db.school.findMany({ select: { id: true, name: true } }),
+        this.db.studentSchool.groupBy({
+          by: ['schoolId'],
+          where: { isActive: true },
+          _count: { studentId: true },
+        }),
+        submittingStudentIds.length
+          ? this.db.studentSchool.findMany({
+              where: { studentId: { in: submittingStudentIds }, isActive: true },
+              select: { studentId: true, schoolId: true },
+            })
+          : Promise.resolve([]),
+        // Which courses are actually published/granted to which schools —
+        // needed to count only assignments a school's students can actually
+        // see, instead of stamping the platform-wide total on every row.
+        courseIds.length
+          ? this.db.courseAccess.findMany({
+              where: { courseId: { in: courseIds } },
+              select: { courseId: true, schoolId: true },
+            })
+          : Promise.resolve([]),
+      ]);
+    // school -> set of courseIds granted to it
+    const coursesBySchool = new Map<string, Set<string>>();
+    for (const ca of courseAccessRows) {
+      if (!coursesBySchool.has(ca.schoolId)) coursesBySchool.set(ca.schoolId, new Set());
+      coursesBySchool.get(ca.schoolId)!.add(ca.courseId);
+    }
+    // Real per-school assignment relevance: a DAILY assignment counts for
+    // the school it's scoped to (Assignment.schoolId); a COURSE assignment
+    // counts for every school that course is actually granted to. Assignments
+    // with neither a schoolId nor a granted course aren't relevant to any
+    // specific school and are correctly excluded from every school's count.
+    const assignmentsForSchool = (schoolId: string) =>
+      assignments.filter((a) => {
+        if (a.schoolId) return a.schoolId === schoolId;
+        const cid = courseIdOf(a);
+        return cid ? (coursesBySchool.get(schoolId)?.has(cid) ?? false) : false;
+      }).length;
     const enrolledBySchool = new Map(
       enrollmentCounts.map((e) => [e.schoolId, e._count.studentId]),
     );
@@ -597,8 +702,11 @@ export class AdminDashboardService {
         return {
           school_id: school.id,
           school_name: school.name,
-          // Platform assignments are available to every school's students.
-          assignments_created: assignments.length,
+          // Real count of assignments actually relevant to THIS school (its
+          // own DAILY assignments + COURSE assignments its students have
+          // access to) — previously this stamped the platform-wide total
+          // assignment count on every single school's row.
+          assignments_created: assignmentsForSchool(school.id),
           attempts_count: totalAttempts,
           average_score_percentage:
             max > 0 ? Number(((total / max) * 100).toFixed(2)) : 0,

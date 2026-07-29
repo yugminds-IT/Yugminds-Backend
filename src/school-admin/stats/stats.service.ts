@@ -51,7 +51,13 @@ export class SchoolAdminStatsService {
         },
       }),
       this.db.teacherReport.count({ where: { schoolId, status: 'submitted' } }),
-      this.db.teacherLeave.count({ where: { schoolId, status: 'pending' } }),
+      // TeacherLeave.teacherId has no enforced FK — exclude rows orphaned by
+      // a hard-deleted teacher (see AdminDashboardService.getStats()).
+      this.db
+        .$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`
+        .then((rows) => Number(rows[0]?.count ?? 0)),
       this.db.attendance.groupBy({
         by: ['status'],
         where: { schoolId, date: { gte: since } },

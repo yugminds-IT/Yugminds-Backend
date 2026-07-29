@@ -60,6 +60,60 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
     expect(school.name ?? school.school?.name).toBe(newName);
   });
 
+  describe('deactivating a school blocks sign-in for its teachers/students (own throwaway school)', () => {
+    let deactivateFixture: QaFixture;
+
+    beforeAll(async () => {
+      deactivateFixture = await createQaFixture(app);
+    }, 60000);
+
+    afterAll(async () => {
+      if (app && deactivateFixture) await teardownQaFixture(app, deactivateFixture);
+    }, 60000);
+
+    it('login is blocked while the school is inactive, and works again once reactivated', async () => {
+      const teacher = deactivateFixture.teachers[0];
+
+      // Sanity check: login works while the school is active.
+      const before = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: teacher.email, password: teacher.password });
+      expect([200, 201]).toContain(before.status);
+
+      await request(app.getHttpServer())
+        .put('/admin/schools')
+        .set(...authHeader(deactivateFixture.admin.token))
+        .send({ id: deactivateFixture.schoolId, is_active: false })
+        .expect(200);
+
+      try {
+        const blocked = await request(app.getHttpServer())
+          .post('/auth/login')
+          .send({ email: teacher.email, password: teacher.password });
+        expect(blocked.status).toBe(401);
+        expect(blocked.body?.message).toMatch(/deactivated/i);
+
+        // The platform admin is exempt — deactivating a school must not lock
+        // the admin who deactivated it out of the platform.
+        const adminLogin = await request(app.getHttpServer())
+          .post('/auth/login')
+          .send({ email: 'admin@yugminds.com', password: process.env.ADMIN_SEED_PASSWORD });
+        expect([200, 201]).toContain(adminLogin.status);
+      } finally {
+        await request(app.getHttpServer())
+          .put('/admin/schools')
+          .set(...authHeader(deactivateFixture.admin.token))
+          .send({ id: deactivateFixture.schoolId, is_active: true })
+          .expect(200);
+      }
+
+      const after = await request(app.getHttpServer())
+        .post('/auth/login')
+        .send({ email: teacher.email, password: teacher.password });
+      expect([200, 201]).toContain(after.status);
+    });
+  });
+
   describe('soft-delete blast radius (own throwaway school, not the shared fixture)', () => {
     let tempFixture: QaFixture;
 
@@ -86,23 +140,27 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
       expect(after.status).toBe(401);
     });
 
-    it('restoring the school restores its users', async () => {
+    // AdminSchoolsService.delete() is a deliberate PERMANENT delete (see its
+    // doc comment) — the school, its users, and cascaded data are gone
+    // immediately, not soft-deleted into the Trash page's restore flow.
+    // "Restoring" a school that was deleted via this endpoint should fail:
+    // there's nothing left to restore.
+    it('the school cannot be restored after a permanent delete', async () => {
+      await request(app.getHttpServer())
+        .get(`/admin/schools/${tempFixture.schoolId}`)
+        .set(...authHeader(tempFixture.admin.token))
+        .expect(404);
+
       await request(app.getHttpServer())
         .post('/admin/trash/restore')
         .set(...authHeader(tempFixture.admin.token))
         .send({ entity_type: 'schools', id: tempFixture.schoolId })
-        .expect(201);
-
-      const res = await request(app.getHttpServer())
-        .get(`/admin/schools/${tempFixture.schoolId}`)
-        .set(...authHeader(tempFixture.admin.token))
-        .expect(200);
-      const school = res.body?.data ?? res.body;
-      expect(school.isActive ?? school.school?.isActive).toBe(true);
+        .expect(404);
     });
 
     afterAll(async () => {
-      if (tempFixture) await teardownQaFixture(app, tempFixture);
+      // The school (and its fixture users) were already permanently deleted
+      // by the test above — nothing left to tear down via the normal flow.
     }, 30000);
   });
 });

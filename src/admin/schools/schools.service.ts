@@ -3,10 +3,17 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { Role } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { ok } from '../../common/api-response';
+import {
+  deriveSchoolAbbreviation,
+  deriveGradeAbbreviation,
+  deriveSectionAbbreviation,
+  buildJoinCodeCandidate,
+} from '../../common/utils/join-code.util';
 
 @Injectable()
 export class AdminSchoolsService {
@@ -40,8 +47,26 @@ export class AdminSchoolsService {
     const schoolRows = await this.db.school.findMany({
       where: { id: { in: schoolIds } },
       include: {
-        teacherSchools: { select: { id: true } },
-        studentSchools: { select: { id: true } },
+        // Same overcount risk as studentSchools below: TeacherSchool has no
+        // isActive column of its own, so without filtering on the linked
+        // User, a deactivated or trashed teacher's row (never cleaned up)
+        // inflates "Teachers" on this page forever.
+        teacherSchools: {
+          where: {
+            teacher: { role: Role.teacher, isActive: true, deletedAt: null },
+          },
+          select: { id: true },
+        },
+        // Only count links to students who are actually active/current —
+        // otherwise a deactivated or trashed student's StudentSchool row
+        // (never cleaned up) inflates "Active Schools"/studentCount forever.
+        studentSchools: {
+          where: {
+            isActive: true,
+            student: { role: Role.student, isActive: true, deletedAt: null },
+          },
+          select: { id: true },
+        },
         schoolAdmins: { include: { user: { include: { profile: true } } } },
         joinCodes: true,
         grades: { include: { sections: { include: { joinCodes: true } } } },
@@ -212,6 +237,9 @@ export class AdminSchoolsService {
     });
 
     const schoolData = this.pickSchoolDataFromBody(body);
+    if (!schoolData.schoolCode) {
+      schoolData.schoolCode = await this.deriveUniqueSchoolCode(name);
+    }
     await this.db.school.upsert({
       where: { id: tenant.id },
       create: {
@@ -225,7 +253,11 @@ export class AdminSchoolsService {
       },
     });
 
-    await this.createAcademicStructureFromBody(tenant.id, body);
+    await this.createAcademicStructureFromBody(
+      tenant.id,
+      body,
+      schoolData.schoolCode as string,
+    );
 
     // Create school admin user and link to school when admin credentials provided
     const adminEmail = String(
@@ -553,33 +585,36 @@ export class AdminSchoolsService {
         message: 'School already has grades configured.',
       };
     }
-    await this.createDefaultAcademicStructure(schoolId);
+    // Legacy schools created before schoolCode existed won't have one yet.
+    const schoolCode =
+      school.schoolCode ??
+      (await this.deriveUniqueSchoolCode(school.name, schoolId));
+    if (!school.schoolCode) {
+      await this.db.school.update({ where: { id: schoolId }, data: { schoolCode } });
+    }
+    await this.createDefaultAcademicStructure(schoolId, schoolCode);
     return {
       success: true,
       message: 'Default grades, sections, and join codes created.',
     };
   }
 
+  /**
+   * Deleting a school from the Schools Management page is permanent: the
+   * school, its admins/students, and all cascaded academic data (grades,
+   * sections, join codes) are removed immediately, freeing up their emails
+   * for reuse. (The Trash page's own restore/purge flow for other entity
+   * types is unaffected — this only changes the schools "Delete" action.)
+   */
   async delete(id: string) {
-    // Soft delete: the school (and its users) land in the admin Trash and can
-    // be restored. Hard deletion happens only via purge() from the Trash page.
     await this.ensureSchoolForTenant(id);
-    const now = new Date();
-    // Deactivate all tenant users so nobody can log in while the school is
-    // trashed; tokenVersion bump invalidates live sessions immediately.
     const affectedUsers = await this.db.user.findMany({
-      where: { tenantId: id, deletedAt: null },
+      where: { tenantId: id },
       select: { id: true },
     });
-    await this.db.user.updateMany({
-      where: { tenantId: id, deletedAt: null },
-      data: { deletedAt: now, isActive: false, tokenVersion: { increment: 1 } },
-    });
+    const result = await this.purge(id);
     await this.authCache.invalidate(affectedUsers.map((u) => u.id));
-    return this.db.school.update({
-      where: { id },
-      data: { deletedAt: now, isActive: false },
-    });
+    return result;
   }
 
   /** Permanently delete a trashed school, its users, and cascaded data. */
@@ -590,6 +625,32 @@ export class AdminSchoolsService {
       select: { id: true },
     });
     const userIds = users.map((u) => u.id);
+    // TeacherReport.teacherId/schoolId have no FK relation to User/School (a
+    // report must survive its teacher or school being soft-deleted so
+    // history stays visible) — without this cleanup, purging a school hard-
+    // deletes every teacher AND the school itself, orphaning every report
+    // ever filed there permanently (both fields unresolvable at once).
+    await this.db.teacherReport.deleteMany({
+      where: {
+        OR: [
+          ...(userIds.length > 0 ? [{ teacherId: { in: userIds } }] : []),
+          { schoolId: id },
+        ],
+      },
+    });
+    // TeacherLeave.schoolId has the same no-FK gap (only teacherId has a
+    // schema-declared relation, and even that isn't enforced at the DB
+    // level — see migration 20260316000001's note that it's "implicit").
+    // Same orphan risk as TeacherReport above: clean up before the hard
+    // deletes below.
+    await this.db.teacherLeave.deleteMany({
+      where: {
+        OR: [
+          ...(userIds.length > 0 ? [{ teacherId: { in: userIds } }] : []),
+          { schoolId: id },
+        ],
+      },
+    });
     if (userIds.length > 0) {
       await this.db.user.deleteMany({ where: { id: { in: userIds } } });
     }
@@ -627,6 +688,30 @@ export class AdminSchoolsService {
     return `${slug}.example-school`;
   }
 
+  /**
+   * Derives a school abbreviation for joining codes (e.g. "GVPS") and
+   * guarantees it's unique against `School.schoolCode`, appending a numeric
+   * suffix (GVPS2, GVPS3, ...) on collision. Computed once at creation time
+   * and reused for every code that school ever gets.
+   */
+  private async deriveUniqueSchoolCode(
+    name: string,
+    excludeSchoolId?: string,
+  ): Promise<string> {
+    const base = deriveSchoolAbbreviation(name);
+    let candidate = base;
+    for (let suffix = 2; suffix < 100; suffix++) {
+      const existing = await this.db.school.findUnique({
+        where: { schoolCode: candidate },
+        select: { id: true },
+      });
+      if (!existing || existing.id === excludeSchoolId) return candidate;
+      candidate = `${base}${suffix}`;
+    }
+    // Astronomically unlikely fallback — keeps this provably terminating.
+    return `${base}${Date.now().toString(36).toUpperCase().slice(-4)}`;
+  }
+
   /** Default grade names created for every new school */
   private static readonly DEFAULT_GRADE_NAMES = [
     'Grade 1',
@@ -646,6 +731,7 @@ export class AdminSchoolsService {
   private async createAcademicStructureFromBody(
     schoolId: string,
     body: Record<string, unknown>,
+    schoolCode: string,
   ): Promise<void> {
     const rawGrades = body.grades_offered ?? body.gradesOffered;
     const fromForm = Array.isArray(rawGrades)
@@ -676,6 +762,34 @@ export class AdminSchoolsService {
           )
         : ['Section A'];
 
+    // Per-grade override (e.g. {"Grade 4": 2, "Grade 7": 3}) — additive on top
+    // of the uniform behavior above. Any grade not present in this map falls
+    // back to `sectionNames`, so existing callers that never send this field
+    // (Postman collection, older clients, init-academic-structure) are
+    // completely unaffected.
+    const rawSectionsPerGrade = body.sections_per_grade ?? body.sectionsPerGrade;
+    const sectionsPerGrade =
+      rawSectionsPerGrade && typeof rawSectionsPerGrade === 'object'
+        ? (rawSectionsPerGrade as Record<string, unknown>)
+        : null;
+
+    const sectionNamesForGrade = (gradeName: string): string[] => {
+      if (!sectionsPerGrade || !(gradeName in sectionsPerGrade)) {
+        return sectionNames;
+      }
+      const raw = sectionsPerGrade[gradeName];
+      const count =
+        raw != null && String(raw).trim() !== '' ? Number(raw) : NaN;
+      if (!Number.isFinite(count) || count <= 0) {
+        return sectionNames;
+      }
+      const clamped = Math.min(26, Math.max(1, count));
+      return Array.from(
+        { length: clamped },
+        (_, i) => `Section ${String.fromCharCode(65 + i)}`,
+      );
+    };
+
     const usageTypeStr = String(
       body.usage_type ?? body.usageType ?? 'single',
     ).toLowerCase();
@@ -690,7 +804,7 @@ export class AdminSchoolsService {
         update: {},
       });
 
-      for (const sectionName of sectionNames) {
+      for (const sectionName of sectionNamesForGrade(gradeName)) {
         const section = await this.db.section.upsert({
           where: {
             gradeId_name: { gradeId: grade.id, name: sectionName },
@@ -699,7 +813,11 @@ export class AdminSchoolsService {
           update: {},
         });
 
-        const code = await this.generateUniqueJoinCode();
+        const code = await this.generateUniqueJoinCode(
+          schoolCode,
+          gradeName,
+          sectionName,
+        );
         await this.db.joinCode.create({
           data: {
             schoolId,
@@ -721,6 +839,7 @@ export class AdminSchoolsService {
    */
   private async createDefaultAcademicStructure(
     schoolId: string,
+    schoolCode: string,
   ): Promise<void> {
     for (const gradeName of AdminSchoolsService.DEFAULT_GRADE_NAMES) {
       const grade = await this.db.grade.upsert({
@@ -740,7 +859,11 @@ export class AdminSchoolsService {
           update: {},
         });
 
-        const code = await this.generateUniqueJoinCode();
+        const code = await this.generateUniqueJoinCode(
+          schoolCode,
+          gradeName,
+          sectionName,
+        );
         await this.db.joinCode.create({
           data: {
             schoolId,
@@ -756,12 +879,24 @@ export class AdminSchoolsService {
     }
   }
 
-  private async generateUniqueJoinCode(): Promise<string> {
-    for (;;) {
-      const raw = Math.random().toString(36).slice(2, 10).toUpperCase();
-      const code = `YUG-${raw}`;
+  private async generateUniqueJoinCode(
+    schoolCode: string,
+    gradeName: string,
+    sectionName?: string,
+  ): Promise<string> {
+    const gradeAbbr = deriveGradeAbbreviation(gradeName);
+    const sectionAbbr = sectionName
+      ? deriveSectionAbbreviation(sectionName)
+      : undefined;
+    const base = buildJoinCodeCandidate(schoolCode, gradeAbbr, sectionAbbr);
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const code = attempt === 0 ? base : `${base}-${attempt + 1}`;
       const existing = await this.db.joinCode.findUnique({ where: { code } });
       if (!existing) return code;
     }
+    // Astronomically unlikely fallback — keeps this provably terminating.
+    const raw = Math.random().toString(36).slice(2, 6).toUpperCase();
+    return `${base}-${raw}`;
   }
 }

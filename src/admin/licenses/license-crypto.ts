@@ -204,10 +204,19 @@ export function readActivationNumber(
   };
 }
 
-/** Resolve the shared secret (base64) from env, falling back to the known value. */
-const DEFAULT_SECRET_B64 = 'uZXHVDLXN7WDOOf12G+z+bKf3xhDhTvIZdhcsGcRSxQ=';
+/**
+ * Resolve the shared secret (base64) from env. No hardcoded fallback — this
+ * secret is what makes an activation key unforgeable, so silently degrading
+ * to a fixed, known value if the env var is ever missing would let anyone
+ * mint valid keys. Fail fast instead.
+ */
 export function getLicenseSecret(): Buffer {
-  const b64 = process.env.ROBOCODERS_LICENSE_SECRET || DEFAULT_SECRET_B64;
+  const b64 = process.env.ROBOCODERS_LICENSE_SECRET;
+  if (!b64 || !b64.trim()) {
+    throw new Error(
+      'ROBOCODERS_LICENSE_SECRET is not set — refusing to generate or verify activation keys.',
+    );
+  }
   return Buffer.from(b64, 'base64');
 }
 

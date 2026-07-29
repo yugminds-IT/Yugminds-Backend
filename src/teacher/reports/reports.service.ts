@@ -1,13 +1,19 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
+import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 
 @Injectable()
 export class TeacherReportsService {
   constructor(
     private readonly db: DatabaseService,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly teacherSchedule: TeacherScheduleService,
   ) {}
 
   private static toUiStatus(status?: string | null) {
@@ -78,6 +84,33 @@ export class TeacherReportsService {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
 
+    // A teacher can only submit reports for a school they're actually
+    // assigned to — without this, a report could silently attach to a
+    // school that never assigned this teacher there.
+    const assigned = await this.db.teacherSchool.findFirst({
+      where: { teacherId, schoolId },
+      select: { schoolId: true },
+    });
+    if (!assigned) {
+      throw new ForbiddenException('Not assigned to this school');
+    }
+
+    // Block reports on a day the school has declared a Holiday/Break —
+    // catches the case where a stale ClassSchedule row still exists for a
+    // day the school calendar has since closed.
+    const dateOnly = new Date(reportDate);
+    dateOnly.setUTCHours(0, 0, 0, 0);
+    const workStatus = await this.teacherSchedule.getWorkStatusForDate(
+      teacherId,
+      [schoolId],
+      dateOnly,
+    );
+    if (workStatus.holidaySchoolIds.includes(schoolId)) {
+      throw new BadRequestException(
+        'This school has declared a holiday/break on this date — reports cannot be submitted.',
+      );
+    }
+
     // Server-side duplicate protection (one report per teacher+school+date+period)
     const existing = await this.db.teacherReport.findFirst({
       where: {
@@ -134,8 +167,6 @@ export class TeacherReportsService {
 
     // Mark attendance as Present only when ALL scheduled periods for that day have been reported.
     // This ensures the UI promise ("submit all reports → marked Present") matches backend behavior.
-    const dateOnly = new Date(reportDate);
-    dateOnly.setUTCHours(0, 0, 0, 0);
     const dateEnd = new Date(dateOnly);
     dateEnd.setUTCHours(23, 59, 59, 999);
 

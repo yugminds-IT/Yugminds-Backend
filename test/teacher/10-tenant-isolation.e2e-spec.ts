@@ -236,7 +236,11 @@ describe('Teacher tenant isolation (school A teacher vs school B resources)', ()
 
     for (const [label, run] of crossChecks) {
       const res = await run();
-      expect([403, 404]).toContain(res.status);
+      if (![403, 404].includes(res.status)) {
+        throw new Error(
+          `${label}: expected 403 or 404, got ${res.status} ${JSON.stringify(res.body)}`,
+        );
+      }
     }
   });
 

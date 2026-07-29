@@ -4,12 +4,15 @@ import {
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import type { Request, Response } from 'express';
 import { AuditService, sanitizePayload } from './audit.service';
+import { ROLES_KEY } from '../../auth/decorators/roles.decorator';
 import type { CurrentUserPayload } from '../../auth/decorators/current-user.decorator';
 import type { Prisma } from '@prisma/client';
+import type { Role } from '../../auth/types/role.type';
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -28,7 +31,10 @@ function parseEntity(path: string): { entityType: string | null; entityId: strin
 
 @Injectable()
 export class AuditInterceptor implements NestInterceptor {
-  constructor(private readonly audit: AuditService) {}
+  constructor(
+    private readonly audit: AuditService,
+    private readonly reflector: Reflector,
+  ) {}
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     if (context.getType() !== 'http') return next.handle();
@@ -36,9 +42,21 @@ export class AuditInterceptor implements NestInterceptor {
     const req = context.switchToHttp().getRequest<Request & { user?: CurrentUserPayload }>();
     const path = req.originalUrl ?? req.url ?? '';
 
+    // Path-prefix match covers everything today, but is a silent coverage
+    // gap waiting to happen — a future admin-only mutation mounted outside
+    // `/admin/...` would otherwise never get audited. Also catch any route
+    // whose own @Roles() metadata requires the admin role, regardless of
+    // its URL, so moving/adding a controller can never quietly drop out of
+    // the audit trail.
+    const requiredRoles = this.reflector.getAllAndOverride<Role[] | undefined>(
+      ROLES_KEY,
+      [context.getHandler(), context.getClass()],
+    );
+    const isAdminGated = !!requiredRoles?.includes('admin');
+
     const shouldAudit =
       MUTATING_METHODS.has(req.method) &&
-      AUDITED_PREFIXES.some((p) => path.startsWith(p)) &&
+      (AUDITED_PREFIXES.some((p) => path.startsWith(p)) || isAdminGated) &&
       !SKIPPED_PATHS.some((rx) => rx.test(path));
 
     if (!shouldAudit) return next.handle();

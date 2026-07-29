@@ -15,7 +15,6 @@ import { SignupDto } from './dto/signup.dto';
 import type { CreateUserOptions } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { LogoutDto } from './dto/logout.dto';
-import { PasswordResetRequestService } from '../common/password-reset-request/password-reset-request.service';
 import type { Request, Response } from 'express';
 
 const REFRESH_TOKEN_COOKIE_NAME = 'refresh_token';
@@ -55,7 +54,6 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly config: ConfigService,
-    private readonly passwordResetService: PasswordResetRequestService,
   ) {}
 
   @Public()
@@ -171,53 +169,6 @@ export class AuthController {
   ): Promise<{ message: string }> {
     // SECURITY: Always return same message to prevent account enumeration
     return this.authService.submitPasswordResetRequest(body?.email ?? '');
-  }
-
-  @Public()
-  @Throttle({ default: { limit: 50, ttl: 60000 } })
-  @Post('verify-reset-token')
-  async verifyResetToken(
-    @Body() body: { requestId?: string; token?: string },
-  ): Promise<{ valid: boolean }> {
-    // This endpoint allows the frontend to verify a token before showing the password reset form
-    const requestId = String(body?.requestId ?? '').trim();
-    const token = String(body?.token ?? '').trim();
-
-    if (!requestId || !token) {
-      return { valid: false };
-    }
-
-    const result = await this.passwordResetService.verifyResetToken(
-      requestId,
-      token,
-    );
-    return { valid: result.valid };
-  }
-
-  @Public()
-  @Throttle({ default: { limit: 50, ttl: 60000 } })
-  @Post('complete-password-reset')
-  async completePasswordReset(
-    @Body() body: { requestId?: string; token?: string; newPassword?: string },
-  ): Promise<{ success: boolean; message: string }> {
-    const requestId = String(body?.requestId ?? '').trim();
-    const token = String(body?.token ?? '').trim();
-    const newPassword = String(body?.newPassword ?? '').trim();
-
-    if (!requestId || !token || !newPassword) {
-      throw new UnauthorizedException('Missing required fields');
-    }
-
-    await this.passwordResetService.completePasswordReset(
-      requestId,
-      token,
-      newPassword,
-    );
-    return {
-      success: true,
-      message:
-        'Password reset successfully. You can now log in with your new password.',
-    };
   }
 
   @Post('verify-password')

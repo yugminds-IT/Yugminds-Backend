@@ -54,6 +54,20 @@ export class AdminCoursesController {
     return this.service.publish(courseId, body);
   }
 
+  @Post(':courseId/access')
+  setAccess(
+    @Param('courseId') courseId: string,
+    @Body()
+    body: {
+      access?: Array<{
+        school_id: string;
+        grades?: Array<{ grade: string; sections?: string[] }>;
+      }>;
+    },
+  ) {
+    return this.service.setAccess(courseId, body);
+  }
+
   @Post(':courseId/duplicate')
   duplicate(@Param('courseId') courseId: string) {
     return this.service.duplicate(courseId);

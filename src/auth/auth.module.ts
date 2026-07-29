@@ -9,13 +9,13 @@ import { DatabaseModule } from '../database/database.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './jwt-auth/jwt-auth.guard';
 import { RolesGuard } from './roles/roles.guard';
-import { PasswordResetRequestModule } from '../common/password-reset-request/password-reset-request.module';
 import { RealtimeModule } from '../common/realtime/realtime.module';
+import { SystemControlsModule } from '../admin/system-controls/system-controls.module';
 
 @Module({
   imports: [
     DatabaseModule,
-    forwardRef(() => PasswordResetRequestModule),
+    SystemControlsModule,
     forwardRef(() => RealtimeModule),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({

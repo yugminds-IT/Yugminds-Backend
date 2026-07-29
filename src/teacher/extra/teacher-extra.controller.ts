@@ -218,11 +218,11 @@ export class TeacherExtraController {
       if (!assigned) throw new ForbiddenException('Not assigned to this school');
     }
     const m = (mode ?? 'all').trim().toLowerCase() as 'received' | 'sent' | 'all';
-    const notifications = await this.notificationsService.listWithProfiles(user.id, {
+    const { items } = await this.notificationsService.listWithProfiles(user.id, {
       mode: m,
       limit: take,
     });
-    return { notifications };
+    return { notifications: items };
   }
 
   @Post('notifications')
@@ -994,9 +994,27 @@ export class TeacherExtraController {
     @Query('school_id') schoolId?: string,
     @Query('day') day?: string,
   ) {
-    if (!schoolId) return { schedules: [] };
-    const where: { schoolId: string; teacherId: number; dayOfWeek?: number } = {
-      schoolId,
+    // When no school_id is given, aggregate across every school the teacher
+    // is assigned to (previously this returned an empty list, which made a
+    // multi-school teacher's "all schools" view — e.g. the Classes page's
+    // in-page School filter — silently show nothing).
+    let schoolIdFilter: string | { in: string[] };
+    if (schoolId) {
+      schoolIdFilter = schoolId;
+    } else {
+      const assigned = await this.db.teacherSchool.findMany({
+        where: { teacherId: user.id },
+        select: { schoolId: true },
+      });
+      if (assigned.length === 0) return { schedules: [] };
+      schoolIdFilter = { in: assigned.map((s) => s.schoolId) };
+    }
+    const where: {
+      schoolId: string | { in: string[] };
+      teacherId: number;
+      dayOfWeek?: number;
+    } = {
+      schoolId: schoolIdFilter,
       teacherId: user.id,
     };
     if (day !== undefined && day !== '') {
@@ -1014,7 +1032,8 @@ export class TeacherExtraController {
     const teacherIds = Array.from(
       new Set(schedules.map((s) => s.teacherId).filter(Boolean)),
     ) as number[];
-    const [periods, rooms, teachers] = await Promise.all([
+    const scheduleSchoolIds = Array.from(new Set(schedules.map((s) => s.schoolId)));
+    const [periods, rooms, teachers, schoolRows] = await Promise.all([
       periodIds.length > 0
         ? this.db.period.findMany({ where: { id: { in: periodIds } } })
         : ([] as any[]),
@@ -1027,6 +1046,12 @@ export class TeacherExtraController {
             include: { profile: true },
           })
         : ([] as any[]),
+      scheduleSchoolIds.length > 0
+        ? this.db.school.findMany({
+            where: { id: { in: scheduleSchoolIds } },
+            select: { id: true, name: true },
+          })
+        : ([] as any[]),
     ]);
     const periodMap = new Map<string, any>(
       periods.map((p: any) => [p.id, p] as [string, any]),
@@ -1036,6 +1061,9 @@ export class TeacherExtraController {
     );
     const teacherMap = new Map<number, any>(
       teachers.map((t: any) => [t.id, t] as [number, any]),
+    );
+    const schoolMap = new Map<string, { id: string; name: string }>(
+      schoolRows.map((s: any) => [s.id, s] as [string, { id: string; name: string }]),
     );
     return {
       schedules: schedules.map((s) => ({
@@ -1095,6 +1123,10 @@ export class TeacherExtraController {
                 email: t.email,
               }
             : null;
+        })(),
+        school: (() => {
+          const sc = schoolMap.get(s.schoolId);
+          return sc ? { id: sc.id, name: sc.name } : null;
         })(),
       })),
     };
@@ -1620,6 +1652,7 @@ export class TeacherExtraController {
         schoolId: true,
         courseId: true,
         chapterId: true,
+        retakeAccessScope: true,
       },
     });
     if (
@@ -1634,6 +1667,7 @@ export class TeacherExtraController {
     if (!studentIds.length)
       throw new BadRequestException('studentIds are required');
 
+    const isActive = body.isActive ?? true;
     await Promise.all(
       studentIds.map((studentId) =>
         this.db.retakeGrant.upsert({
@@ -1642,16 +1676,32 @@ export class TeacherExtraController {
             assignmentId,
             studentId,
             grantedByTeacherId: user.id,
-            isActive: body.isActive ?? true,
+            isActive,
           },
           update: {
             grantedByTeacherId: user.id,
-            isActive: body.isActive ?? true,
+            isActive,
             grantedAt: new Date(),
           },
         }),
       ),
     );
+    if (isActive) {
+      // Granting an individual retake previously did nothing unless retake
+      // was separately enabled on the assignment — the "can this student
+      // retake" check requires retakeEnabled regardless of an active grant.
+      // Force it on here, and narrow the scope to "selected" unless the
+      // teacher had already deliberately opened it to the whole class, so
+      // this individual grant doesn't accidentally open retakes for everyone.
+      await this.db.assignment.update({
+        where: { id: assignmentId },
+        data: {
+          retakeEnabled: true,
+          retakeAccessScope:
+            assignment.retakeAccessScope === 'all' ? 'all' : 'selected',
+        },
+      });
+    }
     const fullAssignment = await this.db.assignment.findUnique({
       where: { id: assignmentId },
       select: { title: true, maxRetakeAttempts: true },
@@ -1802,6 +1852,164 @@ export class TeacherExtraController {
       data: { isActive: false },
     });
     return { success: true };
+  }
+
+  /**
+   * Retake requests routed to this teacher (RetakeRequestTeacherResolver
+   * resolved the target teacher(s) when the student created the request).
+   */
+  @Get('retake-requests')
+  async listRetakeRequests(
+    @CurrentUser() user: { id: number },
+    @Query('status') status?: string,
+  ) {
+    const requests = await this.db.retakeRequest.findMany({
+      where: {
+        targetTeacherIds: { has: user.id },
+        ...(status ? { status } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      include: {
+        assignment: {
+          select: {
+            title: true,
+            schoolId: true,
+            course: { select: { title: true } },
+            chapter: { select: { course: { select: { title: true } } } },
+          },
+        },
+        student: { select: { id: true, email: true, profile: { select: { fullName: true } } } },
+      },
+    });
+
+    const studentSchoolByPair = new Map(
+      (
+        await this.db.studentSchool.findMany({
+          where: {
+            OR: requests
+              .filter((r) => r.schoolId)
+              .map((r) => ({
+                studentId: r.studentId,
+                schoolId: r.schoolId as string,
+              })),
+          },
+          select: { studentId: true, schoolId: true, grade: true, section: true },
+        })
+      ).map((ss) => [`${ss.studentId}:${ss.schoolId}`, ss]),
+    );
+
+    return {
+      requests: requests.map((r) => {
+        const enrollment = r.schoolId
+          ? studentSchoolByPair.get(`${r.studentId}:${r.schoolId}`)
+          : undefined;
+        return {
+          id: r.id,
+          assignment_id: r.assignmentId,
+          assignment_title: r.assignment.title,
+          course_title:
+            r.assignment.course?.title ?? r.assignment.chapter?.course?.title ?? null,
+          student_id: r.studentId,
+          student_name: r.student.profile?.fullName ?? r.student.email,
+          grade: enrollment?.grade ?? null,
+          section: enrollment?.section ?? null,
+          reason: r.reason,
+          status: r.status,
+          teacher_remarks: r.teacherRemarks,
+          created_at: r.createdAt.toISOString(),
+          decided_at: r.decidedAt?.toISOString() ?? null,
+        };
+      }),
+    };
+  }
+
+  @Patch('retake-requests/:requestId')
+  async decideRetakeRequest(
+    @CurrentUser() user: { id: number },
+    @Param('requestId') requestId: string,
+    @Body() body: { action?: 'approve' | 'reject'; remarks?: string },
+  ) {
+    const request = await this.db.retakeRequest.findUnique({
+      where: { id: requestId },
+      include: { assignment: { select: { title: true, retakeAccessScope: true } } },
+    });
+    if (!request) throw new NotFoundException('Retake request not found');
+    if (!request.targetTeacherIds.includes(user.id)) {
+      throw new ForbiddenException('You are not assigned to this request');
+    }
+    if (request.status !== 'pending') {
+      throw new BadRequestException('This request has already been decided');
+    }
+    if (body.action !== 'approve' && body.action !== 'reject') {
+      throw new BadRequestException('action must be "approve" or "reject"');
+    }
+
+    const approved = body.action === 'approve';
+    if (approved) {
+      await this.db.retakeGrant.upsert({
+        where: {
+          assignmentId_studentId: {
+            assignmentId: request.assignmentId,
+            studentId: request.studentId,
+          },
+        },
+        create: {
+          assignmentId: request.assignmentId,
+          studentId: request.studentId,
+          grantedByTeacherId: user.id,
+          isActive: true,
+        },
+        update: {
+          grantedByTeacherId: user.id,
+          isActive: true,
+          grantedAt: new Date(),
+        },
+      });
+      // Same fix as grantRetake(): retakeEnabled must be on for the grant to
+      // actually take effect, and narrow scope so only the requester (plus
+      // whoever else was already granted) can retake — not the whole class.
+      await this.db.assignment.update({
+        where: { id: request.assignmentId },
+        data: {
+          retakeEnabled: true,
+          retakeAccessScope:
+            request.assignment.retakeAccessScope === 'all' ? 'all' : 'selected',
+        },
+      });
+    }
+
+    const updated = await this.db.retakeRequest.update({
+      where: { id: requestId },
+      data: {
+        status: approved ? 'approved' : 'rejected',
+        decidedByTeacherId: user.id,
+        decidedAt: new Date(),
+        teacherRemarks: body.remarks?.trim() || null,
+      },
+    });
+
+    await this.notificationsService.sendOne(user.id, request.studentId, {
+      title: approved
+        ? `Retake approved: ${request.assignment.title}`
+        : `Retake request declined: ${request.assignment.title}`,
+      message: approved
+        ? `Your retake request for "${request.assignment.title}" was approved. You can retake it now.${
+            updated.teacherRemarks ? ` Note: ${updated.teacherRemarks}` : ''
+          }`
+        : `Your retake request for "${request.assignment.title}" was declined.${
+            updated.teacherRemarks ? ` Reason: ${updated.teacherRemarks}` : ''
+          }`,
+      type: 'assignment_retake_request',
+    });
+
+    return {
+      retake_request: {
+        id: updated.id,
+        status: updated.status,
+        teacher_remarks: updated.teacherRemarks,
+        decided_at: updated.decidedAt?.toISOString() ?? null,
+      },
+    };
   }
 
   @Post('assignments/batch-grade')

@@ -4,6 +4,7 @@ import {
   Controller,
   Delete,
   Get,
+  NotFoundException,
   Param,
   Patch,
   Post,
@@ -30,8 +31,12 @@ import { randomUUID } from 'crypto';
 import { BatchGenerateCertificatesDto } from './dto/batch-generate-certificates.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { NotificationsService } from '../../common/notifications/notifications.service';
+import { CertificateService } from '../../common/certificates/certificate.service';
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
 import { StorageService } from '../../common/storage/storage.service';
+import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import { AdminTeacherReportsService } from '../teacher-reports/admin-teacher-reports.service';
+import { AdminLogosService } from '../logos/admin-logos.service';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -51,6 +56,9 @@ export class AdminExtraController {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly notificationsService: NotificationsService,
     private readonly storage: StorageService,
+    private readonly certificateService: CertificateService,
+    private readonly teacherReportsService: AdminTeacherReportsService,
+    private readonly logosService: AdminLogosService,
   ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
@@ -278,8 +286,12 @@ export class AdminExtraController {
     const take = limit ? Math.min(parseInt(limit, 10) || 20, 5000) : 20;
     const skip = offset ? Math.max(parseInt(offset, 10) || 0, 0) : 0;
 
-    // Build DB-level filter to avoid loading all students into memory
-    const studentWhere: any = { role: Role.student };
+    // Build DB-level filter to avoid loading all students into memory.
+    // Matches the same "active, non-trashed student" population that
+    // /admin/students lists — without isActive/deletedAt here, the summary
+    // below would count courses/progress for deactivated or trashed
+    // students who never appear in the table this page renders.
+    const studentWhere: any = { role: Role.student, isActive: true, deletedAt: null };
     if (studentId) {
       studentWhere.id = parseInt(studentId, 10) || 0;
     }
@@ -362,7 +374,7 @@ export class AdminExtraController {
       new Set<string>(studentCourses.map((sc) => sc.courseId)),
     );
 
-    const [courses, schools] = await Promise.all([
+    const [courses, schools, chapters, chapterContents] = await Promise.all([
       this.db.course.findMany({
         where: courseIdsForQuery.length
           ? {
@@ -386,10 +398,49 @@ export class AdminExtraController {
           },
         },
       }),
+      // Live chapters/content — required so progress is recomputed against
+      // the course's CURRENT structure (see computeCourseProgress) instead
+      // of a raw average of every CourseProgress row ever written, which
+      // could include stale rows tied to content since replaced by a
+      // course edit.
+      courseIdsForQuery.length
+        ? this.db.chapter.findMany({
+            where: { courseId: { in: courseIdsForQuery } },
+            select: { id: true, courseId: true },
+          })
+        : Promise.resolve([] as Array<{ id: string; courseId: string }>),
+      courseIdsForQuery.length
+        ? this.db.chapterContent.findMany({
+            where: { chapter: { courseId: { in: courseIdsForQuery } } },
+            select: { id: true, chapterId: true, durationMinutes: true },
+          })
+        : Promise.resolve(
+            [] as Array<{
+              id: string;
+              chapterId: string;
+              durationMinutes: number | null;
+            }>,
+          ),
     ]);
 
     const courseById = new Map(courses.map((c) => [c.id, c]));
     const schoolById = new Map(schools.map((s) => [s.id, s]));
+    const chaptersByCourse = new Map<string, Array<{ id: string }>>();
+    for (const ch of chapters) {
+      if (!chaptersByCourse.has(ch.courseId)) chaptersByCourse.set(ch.courseId, []);
+      chaptersByCourse.get(ch.courseId)!.push({ id: ch.id });
+    }
+    const chapterToCourse = new Map(chapters.map((ch) => [ch.id, ch.courseId]));
+    const contentsByCourse = new Map<
+      string,
+      Array<{ id: string; chapterId: string; durationMinutes: number | null }>
+    >();
+    for (const cc of chapterContents) {
+      const courseId = chapterToCourse.get(cc.chapterId);
+      if (!courseId) continue;
+      if (!contentsByCourse.has(courseId)) contentsByCourse.set(courseId, []);
+      contentsByCourse.get(courseId)!.push(cc);
+    }
 
     type CourseProgressDto = {
       course_id: string;
@@ -426,32 +477,23 @@ export class AdminExtraController {
         const progressEntries = progressForUser.filter(
           (cp) => cp.courseId === cid,
         );
-        const avgProgress =
-          progressEntries.length > 0
-            ? progressEntries.reduce((sum, p) => sum + p.progress, 0) /
-              progressEntries.length
-            : 0;
-        const last = progressEntries.reduce<Date | null>((latest, p) => {
-          const ts = p.completedAt ?? p.updatedAt;
-          if (!latest) return ts;
-          return ts > latest ? ts : latest;
-        }, null);
+        const computed = computeCourseProgress(
+          chaptersByCourse.get(cid) ?? [],
+          contentsByCourse.get(cid) ?? [],
+          progressEntries,
+        );
         const status: 'completed' | 'in_progress' | 'not_started' =
-          avgProgress >= 99
-            ? 'completed'
-            : avgProgress > 0
-              ? 'in_progress'
-              : 'not_started';
+          computed.status === 'active' ? 'in_progress' : computed.status;
 
         coursesForStudent.push({
           course_id: cid,
           course_name: course?.title ?? '',
-          total_chapters: course?._count?.chapters ?? 0,
-          completed_chapters: progressEntries.filter(
-            (p) => p.chapterId != null && p.completedAt != null,
-          ).length,
-          progress_percentage: Number(avgProgress.toFixed(2)),
-          last_accessed: last ? last.toISOString() : '',
+          total_chapters: computed.totalChapters,
+          completed_chapters: computed.completedChapters,
+          progress_percentage: Number(computed.progressPercentage.toFixed(2)),
+          last_accessed: computed.lastAccessed
+            ? computed.lastAccessed.toISOString()
+            : '',
           enrolled_on:
             studentCourseForUser
               .find((sc) => sc.courseId === cid)
@@ -585,64 +627,143 @@ export class AdminExtraController {
     // ── System-wide summary (NOT page-bound) ──────────────────────────────
     // studentsDtoAll above is only the current page, so every summary metric
     // except total_students must be computed with dedicated scope-aware queries
-    // or the cards reflect just the 50 visible students.
-    const hasStudentFilter = Boolean(schoolId || grade || studentId);
-    const summaryStudentIds = hasStudentFilter
-      ? (
-          await this.db.user.findMany({
-            where: studentWhere,
-            select: { id: true },
-          })
-        ).map((u) => u.id)
-      : null;
-    const studentScope = summaryStudentIds
-      ? { studentId: { in: summaryStudentIds } }
-      : {};
+    // or the cards reflect just the visible page. Always scope to the actual
+    // matching population (studentWhere) rather than only when a filter query
+    // param is present — an empty scope here previously meant "every
+    // StudentCourse/CourseProgress row in the whole database, any school or
+    // student," which visibly disagreed with the (correctly scoped) table.
+    const summaryStudentIds = (
+      await this.db.user.findMany({
+        where: studentWhere,
+        select: { id: true },
+      })
+    ).map((u) => u.id);
+    const studentScope = { studentId: { in: summaryStudentIds } };
     const courseScope = courseId ? { courseId } : {};
 
+    // `StudentCourse.completedAt` is never written anywhere in this codebase
+    // (dead field) — the real "is this course done" signal only exists as
+    // the dynamically-computed hybrid percentage (see computeCourseProgress
+    // / the per-page loop above), so the summary must use that same
+    // calculation rather than a raw CourseProgress average (which mixes
+    // content/chapter/course-granularity rows and any stale/orphaned ones
+    // together) or a stored field that's always null.
     const [
       totalSchoolsCount,
       totalCoursesCount,
-      activeStudentGroups,
-      enrolledStudentGroups,
-      incompleteStudentGroups,
-      perStudentAvg,
+      allStudentCoursesInScope,
+      allProgressInScope,
     ] = await Promise.all([
       schoolId ? Promise.resolve(1) : this.db.school.count(),
       this.db.course.count(),
-      this.db.courseProgress.groupBy({
-        by: ['studentId'],
-        where: { progress: { gt: 0 }, ...studentScope, ...courseScope },
-      }),
-      this.db.studentCourse.groupBy({
-        by: ['studentId'],
+      this.db.studentCourse.findMany({
         where: { ...studentScope, ...courseScope },
+        select: { studentId: true, courseId: true },
       }),
-      this.db.studentCourse.groupBy({
-        by: ['studentId'],
-        where: { completedAt: null, ...studentScope, ...courseScope },
-      }),
-      this.db.courseProgress.groupBy({
-        by: ['studentId'],
+      this.db.courseProgress.findMany({
         where: { ...studentScope, ...courseScope },
-        _avg: { progress: true },
+        select: {
+          studentId: true,
+          courseId: true,
+          contentId: true,
+          chapterId: true,
+          progress: true,
+          completedAt: true,
+          updatedAt: true,
+        },
       }),
     ]);
 
-    const activeStudentsCount = activeStudentGroups.length;
-    const enrolledIds = new Set(enrolledStudentGroups.map((g) => g.studentId));
-    const incompleteIds = new Set(
-      incompleteStudentGroups.map((g) => g.studentId),
+    const summaryCourseIds = Array.from(
+      new Set(allStudentCoursesInScope.map((sc) => sc.courseId)),
     );
-    // A student "completed" all courses when they have enrollments and none
-    // remain incomplete (StudentCourse.completedAt is the source of truth).
-    const completedStudentsCount = [...enrolledIds].filter(
-      (id) => !incompleteIds.has(id),
+    const [summaryChapters, summaryContents] = await Promise.all([
+      summaryCourseIds.length
+        ? this.db.chapter.findMany({
+            where: { courseId: { in: summaryCourseIds } },
+            select: { id: true, courseId: true },
+          })
+        : Promise.resolve([] as Array<{ id: string; courseId: string }>),
+      summaryCourseIds.length
+        ? this.db.chapterContent.findMany({
+            where: { chapter: { courseId: { in: summaryCourseIds } } },
+            select: { id: true, chapterId: true, durationMinutes: true },
+          })
+        : Promise.resolve(
+            [] as Array<{
+              id: string;
+              chapterId: string;
+              durationMinutes: number | null;
+            }>,
+          ),
+    ]);
+    const summaryChapterToCourse = new Map(
+      summaryChapters.map((ch) => [ch.id, ch.courseId]),
+    );
+    const summaryChaptersByCourse = new Map<string, Array<{ id: string }>>();
+    for (const ch of summaryChapters) {
+      if (!summaryChaptersByCourse.has(ch.courseId))
+        summaryChaptersByCourse.set(ch.courseId, []);
+      summaryChaptersByCourse.get(ch.courseId)!.push({ id: ch.id });
+    }
+    const summaryContentsByCourse = new Map<
+      string,
+      Array<{ id: string; chapterId: string; durationMinutes: number | null }>
+    >();
+    for (const cc of summaryContents) {
+      const cid = summaryChapterToCourse.get(cc.chapterId);
+      if (!cid) continue;
+      if (!summaryContentsByCourse.has(cid)) summaryContentsByCourse.set(cid, []);
+      summaryContentsByCourse.get(cid)!.push(cc);
+    }
+
+    const progressByStudentCourse = new Map<
+      string,
+      typeof allProgressInScope
+    >();
+    for (const p of allProgressInScope) {
+      const key = `${p.studentId}:${p.courseId}`;
+      if (!progressByStudentCourse.has(key)) progressByStudentCourse.set(key, []);
+      progressByStudentCourse.get(key)!.push(p);
+    }
+
+    const coursesByStudent = new Map<
+      number,
+      Array<{ percentage: number; status: string }>
+    >();
+    for (const sc of allStudentCoursesInScope) {
+      const key = `${sc.studentId}:${sc.courseId}`;
+      const computed = computeCourseProgress(
+        summaryChaptersByCourse.get(sc.courseId) ?? [],
+        summaryContentsByCourse.get(sc.courseId) ?? [],
+        progressByStudentCourse.get(key) ?? [],
+      );
+      if (!coursesByStudent.has(sc.studentId)) coursesByStudent.set(sc.studentId, []);
+      coursesByStudent
+        .get(sc.studentId)!
+        .push({ percentage: computed.progressPercentage, status: computed.status });
+    }
+
+    const activeStudentsCount = [...coursesByStudent.values()].filter((courses) =>
+      courses.some((c) => c.percentage > 0),
     ).length;
+    // A student "completed" when every course they're enrolled in (in scope)
+    // reached 'completed' status — checking the derived status (which
+    // requires real chapters AND full completion), not just a raw
+    // percentage >= 100, since a chapterless/empty course can otherwise
+    // report 100% from a single stray progress row with nothing to actually
+    // complete.
+    const completedStudentsCount = [...coursesByStudent.values()].filter(
+      (courses) => courses.length > 0 && courses.every((c) => c.status === 'completed'),
+    ).length;
+    const perStudentAverages = [...coursesByStudent.values()].map(
+      (courses) =>
+        courses.reduce((sum, c) => sum + c.percentage, 0) / courses.length,
+    );
     const systemAvgProgress =
-      totalStudents > 0
-        ? perStudentAvg.reduce((sum, r) => sum + (r._avg.progress ?? 0), 0) /
-          totalStudents
+      perStudentAverages.length > 0
+        ? perStudentAverages.reduce((sum, p) => sum + p, 0) /
+          perStudentAverages.length
         : 0;
 
     return {
@@ -687,140 +808,16 @@ export class AdminExtraController {
     @Query('search') search?: string,
     @Query('limit') limit?: string,
   ) {
-    const where: {
-      schoolId?: string;
-      teacherId?: number;
-      grade?: string;
-      reportDate?: { gte?: Date; lte?: Date };
-    } = {};
-
-    if (schoolId) {
-      where.schoolId = schoolId;
-    }
-
-    if (teacherIdParam) {
-      const teacherId = parseInt(teacherIdParam, 10);
-      if (!Number.isNaN(teacherId)) {
-        where.teacherId = teacherId;
-      }
-    }
-
-    if (grade) {
-      where.grade = grade;
-    }
-
-    if (date) {
-      const start = new Date(`${date}T00:00:00.000Z`);
-      const end = new Date(`${date}T23:59:59.999Z`);
-      where.reportDate = { gte: start, lte: end };
-    } else if (from || to) {
-      where.reportDate = {};
-      if (from) where.reportDate.gte = new Date(`${from}T00:00:00.000Z`);
-      if (to) where.reportDate.lte = new Date(`${to}T23:59:59.999Z`);
-    }
-
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500)
-      : 100;
-
-    const reports = await this.db.teacherReport.findMany({
-      where,
-      orderBy: { reportDate: 'desc' },
-      take,
+    return this.teacherReportsService.list({
+      schoolId,
+      teacherId: teacherIdParam,
+      grade,
+      date,
+      from,
+      to,
+      search,
+      limit,
     });
-
-    const teacherIds = Array.from(new Set(reports.map((r) => r.teacherId)));
-    const schoolIds = Array.from(new Set(reports.map((r) => r.schoolId)));
-
-    const [teachers, schools] = await Promise.all([
-      teacherIds.length
-        ? this.db.user.findMany({
-            where: { id: { in: teacherIds } },
-            include: { profile: true },
-          })
-        : Promise.resolve([] as any[]),
-      schoolIds.length
-        ? this.db.school.findMany({
-            where: { id: { in: schoolIds } },
-            select: { id: true, name: true, schoolCode: true },
-          })
-        : Promise.resolve([] as any[]),
-    ]);
-
-    const teacherMap = new Map<
-      number,
-      { id: number; full_name: string; email: string }
-    >();
-    for (const t of teachers) {
-      teacherMap.set(t.id, {
-        id: t.id,
-        full_name: t.profile?.fullName ?? t.email ?? '',
-        email: t.email ?? '',
-      });
-    }
-
-    const schoolMap = new Map<
-      string,
-      { id: string; name: string; school_code: string | null }
-    >();
-    for (const s of schools) {
-      schoolMap.set(s.id, {
-        id: s.id,
-        name: s.name,
-        school_code: s.schoolCode ?? null,
-      });
-    }
-
-    const searchLower = (search || '').trim().toLowerCase();
-
-    const result = reports
-      .map((r) => {
-        const teacher = teacherMap.get(r.teacherId);
-        const school = schoolMap.get(r.schoolId);
-        const dateOnly = r.reportDate.toISOString().split('T')[0];
-        return {
-          id: r.id,
-          teacher_id: String(r.teacherId),
-          school_id: r.schoolId,
-          date: dateOnly,
-          grade: r.grade ?? '',
-          topics_taught: r.topicsTaught ?? '',
-          student_count: r.studentCount ?? 0,
-          duration_hours: r.durationHours ?? 0,
-          notes: r.notes ?? '',
-          admin_notes: (r as any).adminNotes ?? '',
-          status: r.status ?? 'submitted',
-          created_at: r.createdAt.toISOString(),
-          profiles: teacher
-            ? {
-                id: String(teacher.id),
-                full_name: teacher.full_name,
-                email: teacher.email,
-              }
-            : null,
-          schools: school ?? null,
-          teacher_name: teacher?.full_name ?? '',
-          teacher_email: teacher?.email ?? '',
-          school_name: school?.name ?? '',
-          class_name: r.grade ?? '',
-        };
-      })
-      .filter((report) => {
-        if (!searchLower) return true;
-        const haystack = [
-          report.teacher_name,
-          report.teacher_email,
-          report.school_name,
-          report.grade,
-          report.topics_taught,
-          report.notes,
-        ]
-          .join(' ')
-          .toLowerCase();
-        return haystack.includes(searchLower);
-      });
-
-    return { reports: result };
   }
 
   @Patch('teacher-reports')
@@ -857,6 +854,16 @@ export class AdminExtraController {
     };
   }
 
+  /**
+   * Purges TeacherReport rows whose teacherId/schoolId no longer resolve to
+   * an existing User/School — a permanent hard delete (e.g. via Trash purge)
+   * of a teacher or school before this cascade fix existed. Opt-in and
+   * explicit, so existing history is never silently discarded.
+   */
+  @Post('teacher-reports/cleanup-orphaned')
+  async cleanupOrphanedTeacherReports() {
+    return this.teacherReportsService.cleanupOrphaned();
+  }
 
   @Get('cache-monitor')
   getCacheMonitor() {
@@ -1064,7 +1071,7 @@ export class AdminExtraController {
     const ok = await Promise.resolve(
       verify({ token: code, secret: pending.value }),
     );
-    if (!ok) throw new BadRequestException('Invalid verification code');
+    if (!ok?.valid) throw new BadRequestException('Invalid verification code');
 
     await this.db.systemSetting.upsert({
       where: { key: `mfa:enabled:${user.id}` },
@@ -1103,18 +1110,30 @@ export class AdminExtraController {
   async listNotifications(
     @CurrentUser() user: { id: number },
     @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
     @Query('mode') mode?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
   ) {
     const take = Math.min(
       Math.max(parseInt(limit ?? '50', 10) || 50, 1),
       100,
     );
+    const skip = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
     const m = mode === 'sent' ? 'sent' : 'received';
-    const notifications = await this.notificationsService.listWithProfiles(
+    const s = status === 'read' || status === 'unread' ? status : 'all';
+    const { items, total } = await this.notificationsService.listWithProfiles(
       user.id,
-      { mode: m, limit: take, excludePasswordReset: m === 'received' },
+      {
+        mode: m,
+        limit: take,
+        offset: skip,
+        search,
+        status: s,
+        excludePasswordReset: m === 'received',
+      },
     );
-    return { notifications };
+    return { notifications: items, total };
   }
 
   @Post('notifications')
@@ -1584,73 +1603,15 @@ export class AdminExtraController {
     return res.send(pdf);
   }
 
-  // ── Private helpers ──────────────────────────────────────────────────────────
-
-  /** Reads image dimensions from raw buffer without any extra dependency.
-   *  Returns null for SVG (no pixel dimensions) or unrecognised formats. */
-  private readImageDims(
-    buffer: Buffer,
-    mimetype: string,
-  ): { w: number; h: number } | null {
-    if (mimetype === 'image/svg+xml') return null;
-    if (mimetype === 'image/png') {
-      // PNG: bytes 16-19 = width, 20-23 = height (big-endian)
-      if (buffer.length < 24) return null;
-      return { w: buffer.readUInt32BE(16), h: buffer.readUInt32BE(20) };
-    }
-    if (mimetype === 'image/jpeg') {
-      // Scan JPEG for SOF0/SOF2 markers (0xFF C0 / 0xFF C2)
-      let i = 2;
-      while (i < buffer.length - 8) {
-        if (buffer[i] !== 0xff) break;
-        const marker = buffer[i + 1];
-        const len = buffer.readUInt16BE(i + 2);
-        if (
-          (marker >= 0xc0 && marker <= 0xc3) ||
-          marker === 0xc9 ||
-          (marker >= 0xca && marker <= 0xcf)
-        ) {
-          return {
-            w: buffer.readUInt16BE(i + 7),
-            h: buffer.readUInt16BE(i + 5),
-          };
-        }
-        i += 2 + len;
-      }
-      return null;
-    }
-    return null;
-  }
-
   // Logos
 
   @Get('logos')
   async listLogos(
     @Query('limit') limit?: string,
     @Query('offset') offset?: string,
+    @Query('search') search?: string,
   ) {
-    const take = limit
-      ? Math.min(Math.max(parseInt(limit, 10) || 20, 1), 100)
-      : 20;
-    const skip = offset ? Math.max(parseInt(offset, 10) || 0, 0) : 0;
-    const [logos, total] = await Promise.all([
-      this.db.logo.findMany({
-        where: { deletedAt: null },
-        orderBy: { createdAt: 'desc' },
-        take,
-        skip,
-      }),
-      this.db.logo.count({ where: { deletedAt: null } }),
-    ]);
-    const data = logos.map((l) => ({
-      id: l.id,
-      school_id: (l as any).schoolId ?? null,
-      school_name: l.schoolName,
-      description: l.description,
-      image_url: l.imageUrl,
-      upload_date: l.createdAt.toISOString(),
-    }));
-    return { data, total };
+    return this.logosService.list({ limit, offset, search });
   }
 
   @Post('logos')
@@ -1660,81 +1621,12 @@ export class AdminExtraController {
     @Body()
     body: { school_name?: string; school_id?: string; description?: string },
   ) {
-    let schoolName = (body?.school_name ?? '').trim();
-    const schoolId = (body?.school_id ?? '').trim() || null;
-    let schoolNumber: number | null = null;
-
-    // Resolve school name from school_id when provided
-    if (schoolId) {
-      const school = await this.db.school.findUnique({
-        where: { id: schoolId },
-        select: { name: true, schoolNumber: true },
-      });
-      if (!school) throw new BadRequestException('School not found');
-      schoolName = school.name;
-      schoolNumber = school.schoolNumber;
-    }
-
-    if (!schoolName) {
-      throw new BadRequestException('school_id or school_name is required');
-    }
-    if (!file) {
-      throw new BadRequestException('file is required');
-    }
-    if (!['image/png', 'image/jpeg', 'image/svg+xml'].includes(file.mimetype)) {
-      throw new BadRequestException('Only JPG, PNG, SVG allowed');
-    }
-    if (file.size > 2 * 1024 * 1024) {
-      throw new BadRequestException('Max file size is 2MB');
-    }
-    const dims = this.readImageDims(
-      file.buffer as Buffer,
-      file.mimetype as string,
-    );
-    if (dims && (dims.w < 300 || dims.h < 300)) {
-      throw new BadRequestException('Minimum image dimensions are 300×300 px');
-    }
-    const logoKey = this.storage.buildKey(
-      `logos/${schoolNumber ?? 'unassigned'}`,
-      file.originalname ?? 'logo.png',
-    );
-    const imageUrl = await this.storage.uploadBuffer(
-      logoKey,
-      file.buffer,
-      file.mimetype,
-    );
-    const logo = await this.db.logo.create({
-      data: {
-        schoolName,
-        schoolId,
-        description: body?.description?.trim() || null,
-        imageUrl,
-        imageKey: logoKey,
-      } as any,
-    });
-    return {
-      id: logo.id,
-      school_id: (logo as any).schoolId ?? null,
-      school_name: logo.schoolName,
-      description: logo.description,
-      image_url: logo.imageUrl,
-      upload_date: logo.createdAt.toISOString(),
-    };
+    return this.logosService.create(file, body);
   }
 
   @Get('logos/:id')
   async getLogo(@Param('id') id: string) {
-    const logo = await this.db.logo.findUnique({ where: { id } });
-    if (!logo || logo.deletedAt) {
-      throw new BadRequestException('Logo not found');
-    }
-    return {
-      id: logo.id,
-      school_name: logo.schoolName,
-      description: logo.description,
-      image_url: logo.imageUrl,
-      upload_date: logo.createdAt.toISOString(),
-    };
+    return this.logosService.get(id);
   }
 
   @Put('logos/:id')
@@ -1750,114 +1642,12 @@ export class AdminExtraController {
       replace_image?: string;
     },
   ) {
-    const existing = await this.db.logo.findUnique({ where: { id } });
-    if (!existing || existing.deletedAt) {
-      throw new BadRequestException('Logo not found');
-    }
-    const existingSchoolNumber = existing.schoolId
-      ? (
-          await this.db.school.findUnique({
-            where: { id: existing.schoolId },
-            select: { schoolNumber: true },
-          })
-        )?.schoolNumber
-      : null;
-    const data: {
-      schoolName?: string;
-      schoolId?: string | null;
-      description?: string | null;
-      imageUrl?: string;
-      imageKey?: string;
-    } = {};
-    const newSchoolId = (body?.school_id ?? '').trim() || null;
-    if (newSchoolId !== null) {
-      const school = await this.db.school.findUnique({
-        where: { id: newSchoolId },
-        select: { name: true },
-      });
-      if (!school) throw new BadRequestException('School not found');
-      data.schoolName = school.name;
-      data.schoolId = newSchoolId;
-    } else if (body?.school_name !== undefined) {
-      const name = body.school_name.trim();
-      if (!name) throw new BadRequestException('school_name cannot be empty');
-      data.schoolName = name;
-    }
-    if (body?.description !== undefined) {
-      const desc = body.description.trim();
-      data.description = desc || null;
-    }
-    const wantsReplace = body?.replace_image === 'true';
-    if (wantsReplace) {
-      if (!file)
-        throw new BadRequestException(
-          'file is required when replace_image=true',
-        );
-      if (
-        !['image/png', 'image/jpeg', 'image/svg+xml'].includes(file.mimetype)
-      ) {
-        throw new BadRequestException('Only JPG, PNG, SVG allowed');
-      }
-      if (file.size > 2 * 1024 * 1024) {
-        throw new BadRequestException('Max file size is 2MB');
-      }
-      const dims = this.readImageDims(
-        file.buffer as Buffer,
-        file.mimetype as string,
-      );
-      if (dims && (dims.w < 300 || dims.h < 300)) {
-        throw new BadRequestException(
-          'Minimum image dimensions are 300×300 px',
-        );
-      }
-      const logoKey = this.storage.buildKey(
-        `logos/${existingSchoolNumber ?? 'unassigned'}`,
-        file.originalname ?? 'logo.png',
-      );
-      data.imageUrl = await this.storage.uploadBuffer(
-        logoKey,
-        file.buffer,
-        file.mimetype,
-      );
-      data.imageKey = logoKey;
-    }
-    const oldLogoKey = wantsReplace ? existing.imageKey : null;
-    const updated = await this.db.logo.update({
-      where: { id },
-      data: data as any,
-    });
-    if (oldLogoKey) {
-      await this.storage.deleteObject(oldLogoKey).catch(() => {});
-    }
-    return {
-      id: updated.id,
-      school_id: (updated as any).schoolId ?? null,
-      school_name: updated.schoolName,
-      description: updated.description,
-      image_url: updated.imageUrl,
-      upload_date: updated.createdAt.toISOString(),
-    };
+    return this.logosService.update(id, file, body);
   }
 
   @Delete('logos/:id')
   async deleteLogo(@Param('id') id: string, @Query('hard') hard?: string) {
-    const logo = await this.db.logo.findUnique({ where: { id } });
-    if (!logo) {
-      throw new BadRequestException('Logo not found');
-    }
-    const hardDelete = hard === 'true' || hard === '1';
-    if (hardDelete) {
-      await this.db.logo.delete({ where: { id } });
-      if (logo.imageKey) {
-        await this.storage.deleteObject(logo.imageKey).catch(() => {});
-      }
-    } else {
-      await this.db.logo.update({
-        where: { id },
-        data: { deletedAt: new Date() },
-      });
-    }
-    return { success: true };
+    return this.logosService.remove(id, hard);
   }
 
   // Password reset requests
@@ -1875,10 +1665,14 @@ export class AdminExtraController {
   async listPasswordResetRequests(
     @Query('status') status?: string,
     @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
+    @Query('search') search?: string,
   ) {
     return this.passwordResetRequestService.list({
       status: status || undefined,
       limit: limit ? Math.min(parseInt(limit, 10) || 100, 200) : 100,
+      offset: offset ? Math.max(parseInt(offset, 10) || 0, 0) : 0,
+      search: search || undefined,
     });
   }
 
@@ -1951,11 +1745,15 @@ export class AdminExtraController {
       role: Role.student,
     };
     if (studentIds.length > 0) studentsWhere.id = { in: studentIds };
+    const STUDENT_CAP = 5000;
+    const ENROLLMENT_CAP = 20000;
+
     const students = await this.db.user.findMany({
       where: studentsWhere,
       select: { id: true, email: true },
-      take: 5000,
+      take: STUDENT_CAP,
     });
+    const truncatedStudents = students.length === STUDENT_CAP;
     if (students.length === 0) {
       return { success: true, dry_run: dryRun, generated: 0, skipped: 0 };
     }
@@ -1966,8 +1764,9 @@ export class AdminExtraController {
         ...(courseIds.length > 0 ? { courseId: { in: courseIds } } : {}),
       },
       select: { studentId: true, courseId: true },
-      take: 20000,
+      take: ENROLLMENT_CAP,
     });
+    const truncatedEnrollments = enrollments.length === ENROLLMENT_CAP;
     const pairs = enrollments.map((e) => ({
       studentId: e.studentId,
       courseId: e.courseId,
@@ -1976,89 +1775,66 @@ export class AdminExtraController {
       return { success: true, dry_run: dryRun, generated: 0, skipped: 0 };
     }
 
-    const existing = await this.db.studentCertificate.findMany({
-      where: {
-        OR: pairs.map((p) => ({
-          studentId: p.studentId,
-          courseId: p.courseId,
-        })),
-      },
-      select: { studentId: true, courseId: true },
-      take: 20000,
-    });
-    const existingSet = new Set(
-      existing.map((e) => `${e.studentId}:${e.courseId}`),
-    );
-    const toCreate = pairs.filter(
-      (p) => !existingSet.has(`${p.studentId}:${p.courseId}`),
-    );
+    const warnings: string[] = [];
+    if (truncatedStudents) {
+      warnings.push(
+        `Only the first ${STUDENT_CAP} matching students were processed — narrow the filter (e.g. by course) and re-run to cover the rest.`,
+      );
+    }
+    if (truncatedEnrollments) {
+      warnings.push(
+        `Only the first ${ENROLLMENT_CAP} enrollments were processed — narrow the filter and re-run to cover the rest.`,
+      );
+    }
+
+    let generated = 0;
+    let skippedExisting = 0;
+    let skippedIneligible = 0;
 
     if (!dryRun) {
-      // Load custom template once for all certificates
-      const templateSetting = await this.db.systemSetting.findUnique({
-        where: { key: 'certificate:template' },
-      });
-
-      // Load student profiles and course titles for SVG generation
-      const studentIds = [...new Set(toCreate.map((r) => r.studentId))];
-      const courseIds = [...new Set(toCreate.map((r) => r.courseId))];
-      const [profiles, courses] = await Promise.all([
-        this.db.profile.findMany({
-          where: { userId: { in: studentIds } },
-          select: { userId: true, fullName: true },
-        }),
-        this.db.course.findMany({
-          where: { id: { in: courseIds } },
-          select: { id: true, title: true },
-        }),
-      ]);
-      const profileMap = new Map(
-        profiles.map((p) => [p.userId, p.fullName ?? '']),
-      );
-      const courseMap = new Map(courses.map((c) => [c.id, c.title]));
-
-      for (const row of toCreate) {
-        const studentName = profileMap.get(row.studentId) || 'Student';
-        const courseTitle = courseMap.get(row.courseId) || 'Course';
-        const issuedAt = new Date().toISOString().split('T')[0];
-        const certificateName = `${courseTitle} Certificate`;
-
-        // Create first to get the ID for embedding
-        const created = await this.db.studentCertificate.create({
-          data: {
-            studentId: row.studentId,
-            courseId: row.courseId,
-            certificateName,
-            certificateUrl: 'pending',
-            issuedBy: user.id,
-          },
-        });
-        const svg = StudentExtraController.buildCertificateSvg(
-          { studentName, courseTitle, issuedAt, certificateId: created.id },
-          templateSetting?.value ?? null,
+      for (const pair of pairs) {
+        const result = await this.certificateService.issueIfEligible(
+          pair.studentId,
+          pair.courseId,
+          user.id,
         );
-        const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
-        const certKey = this.storage.buildKey(
-          `certificates/${row.studentId}`,
-          `${created.id}.jpg`,
-        );
-        const certUrl = await this.storage.uploadBuffer(
-          certKey,
-          jpegBuffer,
-          'image/jpeg',
-        );
-        await this.db.studentCertificate.update({
-          where: { id: created.id },
-          data: { certificateUrl: certUrl, certificateKey: certKey },
-        });
+        if (result.issued) {
+          if (result.alreadyExisted) skippedExisting++;
+          else generated++;
+        } else {
+          skippedIneligible++;
+        }
       }
+    } else {
+      const existing = await this.db.studentCertificate.findMany({
+        where: {
+          OR: pairs.map((p) => ({
+            studentId: p.studentId,
+            courseId: p.courseId,
+          })),
+        },
+        select: { studentId: true, courseId: true },
+        take: ENROLLMENT_CAP,
+      });
+      const existingSet = new Set(
+        existing.map((e) => `${e.studentId}:${e.courseId}`),
+      );
+      skippedExisting = pairs.filter((p) =>
+        existingSet.has(`${p.studentId}:${p.courseId}`),
+      ).length;
+      generated = pairs.length - skippedExisting;
     }
 
     return {
       success: true,
       dry_run: dryRun,
-      generated: toCreate.length,
-      skipped: pairs.length - toCreate.length,
+      generated,
+      skipped: skippedExisting + skippedIneligible,
+      skipped_existing: skippedExisting,
+      skipped_ineligible: skippedIneligible,
+      truncated_students: truncatedStudents,
+      truncated_enrollments: truncatedEnrollments,
+      warning: warnings.length > 0 ? warnings.join(' ') : null,
     };
   }
 
@@ -2070,6 +1846,9 @@ export class AdminExtraController {
     @Query('limit') limit?: string,
     @Query('search') search?: string,
     @Query('status') status?: string,
+    @Query('school_id') schoolId?: string,
+    @Query('grade') grade?: string,
+    @Query('section') section?: string,
   ) {
     const take = Math.min(parseInt(limit ?? '50', 10) || 50, 200);
     const skip = (Math.max(parseInt(page ?? '1', 10) || 1, 1) - 1) * take;
@@ -2087,10 +1866,24 @@ export class AdminExtraController {
         { course: { title: { contains: search, mode: 'insensitive' } } },
       ];
     }
-    if (status === 'active') {
-      where.NOT = { certificateUrl: { startsWith: 'pending' } };
+    if (status === 'active' || status === 'broken' || status === 'revoked') {
+      where.status = status;
     } else if (status === 'pending') {
       where.certificateUrl = { startsWith: 'pending' };
+    }
+    // StudentCertificate has no direct school/grade/section columns — those
+    // live on StudentSchool (plain grade/section name strings), so filter
+    // through the student's school membership.
+    if (schoolId || grade || section) {
+      where.student = {
+        studentSchools: {
+          some: {
+            ...(schoolId ? { schoolId } : {}),
+            ...(grade ? { grade } : {}),
+            ...(section ? { section } : {}),
+          },
+        },
+      };
     }
 
     const [total, certs] = await Promise.all([
@@ -2107,6 +1900,16 @@ export class AdminExtraController {
               id: true,
               email: true,
               profile: { select: { fullName: true } },
+              studentSchools: {
+                where: { isActive: true },
+                select: {
+                  schoolId: true,
+                  grade: true,
+                  section: true,
+                  school: { select: { name: true } },
+                },
+                take: 1,
+              },
             },
           },
           issuedByUser: { select: { id: true, email: true } },
@@ -2118,21 +1921,51 @@ export class AdminExtraController {
       total,
       page: Math.max(parseInt(page ?? '1', 10) || 1, 1),
       limit: take,
-      certificates: certs.map((c) => ({
-        id: c.id,
-        short_id: StudentExtraController.shortCertId(c.id),
-        student_id: c.studentId,
-        student_name: c.student?.profile?.fullName ?? c.student?.email ?? '',
-        student_email: c.student?.email ?? '',
-        course_id: c.courseId,
-        course_title: c.course?.title ?? '',
-        certificate_name: c.certificateName,
-        certificate_url: c.certificateUrl,
-        status: c.certificateUrl.startsWith('pending') ? 'pending' : 'active',
-        issued_at: c.issuedAt.toISOString(),
-        issued_by: c.issuedByUser?.email ?? null,
-      })),
+      certificates: certs.map((c) => {
+        const studentSchool = c.student?.studentSchools?.[0];
+        return {
+          id: c.id,
+          short_id: StudentExtraController.shortCertId(c.id),
+          student_id: c.studentId,
+          student_name: c.student?.profile?.fullName ?? c.student?.email ?? '',
+          student_email: c.student?.email ?? '',
+          school_id: studentSchool?.schoolId ?? null,
+          school_name: studentSchool?.school?.name ?? null,
+          grade: studentSchool?.grade ?? null,
+          section: studentSchool?.section ?? null,
+          course_id: c.courseId,
+          course_title: c.course?.title ?? '',
+          certificate_name: c.certificateName,
+          certificate_url: c.certificateUrl,
+          status: c.certificateUrl.startsWith('pending')
+            ? 'pending'
+            : c.status,
+          issued_at: c.issuedAt.toISOString(),
+          issued_by: c.issuedByUser?.email ?? null,
+          revoked_at: c.revokedAt ? c.revokedAt.toISOString() : null,
+          revoked_reason: c.revokedReason ?? null,
+        };
+      }),
     };
+  }
+
+  @Get('certificates/:id/download')
+  async downloadCertificate(@Param('id') id: string, @Res() res: any) {
+    const cert = await this.db.studentCertificate.findUnique({
+      where: { id },
+      select: { certificateKey: true, certificateUrl: true, id: true },
+    });
+    if (!cert) throw new BadRequestException('Certificate not found');
+    const key = cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
+    if (!key) throw new BadRequestException('Certificate file is unavailable');
+
+    const { body, contentType } = await this.storage.getObject(key);
+    res.setHeader('Content-Type', contentType ?? 'image/jpeg');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${StudentExtraController.shortCertId(cert.id)}.jpg"`,
+    );
+    return res.send(body);
   }
 
   @Post('certificates/:id/regenerate')
@@ -2181,11 +2014,19 @@ export class AdminExtraController {
         certificateUrl: certUrl,
         certificateKey: certKey,
         issuedBy: admin.id,
+        status: 'active',
       },
     });
     if (oldCertKey) {
       await this.storage.deleteObject(oldCertKey).catch(() => {});
     }
+    await this.notificationsService
+      .sendOne(admin.id, cert.studentId, {
+        title: `Certificate updated: ${cert.course?.title ?? 'your course'}`,
+        message: `Your certificate for "${cert.course?.title ?? 'your course'}" was regenerated. Certificate ID: ${StudentExtraController.shortCertId(updated.id)}.`,
+        type: 'certificate',
+      })
+      .catch(() => {});
     return {
       success: true,
       certificate: {
@@ -2197,11 +2038,88 @@ export class AdminExtraController {
   }
 
   @Delete('certificates/:id')
-  async revokeCertificate(@Param('id') id: string) {
-    const cert = await this.db.studentCertificate.findUnique({ where: { id } });
+  async revokeCertificate(
+    @Param('id') id: string,
+    @CurrentUser() admin: { id: number },
+    @Query('reason') reason?: string,
+  ) {
+    const cert = await this.db.studentCertificate.findUnique({
+      where: { id },
+      include: { course: { select: { title: true } } },
+    });
     if (!cert) throw new BadRequestException('Certificate not found');
-    await this.db.studentCertificate.delete({ where: { id } });
+    await this.db.studentCertificate.update({
+      where: { id },
+      data: {
+        status: 'revoked',
+        revokedAt: new Date(),
+        revokedBy: admin.id,
+        revokedReason: reason?.trim() || null,
+      },
+    });
+    await this.notificationsService
+      .sendOne(admin.id, cert.studentId, {
+        title: `Certificate revoked: ${cert.course?.title ?? 'your course'}`,
+        message: reason?.trim()
+          ? `Your certificate for "${cert.course?.title ?? 'your course'}" was revoked. Reason: ${reason.trim()}`
+          : `Your certificate for "${cert.course?.title ?? 'your course'}" was revoked.`,
+        type: 'certificate',
+      })
+      .catch(() => {});
     return { success: true };
+  }
+
+  @Post('certificates/bulk-revoke')
+  async bulkRevokeCertificates(
+    @CurrentUser() admin: { id: number },
+    @Body() body: { ids?: string[]; reason?: string },
+  ) {
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((id) => typeof id === 'string' && id.trim())
+      : [];
+    if (ids.length === 0) throw new BadRequestException('ids is required');
+    const reason = body?.reason?.trim() || null;
+
+    const certs = await this.db.studentCertificate.findMany({
+      where: { id: { in: ids }, status: { not: 'revoked' } },
+      include: { course: { select: { title: true } } },
+    });
+
+    await this.db.studentCertificate.updateMany({
+      where: { id: { in: certs.map((c) => c.id) } },
+      data: {
+        status: 'revoked',
+        revokedAt: new Date(),
+        revokedBy: admin.id,
+        revokedReason: reason,
+      },
+    });
+
+    await Promise.all(
+      certs.map((cert) =>
+        this.notificationsService
+          .sendOne(admin.id, cert.studentId, {
+            title: `Certificate revoked: ${cert.course?.title ?? 'your course'}`,
+            message: reason
+              ? `Your certificate for "${cert.course?.title ?? 'your course'}" was revoked. Reason: ${reason}`
+              : `Your certificate for "${cert.course?.title ?? 'your course'}" was revoked.`,
+            type: 'certificate',
+          })
+          .catch(() => {}),
+      ),
+    );
+
+    return { success: true, revoked: certs.length };
+  }
+
+  @Post('certificates/verify')
+  async verifyCertificates(@Body() body: { ids?: string[] }) {
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((id) => typeof id === 'string' && id.trim())
+      : [];
+    if (ids.length === 0) throw new BadRequestException('ids is required');
+    const results = await this.certificateService.verifyObjectsExist(ids);
+    return { success: true, results };
   }
 
   @Get('certificate-template')
@@ -2318,8 +2236,13 @@ export class AdminExtraController {
     const take = Math.min(Math.max(parseInt(limit ?? '20', 10) || 20, 1), 100);
     const skip = (Math.max(parseInt(page ?? '1', 10) || 1, 1) - 1) * take;
 
-    const where: Record<string, unknown> = {};
-    if (status && status !== 'all') where.status = status;
+    // `status=deleted` is a pseudo-status for the trash view — real statuses
+    // (new/read/replied/archived) always exclude soft-deleted rows.
+    const wantsDeleted = status === 'deleted';
+    const where: Record<string, unknown> = {
+      deletedAt: wantsDeleted ? { not: null } : null,
+    };
+    if (status && status !== 'all' && !wantsDeleted) where.status = status;
     if (search && search.trim()) {
       const q = search.trim();
       where.OR = [
@@ -2340,16 +2263,21 @@ export class AdminExtraController {
       this.db.contactSubmission.count({ where }),
     ]);
 
-    const statusCounts = await this.db.contactSubmission.groupBy({
-      by: ['status'],
-      _count: { status: true },
-    });
+    const [statusCounts, deletedCount] = await Promise.all([
+      this.db.contactSubmission.groupBy({
+        by: ['status'],
+        where: { deletedAt: null },
+        _count: { status: true },
+      }),
+      this.db.contactSubmission.count({ where: { deletedAt: { not: null } } }),
+    ]);
 
     const counts: Record<string, number> = {
       new: 0,
       read: 0,
       replied: 0,
       archived: 0,
+      deleted: deletedCount,
     };
     for (const row of statusCounts) {
       counts[row.status] = row._count.status;
@@ -2368,6 +2296,7 @@ export class AdminExtraController {
         status: s.status,
         admin_notes: s.adminNotes,
         source: s.source,
+        deleted_at: s.deletedAt ? s.deletedAt.toISOString() : null,
         created_at: s.createdAt.toISOString(),
         updated_at: s.updatedAt.toISOString(),
       })),
@@ -2398,6 +2327,11 @@ export class AdminExtraController {
       data.adminNotes = body.admin_notes || null;
     }
 
+    const existing = await this.db.contactSubmission.findFirst({
+      where: { id, deletedAt: null },
+    });
+    if (!existing) throw new NotFoundException('Contact submission not found');
+
     const updated = await this.db.contactSubmission.update({
       where: { id },
       data,
@@ -2416,6 +2350,36 @@ export class AdminExtraController {
 
   @Delete('contact-submissions/:id')
   async deleteContactSubmission(@Param('id') id: string) {
+    const existing = await this.db.contactSubmission.findFirst({
+      where: { id, deletedAt: null },
+    });
+    if (!existing) throw new NotFoundException('Contact submission not found');
+    await this.db.contactSubmission.update({
+      where: { id },
+      data: { deletedAt: new Date() },
+    });
+    return { success: true };
+  }
+
+  @Post('contact-submissions/:id/restore')
+  async restoreContactSubmission(@Param('id') id: string) {
+    const existing = await this.db.contactSubmission.findFirst({
+      where: { id, deletedAt: { not: null } },
+    });
+    if (!existing) throw new NotFoundException('Trashed contact submission not found');
+    await this.db.contactSubmission.update({
+      where: { id },
+      data: { deletedAt: null },
+    });
+    return { success: true };
+  }
+
+  @Delete('contact-submissions/:id/purge')
+  async purgeContactSubmission(@Param('id') id: string) {
+    const existing = await this.db.contactSubmission.findFirst({
+      where: { id, deletedAt: { not: null } },
+    });
+    if (!existing) throw new NotFoundException('Trashed contact submission not found');
     await this.db.contactSubmission.delete({ where: { id } });
     return { success: true };
   }

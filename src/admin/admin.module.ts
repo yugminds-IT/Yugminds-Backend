@@ -37,8 +37,7 @@ import { TrashController } from './trash/trash.controller.js';
 import { TrashService } from './trash/trash.service.js';
 import { AdminSearchController } from './search/search.controller.js';
 import { AdminSearchService } from './search/search.service.js';
-import { SystemControlsController } from './system-controls/system-controls.controller.js';
-import { SystemControlsService } from './system-controls/system-controls.service.js';
+import { SystemControlsModule } from './system-controls/system-controls.module.js';
 import { AlertsController } from './alerts/alerts.controller.js';
 import { AlertsService } from './alerts/alerts.service.js';
 import { DigestController } from './digest/digest.controller.js';
@@ -46,6 +45,10 @@ import { DigestService } from './digest/digest.service.js';
 import { SavedViewsController } from './saved-views/saved-views.controller.js';
 import { AuditService } from './audit/audit.service.js';
 import { AuditInterceptor } from './audit/audit.interceptor.js';
+import { AdminCalendarController } from './calendar/calendar.controller.js';
+import { AdminCalendarService } from './calendar/calendar.service.js';
+import { AdminTeacherReportsService } from './teacher-reports/admin-teacher-reports.service.js';
+import { AdminLogosService } from './logos/admin-logos.service.js';
 
 @Module({
   imports: [
@@ -54,6 +57,7 @@ import { AuditInterceptor } from './audit/audit.interceptor.js';
     PasswordResetRequestModule,
     RealtimeModule,
     CommonModule,
+    SystemControlsModule,
   ],
   controllers: [
     AdminDashboardController,
@@ -74,10 +78,10 @@ import { AuditInterceptor } from './audit/audit.interceptor.js';
     ImpersonationController,
     TrashController,
     AdminSearchController,
-    SystemControlsController,
     AlertsController,
     DigestController,
     SavedViewsController,
+    AdminCalendarController,
   ],
   providers: [
     AdminDashboardService,
@@ -90,14 +94,16 @@ import { AuditInterceptor } from './audit/audit.interceptor.js';
     AdminSchoolAdminsService,
     AdminJoiningCodesService,
     AdminTeacherAttendanceService,
+    AdminCalendarService,
     AdminLeavesService,
     AdminLicensesService,
     AuditService,
     TrashService,
     AdminSearchService,
-    SystemControlsService,
     AlertsService,
     DigestService,
+    AdminTeacherReportsService,
+    AdminLogosService,
     // Global interceptor, but it only logs mutating requests under /admin (see AuditInterceptor).
     { provide: APP_INTERCEPTOR, useClass: AuditInterceptor },
   ],

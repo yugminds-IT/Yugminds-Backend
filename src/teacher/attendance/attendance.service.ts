@@ -1,9 +1,23 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 
 @Injectable()
 export class TeacherAttendanceService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly teacherSchedule: TeacherScheduleService,
+  ) {}
+
+  private async assertSchoolAssigned(teacherId: number, schoolId?: string) {
+    if (!schoolId) return;
+    const assigned = await this.db.teacherSchool.findFirst({
+      where: { teacherId, schoolId },
+      select: { schoolId: true },
+    });
+    if (!assigned) throw new ForbiddenException('Not assigned to this school');
+  }
 
   private toDateOnly(dateStr: string): Date {
     const d = new Date(dateStr + 'T12:00:00.000Z');
@@ -21,14 +35,14 @@ export class TeacherAttendanceService {
     const dateEnd = new Date(date);
     dateEnd.setUTCHours(23, 59, 59, 999);
 
-    const schoolIds = schoolId
-      ? [schoolId]
-      : (
-          await this.db.teacherSchool.findMany({
-            where: { teacherId },
-            select: { schoolId: true },
-          })
-        ).map((s) => s.schoolId);
+    const assignedSchoolIds = (
+      await this.db.teacherSchool.findMany({
+        where: { teacherId },
+        select: { schoolId: true },
+      })
+    ).map((s) => s.schoolId);
+    await this.assertSchoolAssigned(teacherId, schoolId);
+    const schoolIds = schoolId ? [schoolId] : assignedSchoolIds;
 
     const result: any = {
       date: dateStr || date.toISOString().split('T')[0],
@@ -42,9 +56,37 @@ export class TeacherAttendanceService {
       progress: 0,
       submittedPeriods: [],
       pendingPeriods: [],
+      workingSchoolIds: [],
+      holidaySchoolIds: [],
+      offScheduleSchoolIds: [],
+      notScheduledToday: true,
     };
 
     if (schoolIds.length === 0) return result;
+
+    // Resolve which of the (possibly several) assigned schools the teacher
+    // is actually on duty at today, combining TeacherWorkingDaysHistory
+    // (the weekly pattern) with SchoolCalendar (holidays/comp-work) —
+    // instead of trusting ClassSchedule.dayOfWeek alone, which can go
+    // stale after a reassignment or not reflect a declared holiday.
+    const workStatus = await this.teacherSchedule.getWorkStatusForDate(
+      teacherId,
+      schoolIds,
+      dateStart,
+    );
+    result.workingSchoolIds = workStatus.workingSchoolIds;
+    result.holidaySchoolIds = workStatus.holidaySchoolIds;
+    result.offScheduleSchoolIds = workStatus.offScheduleSchoolIds;
+    result.notScheduledToday = workStatus.workingSchoolIds.length === 0;
+
+    const workingSchoolIds = workStatus.workingSchoolIds;
+    if (workingSchoolIds.length === 0) {
+      result.attendance = {
+        status: workStatus.holidaySchoolIds.length > 0 ? 'Holiday' : 'Not-Scheduled',
+        date: result.date,
+      };
+      return result;
+    }
 
     // 1. Compute scheduled periods
     // Derive dayOfWeek from the calendar date string (not UTC epoch) so that IST and other
@@ -58,7 +100,7 @@ export class TeacherAttendanceService {
     const schedules = await this.db.classSchedule.findMany({
       where: {
         teacherId,
-        schoolId: { in: schoolIds },
+        schoolId: { in: workingSchoolIds },
         dayOfWeek,
         isActive: true,
       },
@@ -109,7 +151,7 @@ export class TeacherAttendanceService {
         ? await this.db.teacherReport.findMany({
             where: {
               teacherId,
-              schoolId: { in: schoolIds },
+              schoolId: { in: workingSchoolIds },
               reportDate: { gte: dateStart, lte: dateEnd },
               periodId: { in: uniquePeriodIds },
             },
@@ -137,14 +179,14 @@ export class TeacherAttendanceService {
 
     // 3. Check attendance record first (explicitly marked, e.g. by report submission)
     const attendance = await this.db.attendance.findFirst({
-      where: { teacherId, schoolId: { in: schoolIds }, date: dateStart },
+      where: { teacherId, schoolId: { in: workingSchoolIds }, date: dateStart },
     });
 
     // 4. Check for leave
     const leave = await this.db.teacherLeave.findFirst({
       where: {
         teacherId,
-        schoolId: { in: schoolIds },
+        schoolId: { in: workingSchoolIds },
         startDate: { lte: dateEnd },
         endDate: { gte: dateStart },
       },
@@ -176,25 +218,27 @@ export class TeacherAttendanceService {
 
   /**
    * Calculate actual working days for a teacher in a given month.
-   * Uses ClassSchedule (dayOfWeek) to find scheduled days, then subtracts
-   * school holidays/breaks from SchoolCalendar, and adds CompensatoryWork days.
+   * Uses TeacherSchool.workingDays (the admin-assigned weekly pattern for
+   * this specific teacher+school — 0=Sun..6=Sat) to find scheduled days,
+   * then subtracts school holidays/breaks from SchoolCalendar, and adds
+   * CompensatoryWork days. (Previously this read ClassSchedule, which
+   * requires a full period-by-period timetable to exist and returned 0 for
+   * any teacher without one — the common case.)
    */
-  private async getScheduledWorkingDays(
+  /** dateStr -> weight (1 = full day, 0.5 = half day) for this one school. */
+  private async getScheduledWorkingDates(
     teacherId: number,
     schoolId: string,
     year: number,
     month: number,
-  ): Promise<number> {
-    // Get distinct scheduled days of week for this teacher
-    const schedules = await this.db.classSchedule.findMany({
-      where: { teacherId, schoolId, isActive: true },
-      select: { dayOfWeek: true },
-      distinct: ['dayOfWeek'],
+  ): Promise<Map<string, number>> {
+    const monthEndForHistory = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    const history = await this.db.teacherWorkingDaysHistory.findMany({
+      where: { teacherId, schoolId, effectiveFrom: { lte: monthEndForHistory } },
+      select: { effectiveFrom: true, workingDays: true },
+      orderBy: { effectiveFrom: 'asc' },
     });
-
-    if (schedules.length === 0) return 0;
-
-    const scheduledDays = new Set(schedules.map((s) => s.dayOfWeek));
+    if (history.length === 0) return new Map();
 
     // Get all holiday/break dates for the month from SchoolCalendar
     const holidayEntries = await this.db.schoolCalendar.findMany({
@@ -257,7 +301,7 @@ export class TeacherAttendanceService {
     }
 
     // Walk through every day in the month
-    let workingDays = 0;
+    const workingDates = new Map<string, number>();
     const cur = new Date(monthStart);
     while (cur <= monthEnd) {
       const dateStr = cur.toISOString().split('T')[0];
@@ -265,19 +309,19 @@ export class TeacherAttendanceService {
 
       if (compensatoryDates.has(dateStr)) {
         // Compensatory working days always count (even if weekend)
-        workingDays += holidayDates.has(dateStr)
-          ? 0
-          : halfDayDates.has(dateStr)
-            ? 0.5
-            : 1;
-      } else if (scheduledDays.has(dow) && !holidayDates.has(dateStr)) {
-        workingDays += halfDayDates.has(dateStr) ? 0.5 : 1;
+        const weight = holidayDates.has(dateStr) ? 0 : halfDayDates.has(dateStr) ? 0.5 : 1;
+        if (weight > 0) workingDates.set(dateStr, weight);
+      } else if (
+        resolveWorkingDaysForDate(history, cur).includes(dow) &&
+        !holidayDates.has(dateStr)
+      ) {
+        workingDates.set(dateStr, halfDayDates.has(dateStr) ? 0.5 : 1);
       }
 
       cur.setUTCDate(cur.getUTCDate() + 1);
     }
 
-    return workingDays;
+    return workingDates;
   }
 
   /**
@@ -291,6 +335,7 @@ export class TeacherAttendanceService {
     limit = 6,
     yearMonth?: string,
   ) {
+    await this.assertSchoolAssigned(teacherId, schoolId);
     const schoolIds = schoolId
       ? [schoolId]
       : (
@@ -316,15 +361,13 @@ export class TeacherAttendanceService {
       }
     }
 
-    const primarySchoolId = schoolIds[0];
-
     const monthlyData = await Promise.all(
       months.map(async ({ year, month }) => {
         const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
         const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
         const monthKey = `${year}-${String(month).padStart(2, '0')}`;
 
-        const [attendanceRecords, leaveRecords, scheduleWorkingDays] =
+        const [attendanceRecords, leaveRecords, scheduleMapsPerSchool] =
           await Promise.all([
             this.db.attendance.findMany({
               where: {
@@ -342,13 +385,30 @@ export class TeacherAttendanceService {
                 status: 'approved',
               },
             }),
-            this.getScheduledWorkingDays(
-              teacherId,
-              primarySchoolId,
-              year,
-              month,
+            // One map per school, then unioned below (taking the higher
+            // weight per date) — previously this only looked at the
+            // teacher's FIRST school, silently ignoring the rest for
+            // multi-school teachers.
+            Promise.all(
+              schoolIds.map((sid) =>
+                this.getScheduledWorkingDates(teacherId, sid, year, month),
+              ),
             ),
           ]);
+
+        const combinedWorkingDates = new Map<string, number>();
+        for (const schoolMap of scheduleMapsPerSchool) {
+          for (const [date, weight] of schoolMap) {
+            combinedWorkingDates.set(
+              date,
+              Math.max(combinedWorkingDates.get(date) ?? 0, weight),
+            );
+          }
+        }
+        const scheduleWorkingDays = [...combinedWorkingDates.values()].reduce(
+          (sum, w) => sum + w,
+          0,
+        );
 
         const presentDayDates = new Set(
           attendanceRecords
@@ -399,7 +459,10 @@ export class TeacherAttendanceService {
 
         return {
           month: monthKey,
-          school_id: primarySchoolId,
+          // Display-only: the specific school when filtered, else the
+          // teacher's first assigned school — the actual totals above are
+          // already combined across every school (see scheduleMapsPerSchool).
+          school_id: schoolId ?? schoolIds[0],
           present_days: presentDays,
           absent_days: absentDays,
           leave_days: leaveDays,
@@ -416,6 +479,7 @@ export class TeacherAttendanceService {
    * List daily attendance records for a date range.
    */
   async list(teacherId: number, schoolId?: string, from?: string, to?: string) {
+    await this.assertSchoolAssigned(teacherId, schoolId);
     const schoolIds = schoolId
       ? [schoolId]
       : (

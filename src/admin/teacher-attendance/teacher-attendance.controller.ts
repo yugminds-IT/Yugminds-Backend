@@ -36,4 +36,5 @@ export class AdminTeacherAttendanceController {
     const end_date = body.end_date ?? new Date().toISOString().split('T')[0];
     return this.service.markMissing({ start_date, end_date });
   }
+
 }

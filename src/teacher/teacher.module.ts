@@ -14,6 +14,9 @@ import { TeacherAttendanceService } from './attendance/attendance.service';
 import { TeacherLeavesService } from './leaves/leaves.service';
 import { TeacherExtraController } from './extra/teacher-extra.controller';
 import { RealtimeModule } from '../common/realtime/realtime.module';
+import { AdminCalendarService } from '../admin/calendar/calendar.service';
+import { TeacherCalendarController } from './calendar/calendar.controller';
+import { TeacherScheduleService } from './schedule/teacher-schedule.service';
 
 @Module({
   imports: [DatabaseModule, AuthModule, CommonModule, RealtimeModule],
@@ -24,6 +27,7 @@ import { RealtimeModule } from '../common/realtime/realtime.module';
     TeacherAttendanceController,
     TeacherLeavesController,
     TeacherExtraController,
+    TeacherCalendarController,
   ],
   providers: [
     TeacherDashboardService,
@@ -31,6 +35,8 @@ import { RealtimeModule } from '../common/realtime/realtime.module';
     TeacherReportsService,
     TeacherAttendanceService,
     TeacherLeavesService,
+    AdminCalendarService,
+    TeacherScheduleService,
   ],
 })
 export class TeacherModule {}

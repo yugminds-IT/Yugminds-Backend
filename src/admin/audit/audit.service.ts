@@ -79,10 +79,7 @@ export class AuditService {
       });
   }
 
-  async list(query: AuditQuery) {
-    const page = Math.max(1, parseInt(query.page ?? '1', 10) || 1);
-    const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '50', 10) || 50));
-
+  private buildWhere(query: AuditQuery): Prisma.AuditLogWhereInput {
     const where: Prisma.AuditLogWhereInput = {};
     if (query.actorEmail) {
       where.actorEmail = { contains: query.actorEmail, mode: 'insensitive' };
@@ -101,6 +98,14 @@ export class AuditService {
       if (query.from) where.createdAt.gte = new Date(query.from);
       if (query.to) where.createdAt.lte = new Date(query.to);
     }
+    return where;
+  }
+
+  async list(query: AuditQuery) {
+    const page = Math.max(1, parseInt(query.page ?? '1', 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(query.limit ?? '50', 10) || 50));
+
+    const where = this.buildWhere(query);
 
     const [total, logs] = await Promise.all([
       this.db.auditLog.count({ where }),
@@ -137,6 +142,61 @@ export class AuditService {
       limit,
       totalPages: Math.max(1, Math.ceil(total / limit)),
     };
+  }
+
+  /**
+   * CSV export honoring the same filters as `list()` — a compliance-style
+   * audit trail with no way to get the data out is a real gap. Capped at
+   * 5000 rows (matching the newest-first order `list()` already uses) so a
+   * broad/unfiltered export can't load an unbounded table into memory;
+   * admins narrowing by date range can pull more via multiple exports.
+   */
+  async exportCsv(query: AuditQuery): Promise<string> {
+    const where = this.buildWhere(query);
+    const logs = await this.db.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: 5000,
+      include: {
+        actor: { select: { email: true, profile: { select: { fullName: true } } } },
+      },
+    });
+
+    const header = [
+      'When',
+      'Actor Email',
+      'Actor Name',
+      'Actor Role',
+      'Method',
+      'Path',
+      'Entity Type',
+      'Entity ID',
+      'Status Code',
+      'Success',
+      'IP Address',
+    ];
+    const escapeCsv = (v: unknown): string => {
+      const s = v === null || v === undefined ? '' : String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const rows = logs.map((l) =>
+      [
+        l.createdAt.toISOString(),
+        l.actorEmail ?? l.actor?.email ?? '',
+        l.actor?.profile?.fullName ?? '',
+        l.actorRole ?? '',
+        l.method,
+        l.path,
+        l.entityType ?? '',
+        l.entityId ?? '',
+        l.statusCode ?? '',
+        l.success ? 'true' : 'false',
+        l.ipAddress ?? '',
+      ]
+        .map(escapeCsv)
+        .join(','),
+    );
+    return [header.join(','), ...rows].join('\n');
   }
 
   /** Distinct entity types seen so the UI filter dropdown reflects real data. */

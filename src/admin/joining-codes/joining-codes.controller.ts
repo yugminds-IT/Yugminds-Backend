@@ -1,7 +1,9 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  Param,
   Patch,
   Post,
   Query,
@@ -31,5 +33,10 @@ export class AdminJoiningCodesController {
   @Patch()
   update(@Body() body: Record<string, unknown>) {
     return this.service.update(body);
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return this.service.remove(id);
   }
 }

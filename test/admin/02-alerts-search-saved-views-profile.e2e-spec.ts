@@ -2,7 +2,7 @@ import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
 import { mintAccessToken, authHeader } from './support/auth';
-import { getBootstrapAdmin, closePool } from './support/db';
+import { getBootstrapAdmin, closePool, pool } from './support/db';
 
 describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', () => {
   let app: INestApplication;
@@ -123,11 +123,31 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         .expect(200);
       expect(check.body?.data?.full_name ?? check.body?.full_name).toBe(tempName);
 
-      await request(app.getHttpServer())
-        .patch('/admin/profile')
+      if (originalFullName) {
+        await request(app.getHttpServer())
+          .patch('/admin/profile')
+          .set(...adminAuth)
+          .send({ full_name: originalFullName })
+          .expect(200);
+      } else {
+        // AdminProfileService.update() treats a blank full_name as "no
+        // change" (silently ignored, not cleared) — so when the admin had
+        // NO profile row before this test, a PATCH with `full_name: ''`
+        // can never actually revert it. Delete the row this test itself
+        // created directly instead, restoring the exact pre-test state on
+        // this shared, real bootstrap admin account.
+        await pool.query('DELETE FROM "Profile" WHERE "userId" = $1', [
+          adminId,
+        ]);
+      }
+
+      const reverted = await request(app.getHttpServer())
+        .get('/admin/profile')
         .set(...adminAuth)
-        .send({ full_name: originalFullName ?? '' })
         .expect(200);
+      expect(reverted.body?.data?.full_name ?? reverted.body?.full_name).toBe(
+        originalFullName ?? undefined,
+      );
     });
   });
 });

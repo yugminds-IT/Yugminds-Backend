@@ -25,6 +25,7 @@ import { tenantContext } from '../tenants/tenant-context';
 import { RealtimeGateway } from '../common/realtime/realtime.gateway';
 import { AuthCacheService } from './auth-cache.service';
 import { RefreshTokenStoreService } from './refresh-token-store.service';
+import { SystemControlsService } from '../admin/system-controls/system-controls.service';
 
 export interface AuthTokens {
   accessToken: string;
@@ -51,6 +52,7 @@ export class AuthService {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly authCache: AuthCacheService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly systemControls: SystemControlsService,
   ) {}
 
   private async hashPassword(password: string): Promise<string> {
@@ -300,16 +302,24 @@ export class AuthService {
 
     // Maintenance mode (admin System Controls): block non-admin sign-ins.
     if (user.role !== 'admin' && !user.isSuperAdmin) {
-      const maintenance = await this.db.systemSetting.findUnique({
-        where: { key: 'maintenance_mode' },
+      const { active, message } = await this.systemControls.isMaintenanceActive();
+      if (active) {
+        throw new UnauthorizedException(message);
+      }
+    }
+
+    // Deactivated school (admin Schools Management "Active" toggle): block
+    // sign-in for everyone tied to that school. Previously this toggle only
+    // flipped a badge on the admin page — nothing ever read School.isActive
+    // to actually gate access, so "deactivating" a school did nothing.
+    if (user.role !== 'admin' && !user.isSuperAdmin && user.tenantId) {
+      const school = await this.db.school.findUnique({
+        where: { id: user.tenantId },
+        select: { isActive: true },
       });
-      if (maintenance?.value === 'true') {
-        const msg = await this.db.systemSetting.findUnique({
-          where: { key: 'maintenance_message' },
-        });
+      if (school && school.isActive === false) {
         throw new UnauthorizedException(
-          msg?.value ||
-            'Yugminds is undergoing scheduled maintenance. Please check back shortly.',
+          'This school has been deactivated. Please contact your administrator.',
         );
       }
     }
@@ -392,7 +402,11 @@ export class AuthService {
       return { message: 'Password reset request submitted.' };
     }
 
-    const schoolId: string | null = user.schoolId ?? null;
+    // Profile.schoolId is only ever populated for students — teachers' school
+    // affiliation lives in TeacherSchool, so their profile.schoolId is null.
+    // Fall back to tenantId (their primary school) so a teacher's request is
+    // still scoped to a school and shows up for that school's admin.
+    const schoolId: string | null = user.schoolId ?? user.tenantId ?? null;
     await this.db.$executeRaw`
       INSERT INTO "PasswordResetRequest" (id, "userId", status, "schoolId", "requestedAt", "createdAt", "updatedAt")
       VALUES (gen_random_uuid(), ${user.id}, 'pending', ${schoolId}, NOW(), NOW(), NOW())
@@ -403,7 +417,7 @@ export class AuthService {
     // - school_admin         → notify main admin(s)
     const role = user.role ?? '';
     if (role === 'student' || role === 'teacher') {
-      const routingSchoolId = schoolId ?? user.tenantId ?? null;
+      const routingSchoolId = schoolId;
       if (routingSchoolId) {
         const schoolAdmins = await this.db.$queryRaw<Array<{ userId: number }>>`
           SELECT "userId" FROM "SchoolAdmin" WHERE "schoolId" = ${routingSchoolId}
@@ -533,6 +547,20 @@ export class AuthService {
       throw new BadRequestException(
         'New password must be at least 8 characters',
       );
+    // Match the complexity rules the settings-page UI already enforces client-side,
+    // so a direct API call can't set a password weaker than what the form allows.
+    if (!/[A-Z]/.test(newPassword))
+      throw new BadRequestException(
+        'New password must contain at least one uppercase letter',
+      );
+    if (!/[a-z]/.test(newPassword))
+      throw new BadRequestException(
+        'New password must contain at least one lowercase letter',
+      );
+    if (!/[0-9]/.test(newPassword))
+      throw new BadRequestException(
+        'New password must contain at least one number',
+      );
 
     const user = await this.db.user.findUnique({ where: { id: userId } });
     if (!user) throw new UnauthorizedException('User not found');
@@ -549,7 +577,7 @@ export class AuthService {
     const hashed = await this.hashPassword(newPassword);
     await this.db.user.update({
       where: { id: userId },
-      data: { password: hashed, mustChangePassword: false } as never,
+      data: { password: hashed, mustChangePassword: false, initialPassword: null } as never,
     });
 
     // Invalidate all refresh tokens for the user (force re-login in other sessions)
@@ -573,7 +601,7 @@ export class AuthService {
     const hashed = await this.hashPassword(newPassword);
     await this.db.user.update({
       where: { id: userId },
-      data: { password: hashed, mustChangePassword: false } as never,
+      data: { password: hashed, mustChangePassword: false, initialPassword: null } as never,
     });
 
     await this.refreshTokenStore.revokeAll(userId);

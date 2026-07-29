@@ -45,6 +45,37 @@ describe('Admin audit log + system-controls (read-only in this phase)', () => {
     expect(res.body).toBeDefined();
   });
 
+  it('GET /admin/audit-logs/export returns real CSV honoring filters, not an empty stub', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/admin/audit-logs/export?limit=5')
+      .set(...adminAuth)
+      .expect(200);
+    expect(res.headers['content-type']).toContain('text/csv');
+    const lines = String(res.text).trim().split('\n');
+    // Header row + at least one data row — this suite alone has already
+    // generated real audited mutations by the time this test runs.
+    expect(lines[0]).toBe(
+      'When,Actor Email,Actor Name,Actor Role,Method,Path,Entity Type,Entity ID,Status Code,Success,IP Address',
+    );
+    expect(lines.length).toBeGreaterThan(1);
+
+    // A method filter must actually narrow the export, not just be ignored.
+    const getOnly = await request(app.getHttpServer())
+      .get('/admin/audit-logs/export?method=DELETE')
+      .set(...adminAuth)
+      .expect(200);
+    // Method (a plain HTTP verb, never comma-containing/quoted) always
+    // follows exactly 4 commas in this fixed column order — check via
+    // substring rather than a naive positional split, which could be
+    // thrown off by a quoted field earlier in the row (e.g. an actor name
+    // containing a comma).
+    const deleteRows = String(getOnly.text).trim().split('\n').slice(1);
+    for (const row of deleteRows) {
+      if (!row) continue;
+      expect(row).toMatch(/,DELETE,/);
+    }
+  });
+
   it('GET /admin/system-controls returns current settings', async () => {
     const res = await request(app.getHttpServer())
       .get('/admin/system-controls')

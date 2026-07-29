@@ -64,6 +64,16 @@ export class ValidateJoiningCodeService {
         message: 'This joining code has reached its maximum uses',
       };
     }
+    // "Single use" must be enforced on its own, independent of whether an
+    // admin also happened to set an explicit max-uses cap — otherwise a
+    // code marked Single with no max-uses value is functionally unlimited
+    // (the check above only fires when maxUses is set).
+    if (joinCode.usageType === 'single' && joinCode.usedCount >= 1) {
+      return {
+        is_valid: false,
+        message: 'This joining code has already been used',
+      };
+    }
 
     const sectionName = joinCode.section?.name ?? null;
     return {
@@ -137,11 +147,12 @@ export class ValidateJoiningCodeService {
           },
         });
 
-        // Auto-enroll in courses for the school + grade
+        // Auto-enroll in courses for the school + grade + section
         await this.enrollmentService.enrollStudentInRelevantCourses(
           userId,
           joinCode.schoolId,
           joinCode.grade,
+          sectionName,
         );
 
         await this.db.profile.upsert({

@@ -21,8 +21,12 @@ export class AdminLicensesController {
   constructor(private readonly service: AdminLicensesService) {}
 
   @Get()
-  list(@Query('schoolId') schoolId?: string) {
-    return this.service.list(schoolId);
+  list(
+    @Query('schoolId') schoolId?: string,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.service.list({ schoolId, status, search });
   }
 
   @Post()

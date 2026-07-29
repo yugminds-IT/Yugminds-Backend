@@ -7,6 +7,7 @@ import * as bcrypt from 'bcrypt';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { AuthCacheService } from '../../auth/auth-cache.service';
 import { ok } from '../../common/api-response';
 import { validatePasswordStrength } from '../../common/utils/password.util';
 
@@ -16,6 +17,7 @@ export class AdminSchoolAdminsService {
     private readonly db: DatabaseService,
     private readonly authService: AuthService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly authCache: AuthCacheService,
   ) {}
 
   async list(params?: { search?: string; status?: string; schoolId?: string }) {
@@ -217,19 +219,40 @@ export class AdminSchoolAdminsService {
       const hashed = await bcrypt.hash(rawPassword, 10);
       await this.db.user.update({
         where: { id: sa.userId },
-        data: { password: hashed, mustChangePassword: false } as never,
+        data: {
+          password: hashed,
+          mustChangePassword: false,
+          // Revoking refresh tokens alone leaves any already-issued
+          // short-lived access token valid until its own natural expiry —
+          // jwt.strategy.ts checks tokenVersion on every request, so
+          // bumping it here invalidates those immediately too.
+          tokenVersion: { increment: 1 },
+        } as never,
       });
       // Invalidate all existing sessions so stale tokens can't be used
       await this.refreshTokenStore.revokeAll(sa.userId);
+      // The JWT strategy's 120s auth cache short-circuits the DB lookup and
+      // would keep validating against the pre-bump tokenVersion until it
+      // expires on its own — invalidate it so the bump above takes effect
+      // on the very next request instead of up to 2 minutes later.
+      await this.authCache.invalidate(sa.userId);
     }
 
-    // School admin status is user-level activation.
+    // School admin status is user-level activation. jwt.strategy.ts never
+    // checks isActive directly (only tokenVersion), so deactivating without
+    // bumping tokenVersion + invalidating the cache would leave any
+    // already-issued access token (and the 120s auth cache entry) working
+    // right up until natural expiry — the toggle would look like it worked
+    // but not actually end a live session.
     let updatedIsActive: boolean | undefined;
     if (isActive !== undefined) {
       await this.db.user.update({
         where: { id: sa.userId },
-        data: { isActive },
+        data: isActive
+          ? { isActive }
+          : { isActive, tokenVersion: { increment: 1 } },
       });
+      if (!isActive) await this.authCache.invalidate(sa.userId);
       updatedIsActive = isActive;
     } else {
       updatedIsActive = sa.user.isActive;
@@ -253,6 +276,10 @@ export class AdminSchoolAdminsService {
     const byPk = await this.db.schoolAdmin.findUnique({ where: { id } });
     if (byPk) {
       await this.db.user.delete({ where: { id: byPk.userId } });
+      // The DB row is gone, but a cached auth-cache entry (120s TTL) would
+      // otherwise keep authenticating this user's still-valid access token
+      // without ever re-checking the DB — see jwt.strategy.ts's cached branch.
+      await this.authCache.invalidate(byPk.userId);
       return { success: true };
     }
     const userId = Number(id);
@@ -274,6 +301,7 @@ export class AdminSchoolAdminsService {
       // P2025 = record already deleted — treat as success
       if ((err as { code?: string })?.code !== 'P2025') throw err;
     }
+    await this.authCache.invalidate(user.id);
     return { success: true };
   }
 

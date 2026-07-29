@@ -66,10 +66,22 @@ export class AdminLicensesService {
     return d.toISOString().split('T')[0];
   }
 
+  /**
+   * Whole days from today through expiry, inclusive (today == expiry -> 1,
+   * not 0 — today is still a valid day). Computed entirely from UTC-midnight
+   * values so it never disagrees with `is_expired`/`not_yet_active`, which
+   * use the same clock — mixing in wall-clock `Date.now()` here previously
+   * made "days remaining" hit 0 on the expiry day while `is_expired` still
+   * (correctly) read false.
+   */
+  private daysRemainingInclusive(expiryMs: number, todayMs: number): number {
+    return Math.max(0, Math.round((expiryMs - todayMs) / DAY_MS) + 1);
+  }
+
   private serialize(row: LicenseRow) {
     const expiryMs = row.expiryDate.getTime();
     const todayMs = this.todayUtc().getTime();
-    const daysRemaining = Math.max(0, Math.ceil((expiryMs - Date.now()) / DAY_MS));
+    const daysRemaining = this.daysRemainingInclusive(expiryMs, todayMs);
     const buildNumber = getBuildLicenseNumber();
     return {
       id: row.id,
@@ -95,10 +107,35 @@ export class AdminLicensesService {
     };
   }
 
-  async list(schoolId?: string) {
-    if (!schoolId) throw new BadRequestException('schoolId is required');
+  async list(opts: { schoolId?: string; status?: string; search?: string } = {}) {
+    const { schoolId, status, search } = opts;
+    const where: Record<string, unknown> = {};
+    if (schoolId) where.schoolId = schoolId;
+
+    const today = this.todayUtc();
+    if (status === 'active') {
+      where.isActive = true;
+      where.startDate = { lte: today };
+      where.expiryDate = { gte: today };
+    } else if (status === 'expired') {
+      where.expiryDate = { lt: today };
+    } else if (status === 'pending') {
+      where.startDate = { gt: today };
+    } else if (status === 'inactive') {
+      where.isActive = false;
+    }
+
+    const q = (search ?? '').trim();
+    if (q) {
+      where.OR = [
+        { systemLabel: { contains: q, mode: 'insensitive' } },
+        { machineId: { contains: q, mode: 'insensitive' } },
+        { activationKey: { contains: q, mode: 'insensitive' } },
+      ];
+    }
+
     const rows = (await this.db.robocodersLicense.findMany({
-      where: { schoolId },
+      where,
       orderBy: { createdAt: 'desc' },
     })) as LicenseRow[];
     return { licenses: rows.map((r) => this.serialize(r)) };
@@ -150,6 +187,23 @@ export class AdminLicensesService {
     }
     // Expiry is inclusive of the start day, so N days => start + (N-1).
     const expiry = new Date(start.getTime() + (durationDays - 1) * DAY_MS);
+
+    // Without this, an admin can end up with several active license rows for
+    // the same physical machine — confusing in the table and wasteful, since
+    // only one activation key is ever entered on that machine anyway.
+    const existingActive = (await this.db.robocodersLicense.findFirst({
+      where: {
+        schoolId,
+        machineId,
+        isActive: true,
+        expiryDate: { gte: this.todayUtc() },
+      },
+    })) as LicenseRow | null;
+    if (existingActive) {
+      throw new BadRequestException(
+        `This machine already has an active license ("${existingActive.systemLabel}", expires ${this.toIsoDate(existingActive.expiryDate)}). Edit that license instead of generating a new one.`,
+      );
+    }
 
     const licenseNumber = getBuildLicenseNumber();
 
@@ -347,7 +401,8 @@ export class AdminLicensesService {
       return { valid: false, reason: result.reason };
     }
     const expiryMs = Date.parse(result.expiryDate! + 'T00:00:00Z');
-    const todayIso = this.toIsoDate(this.todayUtc());
+    const todayUtc = this.todayUtc();
+    const todayIso = this.toIsoDate(todayUtc);
     const buildNumber = getBuildLicenseNumber();
     return {
       valid: true,
@@ -357,7 +412,7 @@ export class AdminLicensesService {
       license_number: result.licenseNumber,
       expected_license_number: buildNumber,
       key_build_mismatch: result.licenseNumber !== buildNumber,
-      days_remaining: Math.max(0, Math.ceil((expiryMs - Date.now()) / DAY_MS)),
+      days_remaining: this.daysRemainingInclusive(expiryMs, todayUtc.getTime()),
       is_expired: todayIso > result.expiryDate!,
       not_yet_active: todayIso < result.startDate!,
     };
