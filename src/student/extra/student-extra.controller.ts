@@ -180,6 +180,11 @@ export class StudentExtraController {
       include: {
         course: true,
         student: { include: { profile: true } },
+        // Resolves the real issuing actor (an admin/teacher who manually
+        // issued it) — previously never queried, so the frontend's "Issued
+        // By" field fell back to the certificate's RECIPIENT (the student's
+        // own profile), making every certificate look self-issued.
+        issuedByUser: { include: { profile: true } },
       },
     });
     return {
@@ -198,9 +203,12 @@ export class StudentExtraController {
           grade: '',
           subject: '',
         },
-        profiles: {
-          full_name: c.student?.profile?.fullName ?? c.student?.email ?? '',
-        },
+        // Certificates are auto-issued by the platform (issueIfEligible)
+        // unless an admin/teacher explicitly issued one manually.
+        issued_by:
+          c.issuedByUser?.profile?.fullName ??
+          c.issuedByUser?.email ??
+          'Yugminds',
       })),
     };
   }
@@ -362,10 +370,11 @@ export class StudentExtraController {
     const assignmentIds = chapterIds.length
       ? await this.db.assignment.findMany({
           where: { chapterId: { in: chapterIds } },
-          select: { id: true, chapterId: true },
+          select: { id: true, chapterId: true, retakeScoringRule: true },
         })
       : [];
     const assignmentIdToCourseId = new Map<string, string>();
+    const assignmentMetaById = new Map(assignmentIds.map((a) => [a.id, a]));
     assignmentIds.forEach((a) => {
       const c = a.chapterId ? chapterToCourse.get(a.chapterId) : undefined;
       if (c) assignmentIdToCourseId.set(a.id, c);
@@ -383,24 +392,49 @@ export class StudentExtraController {
               score: true,
               maxScore: true,
             },
+            // Ascending, so pickBestGraded's "last one seen wins" for the
+            // 'latest' rule correctly means "most recent attempt".
+            orderBy: { attemptNumber: 'asc' },
           })
         : [];
+    // Distinct assignments attempted per course — counting raw submission
+    // rows here (as this used to) double-counted a single assignment's
+    // retake attempts as multiple separately-completed assignments.
+    const attemptedAssignmentIds = new Set(
+      submissions.map((s) => s.assignmentId),
+    );
     const completedAssignmentsByCourse = new Map<string, number>();
-    const gradeAggByCourse = new Map<
-      string,
-      { sumPct: number; count: number }
-    >();
-    for (const s of submissions) {
-      const c = assignmentIdToCourseId.get(s.assignmentId);
+    for (const assignmentId of attemptedAssignmentIds) {
+      const c = assignmentIdToCourseId.get(assignmentId);
       if (!c) continue;
       completedAssignmentsByCourse.set(
         c,
         (completedAssignmentsByCourse.get(c) ?? 0) + 1,
       );
+    }
+    // Average grade per course: same official-score selection
+    // StudentRankingService uses (graded-only, honoring retakeScoringRule) —
+    // this used to average every raw submission row including superseded
+    // retake attempts, which could pull a course's (and the Certificates
+    // page's "Achievement Summary → Average Grade") number well below the
+    // student's real, deduped score.
+    const bestGraded = StudentRankingService.pickBestGraded(
+      submissions,
+      (s) => s.assignmentId,
+      (assignmentId) =>
+        assignmentMetaById.get(assignmentId)?.retakeScoringRule ?? 'latest',
+    );
+    const gradeAggByCourse = new Map<
+      string,
+      { sumPct: number; count: number }
+    >();
+    for (const s of bestGraded.values()) {
+      const c = assignmentIdToCourseId.get(s.assignmentId);
+      if (!c) continue;
       const ms =
         typeof s.maxScore === 'number' && s.maxScore > 0 ? s.maxScore : null;
       const sc = typeof s.score === 'number' ? s.score : null;
-      if (ms && sc !== null && (s.status ?? '') === 'graded') {
+      if (ms && sc !== null) {
         const pct = Math.max(0, Math.min(100, (sc / ms) * 100));
         const agg = gradeAggByCourse.get(c) ?? { sumPct: 0, count: 0 };
         agg.sumPct += pct;
@@ -536,15 +570,26 @@ export class StudentExtraController {
       }
     });
 
-    // Group progress by chapterId and contentId
+    // Group progress by chapterId and contentId. Mirrors the completion
+    // predicate in the shared computeCourseProgress util (progress >= 99 OR
+    // completedAt set) — this endpoint predates that util and never used it
+    // directly, but should still agree with it on which rows count as done.
     const completedContentIds = new Set(
       progress
-        .filter((p) => (p as any).contentId && p.progress >= 99)
+        .filter(
+          (p) =>
+            (p as any).contentId && (p.progress >= 99 || p.completedAt),
+        )
         .map((p) => (p as any).contentId as string),
     );
     const completedChapterIds = new Set(
       progress
-        .filter((p) => !(p as any).contentId && p.chapterId && p.progress >= 99)
+        .filter(
+          (p) =>
+            !(p as any).contentId &&
+            p.chapterId &&
+            (p.progress >= 99 || p.completedAt),
+        )
         .map((p) => p.chapterId as string),
     );
 
@@ -638,8 +683,23 @@ export class StudentExtraController {
 
     const completedContentIds = new Set(
       progress
-        .filter((p) => (p as any).contentId && p.progress >= 99)
+        .filter(
+          (p) =>
+            (p as any).contentId && (p.progress >= 99 || p.completedAt),
+        )
         .map((p) => (p as any).contentId as string),
+    );
+    // A chapter can be marked done as a whole (no contentId, just a
+    // chapter-level progress row) — listCourseChapters already honors this
+    // for its own is_completed/green-checkmark, but this endpoint only
+    // checked per-item rows, so an item viewer kept showing "Mark as
+    // Complete" on every item in a chapter the sidebar already showed as
+    // 100% complete.
+    const chapterMarkedComplete = progress.some(
+      (p) =>
+        !(p as any).contentId &&
+        p.chapterId === chapterId &&
+        (p.progress >= 99 || p.completedAt),
     );
 
     const contentItems = contents.map((c) => ({
@@ -652,7 +712,7 @@ export class StudentExtraController {
       content_url: c.contentUrl,
       order_index: c.sortOrder,
       duration_minutes: c.durationMinutes,
-      is_completed: completedContentIds.has(c.id),
+      is_completed: chapterMarkedComplete || completedContentIds.has(c.id),
     }));
 
     const assignmentItems = assignments.map((a) => ({
@@ -665,7 +725,7 @@ export class StudentExtraController {
       content_url: null,
       order_index: a.sortOrder,
       duration_minutes: null,
-      is_completed: completedContentIds.has(a.id),
+      is_completed: chapterMarkedComplete || completedContentIds.has(a.id),
     }));
 
     // Regular content first (already ordered by sortOrder from DB), assignments appended at the end
@@ -690,7 +750,9 @@ export class StudentExtraController {
           studentId: user.id,
           assignmentId: { in: dailyAssignments.map((a) => a.id) },
         },
-        orderBy: { attemptNumber: 'desc' },
+        // Ascending, so the retake-rule selection below can treat "last
+        // matching row seen" as "highest attemptNumber" without re-sorting.
+        orderBy: { attemptNumber: 'asc' },
         select: {
           id: true,
           assignmentId: true,
@@ -702,13 +764,40 @@ export class StudentExtraController {
           attemptNumber: true,
         },
       });
+      const submissionsByAssignment = new Map<
+        string,
+        (typeof submissionRows)[0][]
+      >();
+      for (const s of submissionRows) {
+        const list = submissionsByAssignment.get(s.assignmentId) ?? [];
+        list.push(s);
+        submissionsByAssignment.set(s.assignmentId, list);
+      }
+      const dailyAssignmentById = new Map(
+        dailyAssignments.map((a) => [a.id, a] as const),
+      );
+      // Same official-score selection as GET /student/assignments/:id and
+      // StudentRankingService — honors retakeScoringRule instead of always
+      // showing whichever attempt is most recent.
       const latestSubByAssignment = new Map<
         string,
         (typeof submissionRows)[0]
       >();
-      for (const s of submissionRows) {
-        if (!latestSubByAssignment.has(s.assignmentId))
-          latestSubByAssignment.set(s.assignmentId, s);
+      for (const [assignmentId, subs] of submissionsByAssignment) {
+        const rule = String(
+          (dailyAssignmentById.get(assignmentId) as any)?.retakeScoringRule ??
+            'latest',
+        ).toLowerCase();
+        const graded = subs.filter((s) => s.status === 'graded' && s.score != null);
+        const chosen =
+          graded.length === 0
+            ? subs[subs.length - 1]
+            : rule === 'highest'
+              ? graded.reduce((best, s) =>
+                  (s.score ?? 0) > (best.score ?? 0) ? s : best,
+                )
+              : graded[graded.length - 1];
+        latestSubByAssignment.set(assignmentId, chosen);
       }
       const now = new Date();
       return {
@@ -746,6 +835,7 @@ export class StudentExtraController {
                       : null,
                   feedback: '',
                   submitted_at: sub.submittedAt.toISOString(),
+                  graded_at: sub.gradedAt?.toISOString() ?? null,
                   status: sub.status,
                 }
               : null,
@@ -798,6 +888,9 @@ export class StudentExtraController {
         studentId: user.id,
         assignmentId: { in: assignments.map((a) => a.id) },
       },
+      // Ascending, so the retake-rule selection below can treat "last
+      // matching row seen" as "highest attemptNumber" without re-sorting.
+      orderBy: { attemptNumber: 'asc' },
       select: {
         id: true,
         assignmentId: true,
@@ -806,11 +899,42 @@ export class StudentExtraController {
         maxScore: true,
         submittedAt: true,
         gradedAt: true,
+        attemptNumber: true,
       },
     });
-    const submissionByAssignmentId = new Map(
-      submissionRows.map((s) => [s.assignmentId, s] as const),
-    );
+    const submissionsByAssignmentId = new Map<
+      string,
+      (typeof submissionRows)[0][]
+    >();
+    for (const s of submissionRows) {
+      const list = submissionsByAssignmentId.get(s.assignmentId) ?? [];
+      list.push(s);
+      submissionsByAssignmentId.set(s.assignmentId, list);
+    }
+    const assignmentById = new Map(assignments.map((a) => [a.id, a]));
+    // Same official-score selection as GET /student/assignments/:id and
+    // StudentRankingService — honors retakeScoringRule instead of relying on
+    // implicit (unordered) row order, which previously made attempt
+    // selection here undefined behavior.
+    const submissionByAssignmentId = new Map<
+      string,
+      (typeof submissionRows)[0]
+    >();
+    for (const [assignmentId, subs] of submissionsByAssignmentId) {
+      const rule = String(
+        assignmentById.get(assignmentId)?.retakeScoringRule ?? 'latest',
+      ).toLowerCase();
+      const graded = subs.filter((s) => s.status === 'graded' && s.score != null);
+      const chosen =
+        graded.length === 0
+          ? subs[subs.length - 1]
+          : rule === 'highest'
+            ? graded.reduce((best, s) =>
+                (s.score ?? 0) > (best.score ?? 0) ? s : best,
+              )
+            : graded[graded.length - 1];
+      submissionByAssignmentId.set(assignmentId, chosen);
+    }
     return {
       assignments: assignments.map((a) => ({
         id: a.id,
@@ -872,6 +996,7 @@ export class StudentExtraController {
             grade: pct,
             feedback: '',
             submitted_at: s.submittedAt.toISOString(),
+            graded_at: s.gradedAt?.toISOString() ?? null,
             status: s.status,
           };
         })(),
@@ -1008,7 +1133,31 @@ export class StudentExtraController {
         gradedAt: true,
       },
     });
-    const latestAttempt = attempts[attempts.length - 1] ?? null;
+    // The submission shown to the student must reflect the OFFICIAL score for
+    // this assignment — the same graded-attempt selection StudentRankingService
+    // uses, honoring `retakeScoringRule` ('highest' picks the best-scoring
+    // graded attempt; 'latest'/default picks the most recent graded one) —
+    // not just whichever attempt happens to be most recent. This used to
+    // always show the latest attempt regardless of the rule, which directly
+    // contradicted the "Your highest score across all attempts is used for
+    // grading" copy shown to the student on 'highest'-rule assignments: a
+    // student who retook and scored worse would see the worse score.
+    const gradedAttempts = attempts.filter(
+      (a) => a.status === 'graded' && a.score != null,
+    );
+    const scoringRule = String(
+      assignment.retakeScoringRule ?? 'latest',
+    ).toLowerCase();
+    const officialGradedAttempt =
+      gradedAttempts.length === 0
+        ? null
+        : scoringRule === 'highest'
+          ? gradedAttempts.reduce((best, a) =>
+              (a.score ?? 0) > (best.score ?? 0) ? a : best,
+            )
+          : gradedAttempts[gradedAttempts.length - 1]; // ascending order → last (highest attemptNumber) wins
+    const latestAttempt =
+      officialGradedAttempt ?? attempts[attempts.length - 1] ?? null;
     const retakeGrant = await this.db.retakeGrant.findUnique({
       where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
       select: { isActive: true },
@@ -1835,6 +1984,35 @@ export class StudentExtraController {
       });
       if (!course) continue;
 
+      // A fully-completed course shouldn't surface as "Jump back in /
+      // Resume" — it's already done, and showing it here contradicted the
+      // Active Courses list/stat cards, which correctly exclude it.
+      const courseChapters = await this.db.chapter.findMany({
+        where: { courseId: row.courseId },
+        select: { id: true },
+      });
+      const courseChapterIds = courseChapters.map((c) => c.id);
+      const courseContents = await this.db.chapterContent.findMany({
+        where: { chapterId: { in: courseChapterIds } },
+        select: { id: true, chapterId: true },
+      });
+      const courseProgressRows = await this.db.courseProgress.findMany({
+        where: { studentId: user.id, courseId: row.courseId },
+        select: {
+          contentId: true,
+          chapterId: true,
+          progress: true,
+          completedAt: true,
+          updatedAt: true,
+        } as any,
+      });
+      const { status } = computeCourseProgress(
+        courseChapters,
+        courseContents,
+        courseProgressRows as any,
+      );
+      if (status === 'completed') continue;
+
       const chapter = row.chapterId
         ? await this.db.chapter.findUnique({
             where: { id: row.chapterId },
@@ -2004,24 +2182,16 @@ export class StudentExtraController {
     const asgnMap = new Map(allAssignments.map((a) => [a.id, a]));
 
     // ── 4. Canonical dedup: graded-only, respect retakeScoringRule ──────────
-    const bestByKey = new Map<string, (typeof ownSubmissions)[0]>();
-    for (const s of ownSubmissions) {
-      if (s.status !== 'graded') continue;
-      const rule = String(
-        asgnMap.get(s.assignmentId)?.retakeScoringRule ?? 'latest',
-      ).toLowerCase();
-      const existing = bestByKey.get(s.assignmentId);
-      if (!existing) {
-        bestByKey.set(s.assignmentId, s);
-      } else if (
-        rule === 'highest' &&
-        Number(s.score ?? 0) > Number(existing.score ?? 0)
-      ) {
-        bestByKey.set(s.assignmentId, s);
-      } else if (rule !== 'highest') {
-        bestByKey.set(s.assignmentId, s); // latest: ascending order → last wins
-      }
-    }
+    // Same selection algorithm StudentRankingService uses for rankings, and
+    // the student assignment list/detail endpoints use for their headline
+    // score — kept as one shared implementation so this page can never
+    // silently diverge from what a teacher/admin/school-admin sees.
+    const bestByKey = StudentRankingService.pickBestGraded(
+      ownSubmissions,
+      (s) => s.assignmentId,
+      (assignmentId) =>
+        asgnMap.get(assignmentId)?.retakeScoringRule ?? 'latest',
+    );
     const bestSubs = [...bestByKey.values()];
 
     // ── 5. Personal score summary ───────────────────────────────────────────
@@ -2175,8 +2345,11 @@ export class StudentExtraController {
       globalRows.find((r) => r.studentId === user.id)?.schoolName ?? '';
 
     const gradedCount = bestSubs.length;
+    // 'late' submissions are also ungraded/awaiting-review, not just
+    // 'submitted' — omitting them understated how much work was still
+    // pending a teacher's grading.
     const submittedCount = ownSubmissions.filter(
-      (s) => s.status === 'submitted',
+      (s) => s.status === 'submitted' || s.status === 'late',
     ).length;
 
     return {

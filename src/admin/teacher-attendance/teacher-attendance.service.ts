@@ -59,10 +59,21 @@ export class AdminTeacherAttendanceService {
 
     const start = new Date(Date.UTC(year, month - 1, 1));
     const end = new Date(Date.UTC(year, month, 0));
+    // For the CURRENT month, never walk past today — a not-yet-happened
+    // working day has no Attendance row yet and would otherwise sit in the
+    // denominator as an automatic miss, deflating attendance_percentage
+    // (mirrors the same fix in teacher/attendance/attendance.service.ts's
+    // getScheduledWorkingDates, which this admin-side calendar-set builder
+    // independently duplicates).
+    const now = new Date();
+    const walkEnd =
+      year === now.getUTCFullYear() && month === now.getUTCMonth() + 1
+        ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+        : end;
     const workingDays = new Set<string>();
     for (
       const d = new Date(start);
-      d <= end;
+      d <= end && d <= walkEnd;
       d.setUTCDate(d.getUTCDate() + 1)
     ) {
       const dateStr = d.toISOString().split('T')[0];
@@ -753,8 +764,27 @@ export class AdminTeacherAttendanceService {
 
   async markMissing(body: { start_date: string; end_date: string }) {
     const start = this.toDateOnly(body.start_date);
-    const end = this.toDateOnly(body.end_date);
+    const requestedEnd = this.toDateOnly(body.end_date);
+    // Never pre-create "Unreported" rows for a day that hasn't happened yet
+    // — e.g. running this for "the whole month" on the 26th used to also
+    // sweep the 27th-31st, stamping them Unreported before the teacher had
+    // any chance to submit a report for them (and, since every row in that
+    // sweep landed in the same request, they all shared one identical
+    // createdAt timestamp — the "Recorded At" values a teacher sees are
+    // meant to reflect when each day was actually processed).
+    const today = getTodayIstDateOnly();
+    const end = requestedEnd < today ? requestedEnd : today;
     end.setUTCHours(23, 59, 59, 999);
+    if (start > end) {
+      return {
+        summary: {
+          records_created: 0,
+          holidays_skipped: 0,
+          teachers_affected: 0,
+          dates_affected: 0,
+        },
+      };
+    }
 
     const teachers = await this.db.teacherSchool.findMany({
       select: { teacherId: true, schoolId: true },

@@ -28,7 +28,10 @@ export class AdminLeavesController {
       status: body.status as string,
       admin_remarks: body.admin_remarks as string | undefined,
       approved_by: body.approved_by as string | undefined,
-      actor_email: user.email,
+      // Numeric user id (as a string), matching the format the school-admin
+      // side stores — see AdminLeavesService.update for why this must not
+      // be an email.
+      actor_user_id: String(user.id),
     });
   }
 }

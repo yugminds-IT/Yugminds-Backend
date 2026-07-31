@@ -29,12 +29,14 @@ export class AdminTeachersController {
     @Query('search') search?: string,
     @Query('sort') sort?: string,
     @Query('order') order?: string,
+    @CurrentUser() user?: { id: number; role: Role; tenantId?: string },
   ) {
     const parsed = limit ? parseInt(limit, 10) : undefined;
     return this.service.list(
       schoolId,
       parsed && parsed > 0 ? parsed : undefined,
       { page, search, sort, order },
+      user,
     );
   }
 

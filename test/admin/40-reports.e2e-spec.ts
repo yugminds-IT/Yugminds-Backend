@@ -97,6 +97,40 @@ describe('Admin reports + teacher-reports', () => {
     expect(found?.admin_notes).toBe('QA reviewed');
   });
 
+  it('GET /admin/teacher-reports filters by status', async () => {
+    // The previous test left reportId as 'approved'.
+    const approvedRes = await request(app.getHttpServer())
+      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    expect(
+      (approvedRes.body?.reports ?? []).some((r: { id: string }) => r.id === reportId),
+    ).toBe(true);
+
+    const rejectedRes = await request(app.getHttpServer())
+      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=rejected`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    expect(
+      (rejectedRes.body?.reports ?? []).some((r: { id: string }) => r.id === reportId),
+    ).toBe(false);
+  });
+
+  it('GET /admin/teacher-reports returns real stats independent of the status filter and the list cap', async () => {
+    const res = await request(app.getHttpServer())
+      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved&limit=1`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    expect(res.body.reports.length).toBe(1);
+    // stats.total counts every status for this school, not just 'approved'
+    // (the currently-applied status filter), and isn't capped at limit=1.
+    expect(res.body.stats.total).toBeGreaterThanOrEqual(1);
+    expect(res.body.stats.approved).toBeGreaterThanOrEqual(1);
+    expect(
+      res.body.stats.submitted + res.body.stats.reviewed + res.body.stats.approved + res.body.stats.rejected,
+    ).toBe(res.body.stats.total);
+  });
+
   it('PATCH /admin/teacher-reports rejects an invalid status', async () => {
     await request(app.getHttpServer())
       .patch('/admin/teacher-reports')

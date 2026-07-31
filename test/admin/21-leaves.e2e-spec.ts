@@ -64,4 +64,43 @@ describe('Admin leave approval -> teacher attendance mutation (cross-role side e
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.status === 'Leave-Approved')).toBe(true);
   });
+
+  it(
+    'GET /admin/leaves returns real approved_at + a resolved reviewer identity for the just-approved leave ' +
+      '(regression: approved_at/rejected_at were declared on the frontend but never sent by this endpoint)',
+    async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/admin/leaves?school_id=${fixture.schoolId}`)
+        .set(...authHeader(fixture.admin.token))
+        .expect(200);
+      const list = res.body?.data ?? res.body;
+      const leaves = Array.isArray(list) ? list : (list?.leaves ?? []);
+      const leave = leaves.find((l: { id: string }) => l.id === leaveId);
+      expect(leave).toBeDefined();
+      expect(leave.status).toBe('Approved');
+      expect(leave.approved_at).toBeTruthy();
+      expect(leave.reviewer?.id).toBe(String(fixture.admin.id));
+    },
+  );
+
+  it(
+    "the school admin dashboard resolves the SAME admin-approved leave's reviewer name correctly " +
+      '(regression: admin used to store approvedBy as an email; school-admin\'s reviewer lookup does ' +
+      "parseInt(approvedBy, 10) to find the user, so an admin-approved leave always showed " +
+      '"Reviewed by: N/A" on the School Admin dashboard even though the school-admin frontend tries to ' +
+      'render approver.full_name)',
+    async () => {
+      const schoolAdminAuth = authHeader(fixture.schoolAdmin.token);
+      const res = await request(app.getHttpServer())
+        .get('/school-admin/leaves')
+        .set(...schoolAdminAuth)
+        .expect(200);
+      const leave = res.body.leaves.find((l: { id: string }) => l.id === leaveId);
+      expect(leave).toBeDefined();
+      expect(leave.status).toBe('Approved');
+      expect(leave.approver).not.toBeNull();
+      expect(leave.approver?.id).toBe(String(fixture.admin.id));
+      expect(leave.approver?.full_name).toBeTruthy();
+    },
+  );
 });

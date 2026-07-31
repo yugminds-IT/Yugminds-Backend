@@ -23,11 +23,14 @@ import { StudentRankingService } from '../../common/assignment/student-ranking.s
 import { NotificationIdParamDto } from './dto/notification-id-param.dto';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { tenantContext } from '../../tenants/tenant-context';
+import { computeCourseProgress } from '../../common/utils/course-progress.util';
 
-interface PlaceholderResponse {
-  endpoint: string;
-  method: string;
-  message: string;
+// Section.name and StudentSchool.section aren't guaranteed to share a
+// format across the app's data (e.g. "Section A" vs bare "A") — strip an
+// optional "Section " prefix so joins between the two match regardless of
+// which convention produced the value.
+function normalizeSection(section: string): string {
+  return section.replace(/^Section\s+/i, '').trim();
 }
 
 @Controller('teacher')
@@ -188,15 +191,6 @@ export class TeacherExtraController {
     return schoolId ? tenantContext.run(schoolId, async () => await fn()) : fn();
   }
 
-  private buildResponse(endpoint: string, method: string): PlaceholderResponse {
-    return {
-      endpoint,
-      method,
-      message:
-        'This endpoint is implemented as a placeholder. Replace with real business logic as needed.',
-    };
-  }
-
   // Schools: implemented in TeacherSchoolsController (GET /teacher/schools)
 
   // Attendance: implemented in TeacherAttendanceController
@@ -207,22 +201,33 @@ export class TeacherExtraController {
   async listNotifications(
     @CurrentUser() user: { id: number },
     @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
     @Query('mode') mode?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
     @Query('school_id') schoolId?: string,
   ) {
     const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
+    const skip = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
     if (schoolId) {
       const assigned = await this.db.teacherSchool.findFirst({
         where: { teacherId: user.id, schoolId },
       });
       if (!assigned) throw new ForbiddenException('Not assigned to this school');
     }
-    const m = (mode ?? 'all').trim().toLowerCase() as 'received' | 'sent' | 'all';
-    const { items } = await this.notificationsService.listWithProfiles(user.id, {
+    // Defaults to 'received' — a bare "Notifications" fetch with no mode
+    // used to default to 'all', which silently mixed sent notifications
+    // into what the page's "View Sent" tab labeled as sent-only.
+    const m = (mode ?? 'received').trim().toLowerCase() as 'received' | 'sent' | 'all';
+    const s = (status ?? 'all').trim().toLowerCase() as 'all' | 'read' | 'unread';
+    const { items, total } = await this.notificationsService.listWithProfiles(user.id, {
       mode: m,
       limit: take,
+      offset: skip,
+      search,
+      status: s,
     });
-    return { notifications: items };
+    return { notifications: items, total };
   }
 
   @Post('notifications')
@@ -303,10 +308,21 @@ export class TeacherExtraController {
     });
     if (!assigned) throw new ForbiddenException('Not assigned to this school');
 
+    // Excludes the requesting teacher themself — messaging yourself isn't a
+    // meaningful action, and createNotification() already strips self from
+    // the role:teacher send target. Without this, a solo-teacher school
+    // showed a clickable "All Teachers (1)" option (counting only the
+    // requester) that always failed with "No valid recipients for this
+    // school" once selected, and selecting only yourself in Individual mode
+    // silently "succeeded" while sending to nobody.
     const [teacherCount, studentCount, teacherUsers, studentUsers] = await Promise.all([
-      this.db.teacherSchool.count({ where: { schoolId } }),
+      this.db.teacherSchool.count({
+        where: { schoolId, teacherId: { not: user.id } },
+      }),
       this.db.studentSchool.count({ where: { schoolId } }),
-      this.db.teacherSchool.findMany({ where: { schoolId } }),
+      this.db.teacherSchool.findMany({
+        where: { schoolId, teacherId: { not: user.id } },
+      }),
       this.db.studentSchool.findMany({
         where: { schoolId },
         include: { student: { include: { profile: true } } },
@@ -552,26 +568,43 @@ export class TeacherExtraController {
     @Query('student_id') studentId?: string,
     @Query('section') section?: string,
   ) {
+    // Scope to the requested school when given — this is REQUIRED, not just
+    // an optimization: when a multi-school teacher's request carries
+    // `school_id`, TenantContextInterceptor locks the whole request to that
+    // one school's tenant context. Querying `studentSchool`/assignments
+    // across every one of the teacher's schools regardless (then filtering
+    // client-side, as this used to do) includes schoolIds outside the
+    // locked context and trips the tenant-isolation guard with a 401
+    // "Cross-tenant schoolId access denied" — which the frontend's generic
+    // 401 handler misreads as an expired session and force-logs the user
+    // out, even though nothing was actually wrong with their session.
     const assignments = await this.db.teacherSectionAssignment.findMany({
-      where: { teacherId: user.id },
+      where: { teacherId: user.id, ...(schoolId ? { schoolId } : {}) },
       include: { section: true },
     });
     const schoolSectionPairs = new Set<string>();
     assignments.forEach((a) => {
-      const sectionName = a.section?.name ?? '';
+      // Section.name and StudentSchool.section aren't guaranteed to share a
+      // format — real production data stores Section.name as "Section A"
+      // and StudentSchool.section as the bare "A", while some fixture/older
+      // data stores both as "Section A". Normalize both sides (strip an
+      // optional "Section " prefix) before comparing so either convention
+      // matches.
+      const sectionName = normalizeSection(a.section?.name ?? '');
       schoolSectionPairs.add(`${a.schoolId}:${sectionName}`);
     });
-    const studentSchools = await this.db.studentSchool.findMany({
-      where: {
-        schoolId: {
-          in: Array.from(new Set(assignments.map((a) => a.schoolId))),
-        },
-      },
-      select: { studentId: true, schoolId: true, section: true },
-    });
+    const assignedSchoolIds = Array.from(
+      new Set(assignments.map((a) => a.schoolId)),
+    );
+    const studentSchools = assignedSchoolIds.length
+      ? await this.db.studentSchool.findMany({
+          where: { schoolId: { in: assignedSchoolIds } },
+          select: { studentId: true, schoolId: true, section: true },
+        })
+      : [];
     const allowedStudentIds = new Set<number>();
     studentSchools.forEach((ss) => {
-      const key = `${ss.schoolId}:${ss.section ?? ''}`;
+      const key = `${ss.schoolId}:${normalizeSection(ss.section ?? '')}`;
       if (schoolSectionPairs.has(key)) {
         allowedStudentIds.add(ss.studentId);
       }
@@ -588,8 +621,19 @@ export class TeacherExtraController {
         },
       };
     }
-    const studentWhere: { role: Role; id?: number | { in: number[] } } = {
+    // isActive/deletedAt exclusion matches the school-admin/admin
+    // student-progress endpoints — without it, a deactivated or soft-deleted
+    // student (who never appears in Students Management) still inflated the
+    // teacher's total_students/students_with_progress/students_completed.
+    const studentWhere: {
+      role: Role;
+      isActive: boolean;
+      deletedAt: null;
+      id?: number | { in: number[] };
+    } = {
       role: Role.student,
+      isActive: true,
+      deletedAt: null,
       id: { in: Array.from(allowedStudentIds) },
     };
     if (studentId) {
@@ -627,16 +671,29 @@ export class TeacherExtraController {
         },
       };
     }
+    // StudentCourse/CourseProgress have bare courseId columns with no
+    // enforced FK to Course, so soft-deleting a course never cleans up its
+    // enrollment/progress rows — without this filter a deleted course kept
+    // contributing to total_courses and a blank-titled row (matches the
+    // school-admin/admin student-progress endpoints).
+    const activeCourseIds = (
+      await this.db.course.findMany({
+        where: { deletedAt: null },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
     const [studentCourses, courseProgress] = await Promise.all([
       this.db.studentCourse.findMany({
         where: {
           studentId: { in: studentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
       this.db.courseProgress.findMany({
         where: {
           studentId: { in: studentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
@@ -722,89 +779,30 @@ export class TeacherExtraController {
         const progressEntries = progressForUser.filter(
           (cp) => cp.courseId === cid,
         );
-        const last = progressEntries.reduce<Date | null>((latest, p) => {
-          const ts = p.completedAt ?? p.updatedAt;
-          return !latest ? ts : ts > latest ? ts : latest;
-        }, null);
-
-        // Content-item based progress (matches student's own view)
-        const courseContents = contentsByCourseT.get(cid) ?? [];
-        const totalContentItems = courseContents.length;
-        const completedContentIds = new Set(
-          progressEntries
-            .filter(
-              (p) =>
-                (p as any).contentId && (p.progress >= 99 || p.completedAt),
-            )
-            .map((p) => (p as any).contentId as string),
+        // Same computeCourseProgress used by /school-admin/student-progress
+        // and /admin/student-progress — this endpoint used to hand-roll its
+        // own version whose completed-status rule (a plain
+        // progressPercentage >= 100) didn't require completedChapters >=
+        // totalChapters the way the shared util does, so a chapterless
+        // course with one stray progress row could show "Completed" here
+        // while the admin/school-admin dashboards correctly showed the same
+        // student+course as not completed.
+        const computed = computeCourseProgress(
+          chaptersByCourseT.get(cid) ?? [],
+          contentsByCourseT.get(cid) ?? [],
+          progressEntries,
         );
-        const completedChapterIds = new Set(
-          progressEntries
-            .filter((p) => {
-              const cntId = (p as any).contentId;
-              return (
-                (!cntId || cntId === '' || cntId === 'null') &&
-                p.chapterId &&
-                p.progress >= 99
-              );
-            })
-            .map((p) => p.chapterId as string),
-        );
-        let hybridCompleted = 0;
-        for (const c of courseContents) {
-          if (
-            completedContentIds.has(c.id) ||
-            completedChapterIds.has(c.chapterId)
-          ) {
-            hybridCompleted++;
-          }
-        }
-        const progressPercentage =
-          totalContentItems > 0
-            ? Math.min(
-                100,
-                Math.round((hybridCompleted / totalContentItems) * 100),
-              )
-            : progressEntries.some((p) => p.progress >= 99)
-              ? 100
-              : 0;
-
-        // Completed chapters: all contents done OR explicitly marked
-        const courseChapters = chaptersByCourseT.get(cid) ?? [];
-        const chapterContentsMap = new Map<string, string[]>();
-        for (const c of courseContents) {
-          const arr = chapterContentsMap.get(c.chapterId) ?? [];
-          arr.push(c.id);
-          chapterContentsMap.set(c.chapterId, arr);
-        }
-        let completedChapters = 0;
-        for (const ch of courseChapters) {
-          const chContents = chapterContentsMap.get(ch.id) ?? [];
-          const chDone = completedChapterIds.has(ch.id);
-          if (chContents.length > 0) {
-            const allDone = chContents.every((id) =>
-              completedContentIds.has(id),
-            );
-            if (allDone || chDone) completedChapters++;
-          } else if (chDone) {
-            completedChapters++;
-          }
-        }
-
         const status: 'completed' | 'in_progress' | 'not_started' =
-          progressPercentage >= 100
-            ? 'completed'
-            : progressPercentage > 0
-              ? 'in_progress'
-              : 'not_started';
+          computed.status === 'active' ? 'in_progress' : computed.status;
         return {
           course_id: cid,
           course_name: course?.title ?? '',
-          total_chapters:
-            (courseChapters.length || course?._count?.chapters) ?? 0,
-          completed_chapters: completedChapters,
-          progress_percentage: progressPercentage,
-          last_accessed: last ? last.toISOString() : '',
+          total_chapters: computed.totalChapters,
+          completed_chapters: computed.completedChapters,
+          progress_percentage: Number(computed.progressPercentage.toFixed(2)),
+          last_accessed: computed.lastAccessed
+            ? computed.lastAccessed.toISOString()
+            : '',
           enrolled_on:
             studentCourseForUser
               .find((sc) => sc.courseId === cid)
@@ -865,6 +863,11 @@ export class TeacherExtraController {
         students_with_progress: studentsWithProgress.length,
         students_completed: studentsCompleted.length,
         average_system_progress: Number(averageSystemProgress.toFixed(2)),
+        // The frontend's "Class Average" card reads average_school_progress
+        // specifically (matches the key the school-admin endpoint sends) —
+        // without it, the card always showed 0% here regardless of actual
+        // completion.
+        average_school_progress: Number(averageSystemProgress.toFixed(2)),
         total_courses: Array.from(
           new Set(studentCourses.map((sc) => sc.courseId)),
         ).length,
@@ -896,8 +899,14 @@ export class TeacherExtraController {
       grade: a.section.grade.name,
       section: a.section.name,
       school_id: a.schoolId,
+      school_name: a.school?.name,
       grade_id: a.section.gradeId,
       section_id: a.section.id,
+      // Real column (TeacherSectionAssignment.status, default 'active') —
+      // previously never selected, so the frontend's is_active check always
+      // saw undefined and rendered every card as "Inactive" regardless of
+      // this teacher's actual assignment status.
+      is_active: a.status === 'active',
     }));
     return { classes };
   }
@@ -1240,7 +1249,10 @@ export class TeacherExtraController {
         retake_window_open: a.retakeWindowOpen,
         submission_count: (a as any)._count?.submissions ?? 0,
         graded_count: submissionCountMap.get(a.id) ?? 0,
-        average_score: avgScoreMap.get(a.id) ?? null,
+        // Named to match TeacherAssignment.avg_score on the frontend — this
+        // was previously `average_score`, which no frontend code ever read,
+        // so the ★ average-score chip in the assignment list never rendered.
+        avg_score: avgScoreMap.get(a.id) ?? null,
         academic_year: (a as any).academicYear ?? null,
       })),
     };
@@ -1559,12 +1571,25 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
 
+    // Deleting an assignment with graded submissions removes score-bearing
+    // rows the cached global leaderboard (StudentRankingService) was built
+    // from — without invalidating, those students' scores stay stale in the
+    // cache (up to its 10-minute TTL) until an unrelated grade elsewhere
+    // happens to refresh it. Checked before the transaction since the rows
+    // won't exist to check afterward.
+    const hadGradedSubmissions =
+      (await this.db.assignmentSubmission.count({
+        where: { assignmentId, status: 'graded' },
+      })) > 0;
+
     await this.db.$transaction([
       this.db.retakeGrant.deleteMany({ where: { assignmentId } }),
       this.db.assignmentSubmission.deleteMany({ where: { assignmentId } }),
       this.db.assignmentQuestion.deleteMany({ where: { assignmentId } }),
       this.db.assignment.delete({ where: { id: assignmentId } }),
     ]);
+
+    if (hadGradedSubmissions) await this.studentRanking.invalidate();
 
     return { success: true };
   }
@@ -2205,6 +2230,7 @@ export class TeacherExtraController {
         schoolId: true,
         courseId: true,
         chapterId: true,
+        totalMarks: true,
       },
     });
     if (
@@ -2217,6 +2243,20 @@ export class TeacherExtraController {
       where: { id: submissionId, assignmentId },
     });
     if (!submission) throw new NotFoundException('Submission not found');
+
+    if (body.score != null) {
+      const score = Number(body.score);
+      if (!Number.isFinite(score) || score < 0) {
+        throw new BadRequestException('score must be a non-negative number');
+      }
+      // Bound against the assignment's own total marks (submission.maxScore
+      // isn't reliably populated for every question type) — previously
+      // unvalidated, so e.g. a 1-mark question could be graded as 999.
+      const cap = submission.maxScore ?? assignment.totalMarks;
+      if (cap != null && score > cap) {
+        throw new BadRequestException(`score cannot exceed ${cap}`);
+      }
+    }
 
     const updated = await this.db.assignmentSubmission.update({
       where: { id: submissionId },

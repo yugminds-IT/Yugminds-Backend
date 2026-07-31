@@ -81,6 +81,37 @@ describe('AdminSchoolsService', () => {
     });
   });
 
+  describe('pickSchoolDataFromBody — operatingDays', () => {
+    const pick = (body: Record<string, unknown>) =>
+      (
+        service as unknown as {
+          pickSchoolDataFromBody: (b: Record<string, unknown>) => Record<string, unknown>;
+        }
+      ).pickSchoolDataFromBody(body);
+
+    it('normalizes operating_days (snake_case) into operatingDays', () => {
+      expect(pick({ operating_days: [3, 1, 1, 5] })).toMatchObject({
+        operatingDays: [1, 3, 5],
+      });
+    });
+
+    it('normalizes operatingDays (camelCase)', () => {
+      expect(pick({ operatingDays: [6, 0] })).toMatchObject({
+        operatingDays: [0, 6],
+      });
+    });
+
+    it('falls back to Mon-Sat when the provided array is empty/invalid', () => {
+      expect(pick({ operating_days: [] })).toMatchObject({
+        operatingDays: [1, 2, 3, 4, 5, 6],
+      });
+    });
+
+    it('omits operatingDays entirely when neither key is present (leaves DB default untouched on update)', () => {
+      expect(pick({ name: 'Some School' })).not.toHaveProperty('operatingDays');
+    });
+  });
+
   describe('list — studentCount scoping', () => {
     it('only counts links to active, non-trashed students (excludes deactivated/soft-deleted ones)', async () => {
       await service.list();

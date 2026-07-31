@@ -14,6 +14,10 @@ import {
   deriveSectionAbbreviation,
   buildJoinCodeCandidate,
 } from '../../common/utils/join-code.util';
+import {
+  normalizeWeekdays,
+  DEFAULT_OPERATING_DAYS,
+} from '../../common/utils/weekdays.util';
 
 @Injectable()
 export class AdminSchoolsService {
@@ -127,6 +131,7 @@ export class AdminSchoolsService {
         establishedYear: s?.establishedYear ?? null,
         totalStudentsEstimate: s?.totalStudentsEstimate ?? null,
         totalTeachersEstimate: s?.totalTeachersEstimate ?? null,
+        operatingDays: s?.operatingDays ?? DEFAULT_OPERATING_DAYS,
         grades,
         joinCodes,
         gradesOffered: grades.map((g) => g.name),
@@ -208,6 +213,7 @@ export class AdminSchoolsService {
       totalStudentsEstimate: school.totalStudentsEstimate,
       totalTeachersEstimate: school.totalTeachersEstimate,
       isActive: school.isActive,
+      operatingDays: school.operatingDays ?? DEFAULT_OPERATING_DAYS,
       grades,
       joinCodes: (school.joinCodes ?? []).map((jc) => ({
         id: jc.id,
@@ -534,6 +540,12 @@ export class AdminSchoolsService {
     if (body.principalName != null) out.principalName = str(body.principalName);
     if (body.principal_name != null)
       out.principalName = str(body.principal_name);
+    if (body.operatingDays != null || body.operating_days != null) {
+      out.operatingDays = normalizeWeekdays(
+        body.operatingDays ?? body.operating_days,
+        DEFAULT_OPERATING_DAYS,
+      );
+    }
     return out;
   }
 

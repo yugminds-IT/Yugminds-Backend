@@ -7,8 +7,6 @@ import { SchoolAdminStatsController } from './stats/stats.controller';
 import { SchoolAdminSchoolService } from './school/school.service';
 import { SchoolAdminStatsService } from './stats/stats.service';
 import { SchoolAdminExtraController } from './extra/school-admin-extra.controller';
-import { SchoolAdminLeavesController } from './leaves/leaves.controller';
-import { SchoolAdminLeavesService } from './leaves/leaves.service';
 import { RealtimeModule } from '../common/realtime/realtime.module';
 import { CommonModule } from '../common/common.module';
 
@@ -24,12 +22,10 @@ import { CommonModule } from '../common/common.module';
     SchoolAdminSchoolController,
     SchoolAdminStatsController,
     SchoolAdminExtraController,
-    SchoolAdminLeavesController,
   ],
   providers: [
     SchoolAdminSchoolService,
     SchoolAdminStatsService,
-    SchoolAdminLeavesService,
   ],
 })
 export class SchoolAdminModule {}

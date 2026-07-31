@@ -157,6 +157,14 @@ export class TrashService {
           where: { id, deletedAt: { not: null } },
         });
         if (!course) throw new NotFoundException('Trashed course not found');
+        // StudentCourse/CourseProgress have bare courseId columns with no
+        // enforced FK to Course (no @relation in schema.prisma, unlike
+        // Chapter/Assignment/CourseAccess which cascade automatically) —
+        // without this cleanup, purging a course leaves every enrollment
+        // and progress row for it permanently orphaned, inflating "Total
+        // Courses"-style counts and student course lists forever.
+        await this.db.studentCourse.deleteMany({ where: { courseId: id } });
+        await this.db.courseProgress.deleteMany({ where: { courseId: id } });
         await this.db.course.delete({ where: { id } });
         return { success: true };
       }

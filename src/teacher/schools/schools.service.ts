@@ -18,6 +18,13 @@ export class TeacherSchoolsService {
       id: ts.school.id,
       name: ts.school.name,
       school_code: ts.school.schoolCode ?? undefined,
+      city: ts.school.city ?? undefined,
+      state: ts.school.state ?? undefined,
+      address: ts.school.address ?? undefined,
+      assignment: {
+        school_id: ts.school.id,
+        subjects: ts.subjects,
+      },
     }));
     return { schools };
   }

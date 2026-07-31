@@ -18,15 +18,6 @@ export class SchoolAdminStatsController {
     return this.service.get(user).then((stats) => ({ stats }));
   }
 
-  @Get('assignment-analytics')
-  getAssignmentAnalytics(
-    @CurrentUser() user: { id: number; tenantId?: string },
-  ) {
-    return this.service
-      .getAssignmentAnalytics(user)
-      .then((analytics) => ({ analytics }));
-  }
-
   @Get('leaderboard')
   getLeaderboard(@CurrentUser() user: { id: number }) {
     return this.service.getLeaderboard(user);

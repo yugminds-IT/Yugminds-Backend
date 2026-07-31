@@ -42,21 +42,11 @@ describe('school-admin stats / assignment-analytics / leaderboard', () => {
     );
   });
 
-  it('GET /school-admin/assignment-analytics returns expected shape', async () => {
-    const res = await request(app.getHttpServer())
+  it('GET /school-admin/assignment-analytics no longer exists (removed dead/duplicate endpoint — the real UI only ever used /school-admin/leaderboard)', async () => {
+    await request(app.getHttpServer())
       .get('/school-admin/assignment-analytics')
       .set(...auth)
-      .expect(200);
-    expect(res.body.analytics).toEqual(
-      expect.objectContaining({
-        summary: expect.any(Object),
-        grade_wise: expect.any(Array),
-        subject_wise: expect.any(Array),
-        top_students: expect.any(Array),
-        low_students: expect.any(Array),
-        retake_stats: expect.any(Array),
-      }),
-    );
+      .expect(404);
   });
 
   it('GET /school-admin/leaderboard returns expected shape and school name matches fixture', async () => {

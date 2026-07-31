@@ -38,12 +38,6 @@ import { computeCourseProgress } from '../../common/utils/course-progress.util';
 import { AdminTeacherReportsService } from '../teacher-reports/admin-teacher-reports.service';
 import { AdminLogosService } from '../logos/admin-logos.service';
 
-interface PlaceholderResponse {
-  endpoint: string;
-  method: string;
-  message: string;
-}
-
 @Controller('admin')
 @UseGuards(RolesGuard)
 @Roles('admin')
@@ -60,15 +54,6 @@ export class AdminExtraController {
     private readonly teacherReportsService: AdminTeacherReportsService,
     private readonly logosService: AdminLogosService,
   ) {}
-
-  private buildResponse(endpoint: string, method: string): PlaceholderResponse {
-    return {
-      endpoint,
-      method,
-      message:
-        'This endpoint is implemented as a placeholder. Replace with real business logic as needed.',
-    };
-  }
 
   // Styled PDF generator using pdfkit — produces a professional report with logo, header, tables, footer.
   private buildStyledPdf(opts: {
@@ -355,16 +340,31 @@ export class AdminExtraController {
       };
     }
 
+    // StudentCourse/CourseProgress have bare courseId columns with no
+    // enforced FK to Course (no @relation in schema.prisma), so soft-
+    // deleting a course (Course.deletedAt) never cleans up its enrollment/
+    // progress rows — without this, a deleted course keeps reappearing in
+    // every student's course list, the Courses tab, and "Total Courses"
+    // below, exactly as if it still existed.
+    const activeCourseIds = (
+      await this.db.course.findMany({
+        where: { deletedAt: null },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
+
     const [studentCourses, courseProgress] = await Promise.all([
       this.db.studentCourse.findMany({
         where: {
           studentId: { in: allStudentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
       this.db.courseProgress.findMany({
         where: {
           studentId: { in: allStudentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
@@ -655,13 +655,13 @@ export class AdminExtraController {
       allProgressInScope,
     ] = await Promise.all([
       schoolId ? Promise.resolve(1) : this.db.school.count(),
-      this.db.course.count(),
+      this.db.course.count({ where: { deletedAt: null } }),
       this.db.studentCourse.findMany({
-        where: { ...studentScope, ...courseScope },
+        where: { ...studentScope, ...courseScope, courseId: { in: activeCourseIds } },
         select: { studentId: true, courseId: true },
       }),
       this.db.courseProgress.findMany({
-        where: { ...studentScope, ...courseScope },
+        where: { ...studentScope, ...courseScope, courseId: { in: activeCourseIds } },
         select: {
           studentId: true,
           courseId: true,
@@ -807,6 +807,7 @@ export class AdminExtraController {
     @Query('to') to?: string,
     @Query('search') search?: string,
     @Query('limit') limit?: string,
+    @Query('status') status?: string,
   ) {
     return this.teacherReportsService.list({
       schoolId,
@@ -817,6 +818,7 @@ export class AdminExtraController {
       to,
       search,
       limit,
+      status,
     });
   }
 

@@ -109,6 +109,45 @@ describe('Teacher assignments (CRUD, grading, retakes, analytics-adjacent)', () 
       .expect(404);
   });
 
+  it(
+    "GET /teacher/assignments returns each assignment's average score as avg_score " +
+      '(regression: the backend used to send average_score, which no frontend code read, ' +
+      'so the ★ average-score chip in the assignment list never rendered)',
+    async () => {
+      const assignmentId = await createAssignment({
+        title: 'Assignment Avg Score Field',
+        totalMarks: 10,
+        questions: [],
+      });
+      const student = fixture.students[1];
+      await request(app.getHttpServer())
+        .post(`/student/assignments/${assignmentId}/submit`)
+        .set(...authHeader(student.token))
+        .send({ textContent: 'Answer' })
+        .expect(201);
+      const subsRes = await request(app.getHttpServer())
+        .get(`/teacher/assignments/${assignmentId}/submissions`)
+        .set(...teacherAuth)
+        .expect(200);
+      await request(app.getHttpServer())
+        .patch(
+          `/teacher/assignments/${assignmentId}/submissions/${subsRes.body.submissions[0].id}/grade`,
+        )
+        .set(...teacherAuth)
+        .send({ score: 7 })
+        .expect(200);
+
+      const listRes = await request(app.getHttpServer())
+        .get(`/teacher/assignments?school_id=${fixture.schoolId}`)
+        .set(...teacherAuth)
+        .expect(200);
+      const row = listRes.body.assignments.find((a: any) => a.id === assignmentId);
+      expect(row).toBeDefined();
+      expect(row.avg_score).toBe(7);
+      expect(row.average_score).toBeUndefined();
+    },
+  );
+
   it('404s for a nonexistent assignment on get/patch/delete', async () => {
     await request(app.getHttpServer())
       .get('/teacher/assignments/nonexistent-id')
@@ -166,6 +205,136 @@ describe('Teacher assignments (CRUD, grading, retakes, analytics-adjacent)', () 
     expect(studentView.body.submission.feedback).toBe('Nice work');
     expect(studentView.body.submission.status).toBe('graded');
   });
+
+  // ---- Grading validation ----
+
+  it('rejects a score that exceeds the assignment/question total marks', async () => {
+    const assignmentId = await createAssignment({
+      title: 'Assignment Score Cap',
+      totalMarks: 10,
+      questions: [],
+    });
+    const student = fixture.students[1];
+    await request(app.getHttpServer())
+      .post(`/student/assignments/${assignmentId}/submit`)
+      .set(...authHeader(student.token))
+      .send({ textContent: 'Answer' })
+      .expect(201);
+
+    const subsRes = await request(app.getHttpServer())
+      .get(`/teacher/assignments/${assignmentId}/submissions`)
+      .set(...teacherAuth)
+      .expect(200);
+    const submissionId = subsRes.body.submissions[0].id;
+
+    const res = await request(app.getHttpServer())
+      .patch(
+        `/teacher/assignments/${assignmentId}/submissions/${submissionId}/grade`,
+      )
+      .set(...teacherAuth)
+      .send({ score: 999, feedback: 'Too high' });
+    expect(res.status).toBe(400);
+
+    // A valid, in-bounds score still works.
+    await request(app.getHttpServer())
+      .patch(
+        `/teacher/assignments/${assignmentId}/submissions/${submissionId}/grade`,
+      )
+      .set(...teacherAuth)
+      .send({ score: 10 })
+      .expect(200);
+  });
+
+  it('rejects a negative score', async () => {
+    const assignmentId = await createAssignment({
+      title: 'Assignment Negative Score',
+      totalMarks: 10,
+      questions: [],
+    });
+    const student = fixture.students[2];
+    await request(app.getHttpServer())
+      .post(`/student/assignments/${assignmentId}/submit`)
+      .set(...authHeader(student.token))
+      .send({ textContent: 'Answer' })
+      .expect(201);
+    const subsRes = await request(app.getHttpServer())
+      .get(`/teacher/assignments/${assignmentId}/submissions`)
+      .set(...teacherAuth)
+      .expect(200);
+    const submissionId = subsRes.body.submissions[0].id;
+
+    const res = await request(app.getHttpServer())
+      .patch(
+        `/teacher/assignments/${assignmentId}/submissions/${submissionId}/grade`,
+      )
+      .set(...teacherAuth)
+      .send({ score: -5 });
+    expect(res.status).toBe(400);
+  });
+
+  // ---- Deletion cache invalidation ----
+
+  it(
+    'deleting an assignment with graded submissions immediately drops the ' +
+      "student's contribution from the cached ranking (regression: deleteAssignment " +
+      "previously never called studentRanking.invalidate(), so a deleted assignment's " +
+      'graded score stayed baked into the shared leaderboard cache until an unrelated ' +
+      'grade elsewhere happened to refresh it)',
+    async () => {
+      // Uses a real MCQ question (auto-graded) rather than free-text — a
+      // manually-graded submission never gets `maxScore` populated, which
+      // would make overall_score 0 regardless of the assignment, muddying
+      // this test's signal. An auto-graded submission gets a real maxScore
+      // from the question's own marks value, so overall_score genuinely
+      // reflects this assignment's contribution.
+      const assignmentId = await createAssignment({
+        title: 'Assignment Cache Invalidation',
+        totalMarks: 10,
+        questions: [
+          {
+            question_type: 'MCQ',
+            question_text: '1 + 1 = ?',
+            options: ['1', '2', '3'],
+            correct_answer: '1',
+            marks: 10,
+          },
+        ],
+      });
+      const questions = await fetchQuestions(assignmentId);
+      const qId = questions[0].id;
+      const student = fixture.students[0];
+      await request(app.getHttpServer())
+        .post(`/student/assignments/${assignmentId}/submit`)
+        .set(...authHeader(student.token))
+        .send({ answers: { [qId]: '1' } })
+        .expect(201);
+
+      const before = await request(app.getHttpServer())
+        .get(`/teacher/assignment-analytics?school_id=${fixture.schoolId}`)
+        .set(...teacherAuth)
+        .expect(200);
+      const beforeRow = before.body.analytics.top_students.find(
+        (r: any) => r.student_id === student.id,
+      );
+      expect(beforeRow).toBeDefined();
+      expect(beforeRow.overall_score).toBeGreaterThan(0);
+
+      await request(app.getHttpServer())
+        .delete(`/teacher/assignments/${assignmentId}`)
+        .set(...teacherAuth)
+        .expect(200);
+
+      const after = await request(app.getHttpServer())
+        .get(`/teacher/assignment-analytics?school_id=${fixture.schoolId}`)
+        .set(...teacherAuth)
+        .expect(200);
+      const afterRow = after.body.analytics.top_students.find(
+        (r: any) => r.student_id === student.id,
+      );
+      expect(afterRow).toBeDefined();
+      expect(afterRow.overall_score).toBe(0);
+    },
+  );
 
   // ---- Batch grading ----
 

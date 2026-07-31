@@ -7,9 +7,9 @@ import { randomUUID } from 'crypto';
 import { DatabaseService } from '../../database/database.service';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import { WEEKDAY_NAMES } from '../../common/utils/weekdays.util';
 
 const VALID_TYPES = ['Holiday', 'Break', 'HalfDay', 'CompensatoryWork'];
-const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 export interface CalendarEntryDto {
   id: string;

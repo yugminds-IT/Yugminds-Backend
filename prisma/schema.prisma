@@ -121,6 +121,11 @@ model School {
   totalStudentsEstimate Int?
   totalTeachersEstimate Int?
   isActive              Boolean  @default(true)
+  // Which weekdays this school holds classes — 0=Sun..6=Sat, same
+  // convention as TeacherSchool.workingDays. Constrains both a teacher's
+  // working days at this school (AdminTeachersService) and which days
+  // Class Scheduling will accept (school-admin-extra.controller.ts).
+  operatingDays         Int[]    @default([1, 2, 3, 4, 5, 6])
   deletedAt             DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -204,6 +209,15 @@ model TeacherSchool {
   // admin attendance dashboard's "total working days" math; kept in sync
   // with workingDaysPerWeek (= workingDays.length) on every write.
   workingDays         Int[]    @default([1, 2, 3, 4, 5])
+  // Calendar date range the teacher is actually assigned/present at this
+  // school — distinct from workingDays (which is only day-of-week, no
+  // bound) and from TeacherWorkingDaysHistory.effectiveFrom (which only
+  // versions the working-days *pattern*, never ends). Both null = no date
+  // restriction (default/backward-compatible for pre-existing rows).
+  // Enforced by Class Scheduling (school-admin) before a teacher can be
+  // scheduled there.
+  assignedFrom        DateTime?
+  assignedUntil       DateTime?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
   @@unique([teacherId, schoolId])

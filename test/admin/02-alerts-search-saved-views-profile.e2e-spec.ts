@@ -149,5 +149,31 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         originalFullName ?? undefined,
       );
     });
+
+    it(
+      'PATCH /admin/profile silently ignores an email change — the "Email is ' +
+        'fixed and cannot be changed" UI claim is actually enforced server-side, ' +
+        'not just a disabled input a direct API call could bypass',
+      async () => {
+        const before = await request(app.getHttpServer())
+          .get('/admin/profile')
+          .set(...adminAuth)
+          .expect(200);
+        const realEmail = before.body?.data?.email ?? before.body?.email;
+        expect(realEmail).toBeTruthy();
+
+        await request(app.getHttpServer())
+          .patch('/admin/profile')
+          .set(...adminAuth)
+          .send({ email: `__qa_test_should_not_apply_${Date.now()}@example.test` })
+          .expect(200);
+
+        const after = await request(app.getHttpServer())
+          .get('/admin/profile')
+          .set(...adminAuth)
+          .expect(200);
+        expect(after.body?.data?.email ?? after.body?.email).toBe(realEmail);
+      },
+    );
   });
 });

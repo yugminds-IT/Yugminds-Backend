@@ -7,6 +7,7 @@ import {
   QaFixture,
 } from '../admin/support/fixtures';
 import { closePool } from '../admin/support/db';
+import { authHeader } from '../admin/support/auth';
 
 describe('school-admin schedules CRUD + sync-to-teachers', () => {
   let app: INestApplication;
@@ -159,5 +160,215 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
       (s: any) => s.id === fixture.scheduleId,
     );
     expect(found).toBeTruthy();
+  });
+
+  describe('assertTeacherSchedulable — assigned-school/working-day/date-range enforcement', () => {
+    let adminAuth: [string, string];
+    let extraPeriodId: string;
+
+    beforeAll(async () => {
+      adminAuth = authHeader(fixture.admin.token);
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/periods')
+        .set(...auth)
+        .send({ period_number: 3, start_time: '12:00', end_time: '13:00' })
+        .expect(201);
+      extraPeriodId = res.body.period.id;
+    });
+
+    afterAll(async () => {
+      await request(app.getHttpServer())
+        .delete(`/school-admin/periods/${extraPeriodId}`)
+        .set(...auth)
+        .catch(() => undefined);
+    });
+
+    it('rejects a teacher who has no TeacherSchool row at this school at all', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          teacher_id: 999999999,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Wednesday',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/not assigned to your school/i);
+    });
+
+    it("rejects scheduling on a day outside the teacher's working days (fixture default is Mon-Fri, no weekend)", async () => {
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          teacher_id: fixture.teachers[1].id,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Saturday',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/doesn't work at your school on Saturdays/i);
+    });
+
+    it("rejects scheduling before the teacher's assignedFrom date, and allows it again once cleared", async () => {
+      const detail = await request(app.getHttpServer())
+        .get(`/admin/teachers/${fixture.teachers[1].id}`)
+        .set(...adminAuth)
+        .expect(200);
+      const school = detail.body.assignedSchools.find(
+        (s: any) => s.schoolId === fixture.schoolId,
+      );
+      expect(school).toBeTruthy();
+
+      const baseAssignment = {
+        school_id: fixture.schoolId,
+        grade_sections_assigned: school.gradesAssigned.map((g: any) => ({
+          grade: g.gradeName,
+          sections: g.sectionsAssigned,
+        })),
+        subjects: school.subjects,
+        working_days: school.workingDays,
+      };
+
+      // A future assignedFrom — the teacher isn't "there yet" per the admin's
+      // own assignment dates.
+      await request(app.getHttpServer())
+        .put(`/admin/teachers/${fixture.teachers[1].id}`)
+        .set(...adminAuth)
+        .send({
+          school_assignments: [{ ...baseAssignment, assigned_from: '2099-01-01' }],
+        })
+        .expect(200);
+
+      const blocked = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          teacher_id: fixture.teachers[1].id,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Wednesday',
+        });
+      expect(blocked.status).toBe(400);
+      expect(blocked.body.message).toMatch(/assignment to your school starts on 2099-01-01/i);
+
+      // Clear the restriction (both null = no restriction) and confirm
+      // scheduling now succeeds.
+      await request(app.getHttpServer())
+        .put(`/admin/teachers/${fixture.teachers[1].id}`)
+        .set(...adminAuth)
+        .send({ school_assignments: [{ ...baseAssignment }] })
+        .expect(200);
+
+      const allowed = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          teacher_id: fixture.teachers[1].id,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Wednesday',
+        });
+      expect(allowed.status).toBe(201);
+
+      // Cleanup: remove the schedule this test just created.
+      await request(app.getHttpServer())
+        .delete(`/school-admin/schedules/${allowed.body.schedule.id}`)
+        .set(...auth)
+        .catch(() => undefined);
+    });
+  });
+
+  describe('assertSchoolOperatesOnDay — school-wide constraint, independent of teacher', () => {
+    let adminAuth: [string, string];
+    let extraPeriodId: string;
+
+    beforeAll(async () => {
+      adminAuth = authHeader(fixture.admin.token);
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/periods')
+        .set(...auth)
+        .send({ period_number: 4, start_time: '14:00', end_time: '15:00' })
+        .expect(201);
+      extraPeriodId = res.body.period.id;
+    });
+
+    afterAll(async () => {
+      // Restore the fixture school's default Mon-Sat operating days so
+      // other describe blocks in this file aren't affected by ordering.
+      await request(app.getHttpServer())
+        .put('/admin/schools')
+        .set(...adminAuth)
+        .send({ id: fixture.schoolId, operating_days: [1, 2, 3, 4, 5, 6] })
+        .catch(() => undefined);
+      await request(app.getHttpServer())
+        .delete(`/school-admin/periods/${extraPeriodId}`)
+        .set(...auth)
+        .catch(() => undefined);
+    });
+
+    it('rejects a schedule on a day the school does not operate, even with no teacher assigned', async () => {
+      await request(app.getHttpServer())
+        .put('/admin/schools')
+        .set(...adminAuth)
+        .send({ id: fixture.schoolId, operating_days: [1, 2, 3, 4, 5] })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Saturday',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/doesn't operate on Saturdays/i);
+    });
+
+    it('rejects the same request even when a valid teacher is assigned (school-level check runs unconditionally)', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          teacher_id: fixture.teachers[1].id,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Saturday',
+        });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toMatch(/doesn't operate on Saturdays/i);
+    });
+
+    it('allows scheduling again once the school operating days are widened back to include Saturday', async () => {
+      await request(app.getHttpServer())
+        .put('/admin/schools')
+        .set(...adminAuth)
+        .send({ id: fixture.schoolId, operating_days: [1, 2, 3, 4, 5, 6] })
+        .expect(200);
+
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/schedules')
+        .set(...auth)
+        .send({
+          period_id: extraPeriodId,
+          grade: fixture.grade,
+          subject: 'Science',
+          day_of_week: 'Saturday',
+        });
+      expect(res.status).toBe(201);
+
+      await request(app.getHttpServer())
+        .delete(`/school-admin/schedules/${res.body.schedule.id}`)
+        .set(...auth)
+        .catch(() => undefined);
+    });
   });
 });

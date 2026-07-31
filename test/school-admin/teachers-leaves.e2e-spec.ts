@@ -6,7 +6,7 @@ import {
   teardownQaFixture,
   QaFixture,
 } from '../admin/support/fixtures';
-import { closePool } from '../admin/support/db';
+import { closePool, pool } from '../admin/support/db';
 
 describe('school-admin teachers list + leaves', () => {
   let app: INestApplication;
@@ -44,10 +44,26 @@ describe('school-admin teachers list + leaves', () => {
     }
   });
 
-  describe('leave request lifecycle + duplicate-route empirical check', () => {
-    let leaveId: string;
+  describe('leave request lifecycle', () => {
+    // Only SchoolAdminExtraController handles /school-admin/leaves* now — a
+    // second controller (SchoolAdminLeavesController) used to register the
+    // exact same routes on the same @Controller('school-admin') prefix, so
+    // Nest/Express silently dispatched every request to whichever was
+    // registered first and the other's service (with its own, different
+    // approve/reject logic) never ran in production. It's been deleted.
+    let approveLeaveId: string;
+    let rejectLeaveId: string;
 
-    it('teacher creates a leave request', async () => {
+    // Distinct, non-overlapping date ranges — the teacher-side leave
+    // creation endpoint rejects a new request that overlaps an
+    // already-pending/approved one for the same teacher+school.
+    const APPROVE_RANGE = { start: '2026-08-03', end: '2026-08-04' };
+    const REJECT_RANGE = { start: '2026-08-10', end: '2026-08-11' };
+
+    async function createLeave(range: {
+      start: string;
+      end: string;
+    }): Promise<string> {
       const teacherAuth: [string, string] = [
         'Authorization',
         `Bearer ${fixture.teachers[0].token}`,
@@ -57,95 +73,121 @@ describe('school-admin teachers list + leaves', () => {
         .set(...teacherAuth)
         .send({
           school_id: fixture.schoolId,
-          start_date: '2026-08-03',
-          end_date: '2026-08-04',
+          start_date: range.start,
+          end_date: range.end,
           reason: 'QA test leave',
           substitute_required: true,
         })
         .expect(201);
-      leaveId =
-        res.body?.id ?? res.body?.leave?.id ?? res.body?.data?.id;
-      expect(leaveId).toBeTruthy();
-    });
+      const id = res.body?.id ?? res.body?.leave?.id ?? res.body?.data?.id;
+      expect(id).toBeTruthy();
+      return id;
+    }
 
-    it('school-admin sees the pending leave via GET /school-admin/leaves', async () => {
+    it('teacher creates a leave request, school-admin sees it pending', async () => {
+      approveLeaveId = await createLeave(APPROVE_RANGE);
       const res = await request(app.getHttpServer())
         .get('/school-admin/leaves')
         .set(...auth)
         .expect(200);
-      const found = res.body.leaves.find((l: any) => l.id === leaveId);
+      const found = res.body.leaves.find((l: any) => l.id === approveLeaveId);
       expect(found).toBeTruthy();
       expect(found.status).toBe('Pending');
     });
 
-    it(
-      'PATCH /school-admin/leaves/:id approve — empirically reports which ' +
-        'of the two duplicate-route controllers (SchoolAdminExtraController ' +
-        'vs SchoolAdminLeavesController) actually handles the request',
-      async () => {
-        const res = await request(app.getHttpServer())
-          .patch(`/school-admin/leaves/${leaveId}`)
-          .set(...auth)
-          .send({ action: 'approve' })
-          .expect(200);
+    it('approving records the approver identity and marks Attendance Leave-Approved', async () => {
+      await request(app.getHttpServer())
+        .patch(`/school-admin/leaves/${approveLeaveId}`)
+        .set(...auth)
+        .send({ action: 'approve' })
+        .expect(200);
 
-        // SchoolAdminExtraController.updateLeave returns `{ success: true }`
-        // (no `leave` object). SchoolAdminLeavesService.update returns
-        // `{ leave: { id, status, admin_remarks } }`. Whichever shape shows up
-        // here is empirically the one Nest's router dispatched to — both
-        // controllers register `@Patch('leaves/:id')` on `@Controller
-        // ('school-admin')`, so this is a real duplicate-route situation
-        // (see src/school-admin/school-admin.module.ts controllers order and
-        // memory: project_school_admin_dashboard_bugs.md).
-        // eslint-disable-next-line no-console
-        console.log(
-          '[duplicate-route check] PATCH /school-admin/leaves/:id response:',
-          JSON.stringify(res.body),
-        );
-        if (res.body.leave) {
-          // eslint-disable-next-line no-console
-          console.log(
-            '[duplicate-route check] WINNER: SchoolAdminLeavesController (leaves.controller.ts)',
-          );
-        } else if (res.body.success === true) {
-          // eslint-disable-next-line no-console
-          console.log(
-            '[duplicate-route check] WINNER: SchoolAdminExtraController (school-admin-extra.controller.ts)',
-          );
-        }
-        expect(res.body).toBeTruthy();
-      },
-    );
-
-    it('the update took effect — GET shows Approved', async () => {
-      const res = await request(app.getHttpServer())
-        .get(`/school-admin/leaves/${leaveId}`)
+      const getRes = await request(app.getHttpServer())
+        .get(`/school-admin/leaves/${approveLeaveId}`)
         .set(...auth)
         .expect(200);
-      const status = res.body.leave.status;
-      expect(['Approved', 'approved']).toContain(status);
+      expect(['Approved', 'approved']).toContain(getRes.body.leave.status);
+
+      const listRes = await request(app.getHttpServer())
+        .get('/school-admin/leaves')
+        .set(...auth)
+        .expect(200);
+      const found = listRes.body.leaves.find(
+        (l: any) => l.id === approveLeaveId,
+      );
+      expect(found.approver?.full_name).toBeTruthy();
+
+      const { rows } = await pool.query(
+        `SELECT status FROM "Attendance" WHERE "teacherId" = $1 AND "schoolId" = $2 AND date BETWEEN $3 AND $4`,
+        [fixture.teachers[0].id, fixture.schoolId, APPROVE_RANGE.start, APPROVE_RANGE.end],
+      );
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r: { status: string }) => r.status === 'Leave-Approved')).toBe(true);
+    });
+
+    it('rejecting records the rejecter identity (not discarded) and reverts Leave-Approved days back to Unreported', async () => {
+      rejectLeaveId = await createLeave(REJECT_RANGE);
+      // Approve first so there are real Leave-Approved Attendance rows to revert.
+      await request(app.getHttpServer())
+        .patch(`/school-admin/leaves/${rejectLeaveId}`)
+        .set(...auth)
+        .send({ action: 'approve' })
+        .expect(200);
+
+      await request(app.getHttpServer())
+        .patch(`/school-admin/leaves/${rejectLeaveId}`)
+        .set(...auth)
+        .send({ action: 'reject', admin_remarks: 'QA reject test' })
+        .expect(200);
+
+      const listRes = await request(app.getHttpServer())
+        .get('/school-admin/leaves')
+        .set(...auth)
+        .expect(200);
+      const found = listRes.body.leaves.find(
+        (l: any) => l.id === rejectLeaveId,
+      );
+      expect(found.status).toBe('Rejected');
+      // Previously nulled out on reject — "Reviewed by" always showed N/A.
+      expect(found.reviewer?.full_name).toBeTruthy();
+      expect(found.approved_by).toBeTruthy();
+
+      const { rows } = await pool.query(
+        `SELECT status FROM "Attendance" WHERE "teacherId" = $1 AND "schoolId" = $2 AND date BETWEEN $3 AND $4`,
+        [fixture.teachers[0].id, fixture.schoolId, REJECT_RANGE.start, REJECT_RANGE.end],
+      );
+      expect(rows.length).toBeGreaterThan(0);
+      expect(rows.every((r: { status: string }) => r.status === 'Unreported')).toBe(true);
     });
 
     it(
-      'GET /school-admin/leaves list item shape reveals which controller ' +
-        'implementation answers GET too (extra controller includes ' +
-        '`substitute_required` + `approver`; leaves.controller.ts does not)',
+      'rejects a PATCH with a missing/invalid action instead of silently no-op\'ing ' +
+        '(regression: this used to fall back to the leave\'s current status and return 200 ' +
+        'OK with no actual change, unlike the equivalent admin endpoint which already threw)',
       async () => {
-        const res = await request(app.getHttpServer())
-          .get('/school-admin/leaves')
+        const thirdLeaveId = await createLeave({ start: '2026-08-17', end: '2026-08-18' });
+
+        const missingBody = await request(app.getHttpServer())
+          .patch(`/school-admin/leaves/${thirdLeaveId}`)
+          .set(...auth)
+          .send({})
+          .expect(400);
+        expect(missingBody.body.message).toBeTruthy();
+
+        const invalidAction = await request(app.getHttpServer())
+          .patch(`/school-admin/leaves/${thirdLeaveId}`)
+          .set(...auth)
+          .send({ action: 'not-a-real-action' })
+          .expect(400);
+        expect(invalidAction.body.message).toBeTruthy();
+
+        // Confirm it's genuinely untouched — still Pending, not silently
+        // re-written to itself.
+        const getRes = await request(app.getHttpServer())
+          .get(`/school-admin/leaves/${thirdLeaveId}`)
           .set(...auth)
           .expect(200);
-        const found = res.body.leaves.find((l: any) => l.id === leaveId);
-        expect(found).toBeTruthy();
-        const isExtraControllerShape = 'substitute_required' in found;
-        // eslint-disable-next-line no-console
-        console.log(
-          '[duplicate-route check] GET /school-admin/leaves winner:',
-          isExtraControllerShape
-            ? 'SchoolAdminExtraController'
-            : 'SchoolAdminLeavesController',
-        );
-        expect(typeof isExtraControllerShape).toBe('boolean');
+        expect(['Pending', 'pending']).toContain(getRes.body.leave.status);
       },
     );
   });

@@ -10,6 +10,11 @@ import { validatePasswordStrength } from '../../common/utils/password.util';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
+import {
+  normalizeWeekdays,
+  WEEKDAY_NAMES,
+  DEFAULT_OPERATING_DAYS,
+} from '../../common/utils/weekdays.util';
 
 type SchoolAssignment = {
   school_id: string;
@@ -22,17 +27,17 @@ type SchoolAssignment = {
   working_days?: number[];
   /** When this working-days pattern takes effect (YYYY-MM-DD); defaults to today. */
   effective_from?: string;
+  /** Calendar date the teacher's assignment to this school begins (YYYY-MM-DD); optional, no default. */
+  assigned_from?: string;
+  /** Calendar date the teacher's assignment to this school ends (YYYY-MM-DD); optional — absent/null means ongoing. */
+  assigned_until?: string;
   max_students_per_session?: number;
   is_primary?: boolean;
 };
 
 /** Dedupe/sort/clamp to 0-6; falls back to Mon-Fri when absent or empty. */
 function normalizeWorkingDays(input?: number[]): number[] {
-  if (!Array.isArray(input)) return [1, 2, 3, 4, 5];
-  const days = [...new Set(input.map((d) => Number(d)).filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort(
-    (a, b) => a - b,
-  );
-  return days.length > 0 ? days : [1, 2, 3, 4, 5];
+  return normalizeWeekdays(input, [1, 2, 3, 4, 5]);
 }
 
 /** Clamp/validate an effective-from date string; falls back to today (IST). */
@@ -41,6 +46,14 @@ function normalizeEffectiveFrom(input?: string): Date {
     return new Date(`${input}T00:00:00.000Z`);
   }
   return new Date(`${getTodayIstDateStr()}T00:00:00.000Z`);
+}
+
+/** Parses an optional assigned_from/assigned_until date string; unlike effective_from, absent means "no constraint" (null), not "today". */
+function normalizeAssignedDate(input?: string): Date | null {
+  if (input && /^\d{4}-\d{2}-\d{2}$/.test(input)) {
+    return new Date(`${input}T00:00:00.000Z`);
+  }
+  return null;
 }
 
 /** Per-school grade with sections for API response */
@@ -78,6 +91,8 @@ export type TeacherDetailResponse = {
     gradesAssigned: GradeAssignedDto[];
     subjects: string[];
     workingDays: number[];
+    assignedFrom: string | null;
+    assignedUntil: string | null;
     sectionsAssignedToOtherTeachers?: SectionAssignedToOtherDto[];
   }>;
 };
@@ -97,6 +112,8 @@ type UserWithRelations = Awaited<
     school: { name: string };
     subjects: string[];
     workingDays: number[];
+    assignedFrom: Date | null;
+    assignedUntil: Date | null;
   }>;
   teacherSectionAssignments: Array<{
     sectionId: string;
@@ -153,6 +170,12 @@ export class AdminTeachersService {
       ),
       subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
       workingDays: normalizeWorkingDays(ts.workingDays),
+      assignedFrom: ts.assignedFrom
+        ? ts.assignedFrom.toISOString().split('T')[0]
+        : null,
+      assignedUntil: ts.assignedUntil
+        ? ts.assignedUntil.toISOString().split('T')[0]
+        : null,
       sectionsAssignedToOtherTeachers:
         otherAssignmentsBySchool?.[ts.schoolId] ?? [],
     }));
@@ -179,6 +202,7 @@ export class AdminTeachersService {
     schoolId?: string,
     limit?: number,
     options?: { page?: string; search?: string; sort?: string; order?: string },
+    currentUser?: { id: number; role: Role; tenantId?: string },
   ): Promise<{
     teachers: TeacherDetailResponse[];
     total?: number;
@@ -186,10 +210,29 @@ export class AdminTeachersService {
     limit?: number;
     totalPages?: number;
   }> {
+    // SECURITY: this controller allows Role.school_admin (for the
+    // school-admin UI, which is actually served by a separate endpoint —
+    // this one is reachable directly too since the role guard permits it).
+    // Without forcing scope here, a school-admin JWT could pass no
+    // `school_id` (or someone else's) and read every school's teacher
+    // roster — the same class of bug already fixed on get() below
+    // (SECURITY FIX HIGH-02), just never applied to list().
+    let effectiveSchoolId = schoolId;
+    if (currentUser?.role === Role.school_admin) {
+      if (!currentUser.tenantId) {
+        throw new BadRequestException(
+          'School admin must have a school assigned',
+        );
+      }
+      effectiveSchoolId = currentUser.tenantId;
+    }
+
     const where = {
       role: Role.teacher,
       deletedAt: null, // exclude trashed teachers
-      ...(schoolId ? { teacherSchools: { some: { schoolId } } } : {}),
+      ...(effectiveSchoolId
+        ? { teacherSchools: { some: { schoolId: effectiveSchoolId } } }
+        : {}),
       ...(options?.search
         ? {
             OR: [
@@ -365,6 +408,31 @@ export class AdminTeachersService {
   /**
    * Throws BadRequestException if any of the given sections are already assigned to another teacher in the school.
    */
+  /**
+   * A teacher's working days at a school must be a subset of that school's
+   * own operatingDays — School.operatingDays previously didn't exist, so
+   * nothing constrained a teacher's working-day picker against whether the
+   * school actually holds classes that day at all.
+   */
+  private async assertWorkingDaysWithinSchoolOperatingDays(
+    schoolId: string,
+    workingDays: number[],
+  ): Promise<void> {
+    const school = await this.db.school.findUnique({
+      where: { id: schoolId },
+      select: { name: true, operatingDays: true },
+    });
+    if (!school) return; // schoolId validity is checked elsewhere
+    const operatingDays = school.operatingDays ?? DEFAULT_OPERATING_DAYS;
+    const disallowed = workingDays.filter((d) => !operatingDays.includes(d));
+    if (disallowed.length > 0) {
+      const names = disallowed.map((d) => WEEKDAY_NAMES[d]).join(', ');
+      throw new BadRequestException(
+        `${school.name} doesn't operate on ${names} — remove ${disallowed.length > 1 ? 'these days' : 'this day'} from this teacher's working days.`,
+      );
+    }
+  }
+
   private async checkDuplicateSectionAssignments(
     schoolId: string,
     sectionIds: string[],
@@ -497,6 +565,8 @@ export class AdminTeachersService {
       workingDays: number[];
       workingDaysPerWeek: number;
       effectiveFrom: Date;
+      assignedFrom: Date | null;
+      assignedUntil: Date | null;
       sectionIdsToAssign: string[];
     }> = [];
     for (const assignment of schoolAssignments) {
@@ -507,6 +577,14 @@ export class AdminTeachersService {
       const workingDays = normalizeWorkingDays(assignment.working_days);
       const workingDaysPerWeek = workingDays.length;
       const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
+      const assignedFrom = normalizeAssignedDate(assignment.assigned_from);
+      const assignedUntil = normalizeAssignedDate(assignment.assigned_until);
+      if (assignedFrom && assignedUntil && assignedUntil < assignedFrom) {
+        throw new BadRequestException(
+          `assigned_until must not be before assigned_from for school ${schoolId}`,
+        );
+      }
+      await this.assertWorkingDaysWithinSchoolOperatingDays(schoolId, workingDays);
 
       const sectionIdsToAssign: string[] = [];
       for (const gs of gradeSectionsAssigned) {
@@ -527,6 +605,8 @@ export class AdminTeachersService {
         workingDays,
         workingDaysPerWeek,
         effectiveFrom,
+        assignedFrom,
+        assignedUntil,
         sectionIdsToAssign,
       });
     }
@@ -569,6 +649,8 @@ export class AdminTeachersService {
         workingDays,
         workingDaysPerWeek,
         effectiveFrom,
+        assignedFrom,
+        assignedUntil,
         sectionIdsToAssign,
       } of resolvedAssignments) {
         await this.checkDuplicateSectionAssignments(
@@ -585,11 +667,15 @@ export class AdminTeachersService {
             subjects,
             workingDays,
             workingDaysPerWeek,
+            assignedFrom,
+            assignedUntil,
           },
           update: {
             subjects,
             workingDays,
             workingDaysPerWeek,
+            assignedFrom,
+            assignedUntil,
           },
         });
         // Brand-new assignment — always record an initial history entry.
@@ -762,6 +848,14 @@ export class AdminTeachersService {
           before.length !== workingDays.length ||
           before.some((d, i) => d !== workingDays[i]);
         const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
+        const assignedFrom = normalizeAssignedDate(assignment.assigned_from);
+        const assignedUntil = normalizeAssignedDate(assignment.assigned_until);
+        if (assignedFrom && assignedUntil && assignedUntil < assignedFrom) {
+          throw new BadRequestException(
+            `assigned_until must not be before assigned_from for school ${schoolId}`,
+          );
+        }
+        await this.assertWorkingDaysWithinSchoolOperatingDays(schoolId, workingDays);
 
         if (changed) {
           await this.assertEffectiveFromNotBeforeStart(
@@ -786,11 +880,15 @@ export class AdminTeachersService {
               subjects,
               workingDays,
               workingDaysPerWeek,
+              assignedFrom,
+              assignedUntil,
             },
             update: {
               subjects,
               workingDays,
               workingDaysPerWeek,
+              assignedFrom,
+              assignedUntil,
             },
           }),
           ...(changed

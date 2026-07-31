@@ -7,6 +7,8 @@ import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
+import { toReportUiStatus } from '../../common/utils/report-status.util';
+import { getTodayIstDateStr } from '../../common/utils/date.util';
 
 @Injectable()
 export class TeacherReportsService {
@@ -15,14 +17,6 @@ export class TeacherReportsService {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly teacherSchedule: TeacherScheduleService,
   ) {}
-
-  private static toUiStatus(status?: string | null) {
-    const s = (status ?? 'submitted').toLowerCase();
-    if (s === 'approved') return 'Approved';
-    if (s === 'rejected') return 'Flagged';
-    if (s === 'submitted') return 'Pending';
-    return status ?? 'Pending';
-  }
 
   private static tryComputeDurationHours(startTime?: string, endTime?: string) {
     const s = (startTime ?? '').trim();
@@ -83,6 +77,12 @@ export class TeacherReportsService {
     if (isNaN(reportDate.getTime())) {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
+    // A report describes teaching that already happened — nothing client- or
+    // server-side previously stopped submitting one for an arbitrary future
+    // date (and its accompanying attendance side-effect).
+    if (dateStr > getTodayIstDateStr()) {
+      throw new BadRequestException('Cannot submit a report for a future date.');
+    }
 
     // A teacher can only submit reports for a school they're actually
     // assigned to — without this, a report could silently attach to a
@@ -139,70 +139,94 @@ export class TeacherReportsService {
             body.end_time,
           );
 
-    const report = await this.db.teacherReport.create({
-      data: {
-        teacherId,
-        schoolId,
-        reportDate,
-        grade: body.grade ?? null,
-        periodId: body.period_id,
-        status: 'submitted',
-        startTime: body.start_time?.trim() || null,
-        endTime: body.end_time?.trim() || null,
-        topicsTaught: body.topics_taught?.trim() || null,
-        activities: body.activities?.trim() || null,
-        studentCount:
-          typeof body.student_count === 'number' &&
-          !Number.isNaN(body.student_count)
-            ? body.student_count
-            : null,
-        durationHours:
-          typeof computedDuration === 'number' &&
-          !Number.isNaN(computedDuration)
-            ? computedDuration
-            : null,
-        notes: body.notes?.trim() || null,
-      },
-    });
-
-    // Mark attendance as Present only when ALL scheduled periods for that day have been reported.
-    // This ensures the UI promise ("submit all reports → marked Present") matches backend behavior.
-    const dateEnd = new Date(dateOnly);
-    dateEnd.setUTCHours(23, 59, 59, 999);
-
     // Derive dayOfWeek from the date string to stay consistent with the local calendar date.
     const [fy, fm, fd] = dateStr.split('-').map(Number);
     const dayOfWeek = new Date(fy, fm - 1, fd).getDay(); // 0=Sun..6=Sat
+    const dateEnd = new Date(dateOnly);
+    dateEnd.setUTCHours(23, 59, 59, 999);
 
-    const scheduledPeriods = await this.db.classSchedule.findMany({
-      where: { teacherId, schoolId, dayOfWeek, isActive: true },
-      select: { periodId: true },
-    });
-    const scheduledPeriodIds = [
-      ...new Set(scheduledPeriods.map((s) => s.periodId).filter(Boolean)),
-    ];
+    // Report creation + the attendance side-effect it implies must succeed
+    // or fail together — previously these were two independent calls with
+    // no transaction, so a failure in the attendance upsert could leave a
+    // report committed with no corresponding attendance update.
+    const { report, attendanceMarkedPresent } = await this.db.$transaction(
+      async (tx) => {
+        const created = await tx.teacherReport.create({
+          data: {
+            teacherId,
+            schoolId,
+            reportDate,
+            grade: body.grade ?? null,
+            periodId: body.period_id,
+            status: 'submitted',
+            startTime: body.start_time?.trim() || null,
+            endTime: body.end_time?.trim() || null,
+            topicsTaught: body.topics_taught?.trim() || null,
+            activities: body.activities?.trim() || null,
+            studentCount:
+              typeof body.student_count === 'number' &&
+              !Number.isNaN(body.student_count)
+                ? body.student_count
+                : null,
+            durationHours:
+              typeof computedDuration === 'number' &&
+              !Number.isNaN(computedDuration)
+                ? computedDuration
+                : null,
+            notes: body.notes?.trim() || null,
+          },
+        });
 
-    const allCovered =
-      scheduledPeriodIds.length === 0 // no schedule → any report counts as Present
-        ? true
-        : (await this.db.teacherReport.count({
+        // Mark attendance as Present only when ALL scheduled periods for
+        // that day have been reported — this ensures the UI promise
+        // ("submit all reports → marked Present") matches backend behavior.
+        const scheduledPeriods = await tx.classSchedule.findMany({
+          where: { teacherId, schoolId, dayOfWeek, isActive: true },
+          select: { periodId: true },
+        });
+        const scheduledPeriodIds = [
+          ...new Set(scheduledPeriods.map((s) => s.periodId).filter(Boolean)),
+        ];
+
+        const allCovered =
+          scheduledPeriodIds.length === 0 // no schedule → any report counts as Present
+            ? true
+            : (await tx.teacherReport.count({
+                where: {
+                  teacherId,
+                  schoolId,
+                  reportDate: { gte: dateOnly, lte: dateEnd },
+                  periodId: { in: scheduledPeriodIds },
+                },
+              })) >= scheduledPeriodIds.length;
+
+        let marked = false;
+        if (allCovered) {
+          // Never clobber an approved-leave day — a teacher on approved
+          // leave who still submits a report for part of the day (e.g.
+          // covering one class) must not have their leave status silently
+          // overwritten to Present.
+          const existingAttendance = await tx.attendance.findUnique({
             where: {
-              teacherId,
-              schoolId,
-              reportDate: { gte: dateOnly, lte: dateEnd },
-              periodId: { in: scheduledPeriodIds },
+              teacherId_schoolId_date: { teacherId, schoolId, date: dateOnly },
             },
-          })) >= scheduledPeriodIds.length;
+            select: { status: true },
+          });
+          if (existingAttendance?.status !== 'Leave-Approved') {
+            await tx.attendance.upsert({
+              where: {
+                teacherId_schoolId_date: { teacherId, schoolId, date: dateOnly },
+              },
+              create: { teacherId, schoolId, date: dateOnly, status: 'Present' },
+              update: { status: 'Present' },
+            });
+            marked = true;
+          }
+        }
 
-    if (allCovered) {
-      await this.db.attendance.upsert({
-        where: {
-          teacherId_schoolId_date: { teacherId, schoolId, date: dateOnly },
-        },
-        create: { teacherId, schoolId, date: dateOnly, status: 'Present' },
-        update: { status: 'Present' },
-      });
-    }
+        return { report: created, attendanceMarkedPresent: marked };
+      },
+    );
 
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
@@ -229,7 +253,7 @@ export class TeacherReportsService {
         period_id: report.periodId,
         start_time: (report as { startTime?: string | null }).startTime ?? null,
         end_time: (report as { endTime?: string | null }).endTime ?? null,
-        report_status: TeacherReportsService.toUiStatus(report.status),
+        report_status: toReportUiStatus(report.status),
         topics_taught: report.topicsTaught,
         activities:
           (report as { activities?: string | null }).activities ?? null,
@@ -237,6 +261,10 @@ export class TeacherReportsService {
         duration_hours: report.durationHours,
         notes: report.notes,
       },
+      // Lets the frontend show an accurate toast — attendance is only
+      // actually flipped to Present once every scheduled period for the day
+      // has been reported, and never when the day is already Leave-Approved.
+      attendance_marked_present: attendanceMarkedPresent,
     };
   }
 
@@ -271,6 +299,22 @@ export class TeacherReportsService {
         where.reportDate.lte = new Date(query.to + 'T23:59:59.999Z');
     }
     const limit = Math.min(Number(query.limit) || 100, 500);
+    // Real COUNT(*) queries, independent of the `take` cap above — the
+    // Analytics page's "Total Reports (All time)" and "Approval Rate" cards
+    // used to be derived from this same capped `findMany` result, silently
+    // undercounting for any teacher with more than `limit` (max 500) reports
+    // and dead-code-listing 'Rejected'/'Reviewed' reports as a nonexistent
+    // 'Flagged' status. `approved`/`rejected` deliberately exclude
+    // 'submitted'/'reviewed' so "Approval Rate" can be computed against only
+    // the reports an admin has actually decided on, not diluted by ones
+    // still awaiting review.
+    const [total, pending, reviewed, approved, rejected] = await Promise.all([
+      this.db.teacherReport.count({ where }),
+      this.db.teacherReport.count({ where: { ...where, status: 'submitted' } }),
+      this.db.teacherReport.count({ where: { ...where, status: 'reviewed' } }),
+      this.db.teacherReport.count({ where: { ...where, status: 'approved' } }),
+      this.db.teacherReport.count({ where: { ...where, status: 'rejected' } }),
+    ]);
     const reports = await this.db.teacherReport.findMany({
       where,
       orderBy: { reportDate: 'desc' },
@@ -285,13 +329,20 @@ export class TeacherReportsService {
         period_id: r.periodId,
         start_time: (r as { startTime?: string | null }).startTime ?? null,
         end_time: (r as { endTime?: string | null }).endTime ?? null,
-        report_status: TeacherReportsService.toUiStatus(r.status),
+        report_status: toReportUiStatus(r.status),
         topics_taught: r.topicsTaught,
         activities: (r as { activities?: string | null }).activities ?? null,
         student_count: r.studentCount,
         duration_hours: r.durationHours,
         notes: r.notes,
       })),
+      stats: {
+        total,
+        pending,
+        reviewed,
+        approved,
+        rejected,
+      },
     };
   }
 }

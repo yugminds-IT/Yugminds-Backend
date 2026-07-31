@@ -50,6 +50,34 @@ describe('school-admin profile', () => {
     expect(getRes.body.phone).toBe('9998887777');
   });
 
+  it(
+    'ignores a blank/whitespace-only full_name instead of clearing it ' +
+      '(regression: this endpoint used to trim to \'\' and still write it as null, ' +
+      'silently wiping the name — unlike AdminProfileService.update, which treats a ' +
+      'blank value as "no change requested")',
+    async () => {
+      // Confirm there's a real name in place first (set by the earlier test
+      // in this file), so a null-write would be an observable regression.
+      const before = await request(app.getHttpServer())
+        .get('/school-admin/profile')
+        .set('Authorization', `Bearer ${fixture.schoolAdmin.token}`)
+        .expect(200);
+      expect(before.body.full_name).toBeTruthy();
+
+      await request(app.getHttpServer())
+        .patch('/school-admin/profile')
+        .set('Authorization', `Bearer ${fixture.schoolAdmin.token}`)
+        .send({ full_name: '   ' })
+        .expect(200);
+
+      const after = await request(app.getHttpServer())
+        .get('/school-admin/profile')
+        .set('Authorization', `Bearer ${fixture.schoolAdmin.token}`)
+        .expect(200);
+      expect(after.body.full_name).toBe(before.body.full_name);
+    },
+  );
+
   it('rejects unauthenticated access', async () => {
     await request(app.getHttpServer()).get('/school-admin/profile').expect(401);
   });

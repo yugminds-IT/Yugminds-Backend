@@ -52,12 +52,12 @@ export class TeacherCalendarController {
       teacherSchools.map((s) => [s.schoolId, s.school?.name ?? '']),
     );
 
-    const [calendarResult, schedule] = await Promise.all([
+    const [calendarResult, { schedule, unassignedDates }] = await Promise.all([
       this.calendar.listForSchools(assignedSchoolIds, y, m),
       this.resolveMonthlySchedule(user.id, Number(y), Number(m), schoolNameById),
     ]);
 
-    return { ...calendarResult, schedule };
+    return { ...calendarResult, schedule, unassigned_dates: unassignedDates };
   }
 
   /**
@@ -75,7 +75,7 @@ export class TeacherCalendarController {
     year: number,
     month: number,
     schoolNameById: Map<string, string>,
-  ): Promise<TeacherScheduleDayDto[]> {
+  ): Promise<{ schedule: TeacherScheduleDayDto[]; unassignedDates: string[] }> {
     const history = await this.db.teacherWorkingDaysHistory.findMany({
       where: { teacherId },
       select: { schoolId: true, workingDays: true, effectiveFrom: true },
@@ -92,6 +92,14 @@ export class TeacherCalendarController {
     const start = new Date(Date.UTC(year, month - 1, 1));
     const end = new Date(Date.UTC(year, month, 0));
     const schedule: TeacherScheduleDayDto[] = [];
+    // A day with no scheduled school is ambiguous on its own — it could mean
+    // "genuinely off under your current pattern" (e.g. Sunday) or "you had
+    // no assignment at ANY school yet" (true for every weekday before your
+    // first-ever assignment, not just the structurally-off ones). The
+    // frontend previously labeled both "Weekly off," which is only accurate
+    // for the first case — flag the second explicitly so it can say
+    // something like "Not yet assigned" instead.
+    const unassignedDates: string[] = [];
     for (
       let d = new Date(start);
       d <= end;
@@ -99,7 +107,9 @@ export class TeacherCalendarController {
     ) {
       const dayOfWeek = d.getUTCDay();
       const dateStr = d.toISOString().split('T')[0];
+      let assignedSomewhere = false;
       for (const [schoolId, entries] of historyBySchool) {
+        if (entries.some((e) => e.effectiveFrom <= d)) assignedSomewhere = true;
         if (!resolveWorkingDaysForDate(entries, d).includes(dayOfWeek)) continue;
         schedule.push({
           date: dateStr,
@@ -107,7 +117,8 @@ export class TeacherCalendarController {
           school_name: schoolNameById.get(schoolId) ?? '',
         });
       }
+      if (!assignedSomewhere) unassignedDates.push(dateStr);
     }
-    return schedule;
+    return { schedule, unassignedDates };
   }
 }

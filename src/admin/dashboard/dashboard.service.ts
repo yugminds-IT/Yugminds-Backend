@@ -523,6 +523,10 @@ export class AdminDashboardService {
 
   async getAssignmentAnalytics() {
     const assignments = await this.db.assignment.findMany({
+      // Matches school-admin's equivalent counts (stats.service.ts) — an
+      // unpublished draft assignment isn't visible to any student and
+      // shouldn't count toward "Assignments" or a school's assignments_created.
+      where: { isPublished: true },
       select: {
         id: true,
         title: true,
@@ -530,6 +534,7 @@ export class AdminDashboardService {
         courseId: true,
         chapterId: true,
         retakeEnabled: true,
+        retakeScoringRule: true,
         assignmentType: true,
       },
     });
@@ -637,16 +642,34 @@ export class AdminDashboardService {
       }
     }
 
-    // Pick best/latest attempt per (student, assignment) to avoid double-counting retakes
+    // Pick best/latest attempt per (student, assignment) to avoid
+    // double-counting retakes — honoring each assignment's own
+    // retakeScoringRule ("highest" vs "latest"), same rule the canonical
+    // StudentRankingService applies. The previous "higher score OR higher
+    // attempt number" logic ignored the rule entirely, so a 'latest'-rule
+    // assignment where a retake scored lower than an earlier attempt could
+    // still have its higher-scoring earlier attempt win here — disagreeing
+    // with what the canonical service (and every other dashboard) reports
+    // for the identical submission.
+    const retakeRuleByAssignment = new Map(
+      assignments.map((a) => [a.id, String(a.retakeScoringRule ?? 'latest').toLowerCase()]),
+    );
+    const submissionsByKeyInOrder = [...submissions].sort(
+      (a, b) => a.attemptNumber - b.attemptNumber,
+    );
     const bestByKey = new Map<string, (typeof submissions)[0]>();
-    for (const s of submissions) {
+    for (const s of submissionsByKeyInOrder) {
       const key = `${s.studentId}:${s.assignmentId}`;
+      const rule = retakeRuleByAssignment.get(s.assignmentId) ?? 'latest';
       const existing = bestByKey.get(key);
-      if (
-        !existing ||
-        Number(s.score ?? 0) > Number(existing.score ?? 0) ||
-        s.attemptNumber > existing.attemptNumber
-      ) {
+      if (!existing) {
+        bestByKey.set(key, s);
+      } else if (rule === 'highest') {
+        if (Number(s.score ?? 0) > Number(existing.score ?? 0)) {
+          bestByKey.set(key, s);
+        }
+      } else {
+        // latest: ascending attempt order → last one seen wins.
         bestByKey.set(key, s);
       }
     }

@@ -54,6 +54,21 @@ describe('Teacher reports', () => {
     ).toBe(true);
   });
 
+  it('GET /teacher/reports includes real stats alongside the list', async () => {
+    const res = await request(app.getHttpServer())
+      .get(`/teacher/reports?school_id=${fixture.schoolId}`)
+      .set(...teacherAuth)
+      .expect(200);
+    expect(res.body.stats).toBeDefined();
+    expect(res.body.stats.total).toBeGreaterThanOrEqual(1);
+    expect(
+      res.body.stats.pending +
+        res.body.stats.reviewed +
+        res.body.stats.approved +
+        res.body.stats.rejected,
+    ).toBe(res.body.stats.total);
+  });
+
   it('rejects a report missing period_id', async () => {
     await request(app.getHttpServer())
       .post('/teacher/reports')
@@ -118,6 +133,40 @@ describe('Teacher reports', () => {
       ),
     ).toBe(false);
   });
+
+  it('rejects a report for a future date', async () => {
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const futureDateStr = tomorrow.toISOString().split('T')[0];
+    const res = await request(app.getHttpServer())
+      .post('/teacher/reports')
+      .set(...teacherAuth)
+      .send({
+        school_id: fixture.schoolId,
+        date: futureDateStr,
+        period_id: fixture.periodId,
+        topics_taught: 'Should not be allowed',
+      });
+    expect(res.status).toBe(400);
+  });
+
+  it(
+    'response includes attendance_marked_present, reflecting whether the day\'s scheduled ' +
+      'periods were fully covered by this submission (not just an unconditional "true")',
+    async () => {
+      const res = await request(app.getHttpServer())
+        .post('/teacher/reports')
+        .set(...teacherAuth)
+        .send({
+          school_id: fixture.schoolId,
+          date: '2026-02-14',
+          period_id: fixture.periodId,
+          topics_taught: 'Attendance-marked field check',
+        })
+        .expect(201);
+      expect(typeof res.body.attendance_marked_present).toBe('boolean');
+    },
+  );
 
   it('rejects unauthenticated and non-teacher access', async () => {
     await request(app.getHttpServer()).get('/teacher/reports').expect(401);

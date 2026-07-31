@@ -2,7 +2,7 @@ import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from '../admin/support/app';
 import { authHeader } from '../admin/support/auth';
-import { closePool } from '../admin/support/db';
+import { closePool, pool } from '../admin/support/db';
 import {
   createQaFixture,
   teardownQaFixture,
@@ -112,5 +112,74 @@ describe('Teacher attendance', () => {
       .get('/teacher/attendance?school_id=some-other-school')
       .set(...teacherAuth)
       .expect(403);
+  });
+
+  it("monthly attendance denominator never counts days later this month than today (future-date bug regression)", async () => {
+    const teacherId = fixture.teachers[0].id;
+    const schoolId = fixture.schoolId;
+    const now = new Date();
+    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const todayUTC = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const yearMonth = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+
+    // Replace whatever working-days history the fixture set up with a
+    // single row covering every weekday for the whole month — makes every
+    // date from the 1st through today (AND every date later this month) a
+    // "working day" per the schedule, so the test can assert precisely how
+    // many of them the denominator actually counted.
+    await pool.query(
+      `DELETE FROM "TeacherWorkingDaysHistory" WHERE "teacherId" = $1 AND "schoolId" = $2`,
+      [teacherId, schoolId],
+    );
+    // One day before month start, not exactly midnight month-start — the
+    // "effectiveFrom" column is a Postgres timestamp WITHOUT time zone, and
+    // node-pg serializes a JS Date's LOCAL wall-clock fields into it (not
+    // UTC), so an exact-UTC-midnight value can silently land a few hours
+    // into day 1 once round-tripped through the local test-runner's
+    // timezone offset — pushing it safely into the prior day sidesteps that
+    // entirely rather than relying on exact-midnight equality.
+    const historyEffectiveFrom = new Date(monthStart.getTime() - 24 * 60 * 60 * 1000);
+    await pool.query(
+      `INSERT INTO "TeacherWorkingDaysHistory" (id, "teacherId", "schoolId", "effectiveFrom", "workingDays", "createdAt")
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
+      [teacherId, schoolId, historyEffectiveFrom, [0, 1, 2, 3, 4, 5, 6]],
+    );
+
+    // Mark today Present directly (bypassing the report-submission flow,
+    // which requires a period actually scheduled today).
+    await pool.query(
+      `INSERT INTO "Attendance" (id, "teacherId", "schoolId", date, status)
+       VALUES (gen_random_uuid(), $1, $2, $3, 'Present')
+       ON CONFLICT ("teacherId", "schoolId", date) DO UPDATE SET status = 'Present'`,
+      [teacherId, schoolId, todayUTC],
+    );
+
+    try {
+      const res = await request(app.getHttpServer())
+        .get(`/teacher/attendance/monthly?school_id=${schoolId}&yearMonth=${yearMonth}`)
+        .set(...teacherAuth)
+        .expect(200);
+      const monthEntry = res.body.monthlyData.find(
+        (m: any) => m.month === yearMonth,
+      );
+      expect(monthEntry).toBeDefined();
+      expect(monthEntry.present_days).toBe(1);
+
+      // Every day from the 1st through today is a working day (7/7 pattern),
+      // so total_working_days must equal today's day-of-month — NOT the
+      // full month's day count, which would include not-yet-happened days.
+      const expectedWorkingDaysSoFar = now.getUTCDate();
+      expect(monthEntry.total_working_days).toBe(expectedWorkingDaysSoFar);
+      expect(monthEntry.attendance_percentage).toBe(
+        Math.round((1 / expectedWorkingDaysSoFar) * 100),
+      );
+    } finally {
+      await pool.query(
+        `DELETE FROM "Attendance" WHERE "teacherId" = $1 AND "schoolId" = $2 AND date = $3`,
+        [teacherId, schoolId, todayUTC],
+      );
+    }
   });
 });

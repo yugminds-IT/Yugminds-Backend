@@ -35,6 +35,27 @@ describe('Teacher classes, periods, schedules, schools', () => {
     );
   });
 
+  it(
+    'GET /teacher/schools includes each assignment\'s subjects ' +
+      '(regression: this used to be entirely unselected, which rendered as a ' +
+      "bare stray comma in the Settings page's \"{city}, {state}\" line since " +
+      'both were always undefined)',
+    async () => {
+      const res = await request(app.getHttpServer())
+        .get('/teacher/schools')
+        .set(...authHeader(fixture.teachers[0].token))
+        .expect(200);
+      const school = res.body.schools.find(
+        (s: any) => s.id === fixture.schoolId,
+      );
+      expect(school).toBeDefined();
+      expect(school.assignment).toBeDefined();
+      expect(school.assignment.subjects).toEqual(
+        expect.arrayContaining(['General']),
+      );
+    },
+  );
+
   it('GET /teacher/schools is empty-ish for a teacher with no assignments (401/403 not required, just no fixture school)', async () => {
     const res = await request(app.getHttpServer())
       .get('/teacher/schools')
@@ -46,18 +67,30 @@ describe('Teacher classes, periods, schedules, schools', () => {
     );
   });
 
-  it('GET /teacher/classes returns the assigned grade/section for teacher[0]', async () => {
-    const res = await request(app.getHttpServer())
-      .get(`/teacher/classes?school_id=${fixture.schoolId}`)
-      .set(...authHeader(fixture.teachers[0].token))
-      .expect(200);
-    expect(Array.isArray(res.body.classes)).toBe(true);
-    expect(res.body.classes.length).toBeGreaterThanOrEqual(1);
-    const cls = res.body.classes[0];
-    expect(cls.grade).toBe(fixture.grade);
-    expect(cls.section).toBe(fixture.section);
-    expect(cls.school_id).toBe(fixture.schoolId);
-  });
+  it(
+    'GET /teacher/classes returns the assigned grade/section for teacher[0], with real ' +
+      'is_active/school_name (regression: these used to be entirely unselected, so the ' +
+      'frontend always rendered every class card as "Inactive" regardless of the real ' +
+      "TeacherSectionAssignment.status, which defaults to 'active')",
+    async () => {
+      const res = await request(app.getHttpServer())
+        .get(`/teacher/classes?school_id=${fixture.schoolId}`)
+        .set(...authHeader(fixture.teachers[0].token))
+        .expect(200);
+      expect(Array.isArray(res.body.classes)).toBe(true);
+      expect(res.body.classes.length).toBeGreaterThanOrEqual(1);
+      const cls = res.body.classes[0];
+      expect(cls.grade).toBe(fixture.grade);
+      expect(cls.section).toBe(fixture.section);
+      expect(cls.school_id).toBe(fixture.schoolId);
+      expect(cls.is_active).toBe(true);
+      expect(cls.school_name).toBeTruthy();
+      // These were never real (no such column exists) — confirm the
+      // endpoint no longer fabricates them.
+      expect(cls.max_students).toBeUndefined();
+      expect(cls.academic_year).toBeUndefined();
+    },
+  );
 
   it('GET /teacher/periods requires school_id (empty without it) and returns periods with it', async () => {
     const noSchool = await request(app.getHttpServer())

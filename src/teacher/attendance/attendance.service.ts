@@ -300,10 +300,28 @@ export class TeacherAttendanceService {
       }
     }
 
-    // Walk through every day in the month
+    // Walk through every day in the month, but never past today for the
+    // CURRENT month — a not-yet-happened working day has no Attendance row
+    // yet and would otherwise sit in the denominator as an automatic miss,
+    // artificially deflating attendance_percentage (e.g. present every day
+    // so far this month would still show <100% because tomorrow's
+    // not-yet-scheduled-to-happen working day is counted as a 0). Past
+    // months are unaffected since monthEnd is already in the past for them.
+    const todayUTC = new Date();
+    const walkEnd =
+      year === todayUTC.getUTCFullYear() && month === todayUTC.getUTCMonth() + 1
+        ? new Date(
+            Date.UTC(
+              todayUTC.getUTCFullYear(),
+              todayUTC.getUTCMonth(),
+              todayUTC.getUTCDate(),
+            ),
+          )
+        : monthEnd;
+
     const workingDates = new Map<string, number>();
     const cur = new Date(monthStart);
-    while (cur <= monthEnd) {
+    while (cur <= monthEnd && cur <= walkEnd) {
       const dateStr = cur.toISOString().split('T')[0];
       const dow = cur.getUTCDay();
 

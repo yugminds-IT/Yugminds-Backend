@@ -10,20 +10,29 @@ export interface ListTeacherReportsOptions {
   to?: string;
   search?: string;
   limit?: string;
+  status?: string;
 }
 
 @Injectable()
 export class AdminTeacherReportsService {
   constructor(private readonly db: DatabaseService) {}
 
+  private static readonly VALID_STATUSES = [
+    'submitted',
+    'reviewed',
+    'approved',
+    'rejected',
+  ];
+
   async list(opts: ListTeacherReportsOptions) {
-    const { schoolId, teacherId: teacherIdParam, grade, date, from, to, search, limit } = opts;
+    const { schoolId, teacherId: teacherIdParam, grade, date, from, to, search, limit, status } = opts;
 
     const where: {
       schoolId?: string;
       teacherId?: number;
       grade?: string;
       reportDate?: { gte?: Date; lte?: Date };
+      status?: string;
     } = {};
 
     if (schoolId) {
@@ -51,15 +60,35 @@ export class AdminTeacherReportsService {
       if (to) where.reportDate.lte = new Date(`${to}T23:59:59.999Z`);
     }
 
+    if (status && AdminTeacherReportsService.VALID_STATUSES.includes(status)) {
+      where.status = status;
+    }
+
     const take = limit
       ? Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500)
       : 100;
 
-    const reports = await this.db.teacherReport.findMany({
-      where,
-      orderBy: { reportDate: 'desc' },
-      take,
-    });
+    // `where` without `status` — the stats breakdown always reflects every
+    // status for the current structural filters (school/teacher/grade/date),
+    // regardless of which status the list itself is currently filtered to.
+    const { status: _statusFilter, ...statsWhere } = where;
+    const [reports, total, submittedCount, reviewedCount, approvedCount, rejectedCount] =
+      await Promise.all([
+        this.db.teacherReport.findMany({
+          where,
+          orderBy: { reportDate: 'desc' },
+          take,
+        }),
+        // Real COUNT(*) queries — independent of the `take` cap above, so
+        // stats stay accurate even when a school/date range has more reports
+        // than a single page fetches (previously derived only from the
+        // capped in-memory list, silently undercounting past the cap).
+        this.db.teacherReport.count({ where: statsWhere }),
+        this.db.teacherReport.count({ where: { ...statsWhere, status: 'submitted' } }),
+        this.db.teacherReport.count({ where: { ...statsWhere, status: 'reviewed' } }),
+        this.db.teacherReport.count({ where: { ...statsWhere, status: 'approved' } }),
+        this.db.teacherReport.count({ where: { ...statsWhere, status: 'rejected' } }),
+      ]);
 
     const teacherIds = Array.from(new Set(reports.map((r) => r.teacherId)));
     const schoolIds = Array.from(new Set(reports.map((r) => r.schoolId)));
@@ -117,6 +146,7 @@ export class AdminTeacherReportsService {
           date: dateOnly,
           grade: r.grade ?? '',
           topics_taught: r.topicsTaught ?? '',
+          activities: r.activities ?? '',
           student_count: r.studentCount ?? 0,
           duration_hours: r.durationHours ?? 0,
           notes: r.notes ?? '',
@@ -158,7 +188,16 @@ export class AdminTeacherReportsService {
         return haystack.includes(searchLower);
       });
 
-    return { reports: result };
+    return {
+      reports: result,
+      stats: {
+        total,
+        submitted: submittedCount,
+        reviewed: reviewedCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+      },
+    };
   }
 
   /**

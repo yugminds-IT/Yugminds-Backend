@@ -171,6 +171,11 @@ export class AuthController {
     return this.authService.submitPasswordResetRequest(body?.email ?? '');
   }
 
+  // Keyed per-user (UserOrIpThrottlerGuard), not IP — the global default of
+  // 1200 req/min/user is far too generous for a password-guessing endpoint;
+  // a leaked/stolen access token would otherwise let an attacker brute-force
+  // the account's own current password effectively unthrottled.
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('verify-password')
   async verifyPassword(
     @CurrentUser() user: { id: number },
@@ -182,6 +187,7 @@ export class AuthController {
     );
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('update-password')
   async updatePassword(
     @CurrentUser() user: { id: number },
@@ -191,17 +197,33 @@ export class AuthController {
       password?: string;
       new_password?: string;
     },
-  ): Promise<{ success: boolean }> {
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: boolean; tokens: { accessToken: string } }> {
     const currentPassword = String(body?.current_password ?? '').trim();
     const nextPassword = String(
       body?.new_password ?? body?.password ?? '',
     ).trim();
-    await this.authService.updatePassword(
+    const tokens = await this.authService.updatePassword(
       user.id,
       currentPassword,
       nextPassword,
     );
-    return { success: true };
+
+    // The change bumps tokenVersion, invalidating the access token this very
+    // request was authenticated with — re-issue a matching refresh cookie +
+    // access token so the caller's own session keeps working seamlessly
+    // (every OTHER session/device is still force-logged-out).
+    const refreshToken = tokens.refreshToken;
+    if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
+    const refreshExpiry =
+      this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
+    res.cookie(
+      REFRESH_TOKEN_COOKIE_NAME,
+      refreshToken,
+      getCookieOptions(refreshExpiry),
+    );
+
+    return { success: true, tokens: { accessToken: tokens.accessToken } };
   }
 
   @Post('logout')

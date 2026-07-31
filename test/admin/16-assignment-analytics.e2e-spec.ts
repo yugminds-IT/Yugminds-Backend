@@ -86,4 +86,112 @@ describe('Admin assignment-analytics per-school scoping', () => {
       await pool.query('DELETE FROM "Assignment" WHERE id = ANY($1)', [createdIds]);
     }
   });
+
+  it('excludes unpublished (draft) assignments from assignments_created/total_assignments, matching /school-admin/leaderboard\'s own isPublished filter', async () => {
+    const teacherAuth = authHeader(fixture.teachers[0].token);
+
+    const before = await request(app.getHttpServer())
+      .get('/admin/assignment-analytics')
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    const beforeTotal = before.body.analytics.summary.total_assignments;
+    const beforeSchoolRow = before.body.analytics.school_rankings.find(
+      (r: { school_id: string }) => r.school_id === fixture.schoolId,
+    );
+    const beforeSchoolCount = beforeSchoolRow?.assignments_created ?? 0;
+
+    const draftRes = await request(app.getHttpServer())
+      .post('/teacher/assignments')
+      .set(...teacherAuth)
+      .send({
+        title: 'QA analytics draft (unpublished)',
+        schoolId: fixture.schoolId,
+        assignmentType: 'DAILY',
+        isPublished: false,
+        publishScope: 'grade',
+        publishedGradeIds: [],
+        questions: [],
+      })
+      .expect(201);
+    const draftId: string = draftRes.body?.assignment?.id ?? draftRes.body?.id;
+    expect(draftId).toBeDefined();
+
+    try {
+      const after = await request(app.getHttpServer())
+        .get('/admin/assignment-analytics')
+        .set(...authHeader(fixture.admin.token))
+        .expect(200);
+      expect(after.body.analytics.summary.total_assignments).toBe(beforeTotal);
+      const afterSchoolRow = after.body.analytics.school_rankings.find(
+        (r: { school_id: string }) => r.school_id === fixture.schoolId,
+      );
+      expect(afterSchoolRow?.assignments_created ?? 0).toBe(beforeSchoolCount);
+    } finally {
+      await pool.query('DELETE FROM "Assignment" WHERE id = $1', [draftId]);
+    }
+  });
+
+  it(
+    "honors the assignment's retakeScoringRule ('latest') when picking the best submission per " +
+      'student — regression: this endpoint used to always prefer the higher-scoring attempt ' +
+      'regardless of the rule, disagreeing with the canonical StudentRankingService used by ' +
+      'top_students_platform and every other dashboard',
+    async () => {
+      const teacherAuth = authHeader(fixture.teachers[0].token);
+      const student = fixture.students[0];
+
+      const createRes = await request(app.getHttpServer())
+        .post('/teacher/assignments')
+        .set(...teacherAuth)
+        .send({
+          title: 'QA analytics retake-rule assignment',
+          schoolId: fixture.schoolId,
+          assignmentType: 'DAILY',
+          isPublished: true,
+          publishScope: 'grade',
+          publishedGradeIds: [],
+          retakeEnabled: true,
+          retakeScoringRule: 'latest',
+          questions: [],
+        })
+        .expect(201);
+      const assignmentId: string = createRes.body?.assignment?.id ?? createRes.body?.id;
+      expect(assignmentId).toBeDefined();
+
+      try {
+        // Attempt 1: high score. Attempt 2 (the real "latest"): lower score.
+        await pool.query(
+          `INSERT INTO "AssignmentSubmission"
+             (id, "assignmentId", "studentId", "attemptNumber", status, score, "maxScore", "submittedAt")
+           VALUES (gen_random_uuid(), $1, $2, 1, 'graded', 9, 10, now() - interval '1 hour')`,
+          [assignmentId, student.id],
+        );
+        await pool.query(
+          `INSERT INTO "AssignmentSubmission"
+             (id, "assignmentId", "studentId", "attemptNumber", status, score, "maxScore", "submittedAt")
+           VALUES (gen_random_uuid(), $1, $2, 2, 'graded', 3, 10, now())`,
+          [assignmentId, student.id],
+        );
+
+        const res = await request(app.getHttpServer())
+          .get('/admin/assignment-analytics')
+          .set(...authHeader(fixture.admin.token))
+          .expect(200);
+        const schoolRow = res.body.analytics.school_rankings.find(
+          (r: { school_id: string }) => r.school_id === fixture.schoolId,
+        );
+        expect(schoolRow).toBeDefined();
+        // With only this one graded submission-pair contributing to the
+        // school's score aggregate (a fresh assignment, no other activity on
+        // it), average_score_percentage must reflect the LATEST attempt
+        // (3/10 = 30%), not the higher-scoring first attempt (9/10 = 90%).
+        expect(schoolRow.average_score_percentage).toBeCloseTo(30, 0);
+      } finally {
+        await pool.query('DELETE FROM "AssignmentSubmission" WHERE "assignmentId" = $1', [
+          assignmentId,
+        ]);
+        await pool.query('DELETE FROM "Assignment" WHERE id = $1', [assignmentId]);
+      }
+    },
+  );
 });

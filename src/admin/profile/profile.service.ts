@@ -31,19 +31,12 @@ export class AdminProfileService {
     }
 
     try {
-      // Step 1: Update email if provided
-      const nextEmail =
-        typeof body.email === 'string' && body.email.trim()
-          ? body.email.trim()
-          : undefined;
-      if (nextEmail && nextEmail !== user.email) {
-        await (this.db as any).user.update({
-          where: { id: userId },
-          data: { email: nextEmail },
-        });
-      }
+      // Email is intentionally immutable — the settings UI shows it locked
+      // with "Email is fixed and cannot be changed"; any `body.email` is
+      // silently ignored rather than honored, so a direct API call can't
+      // bypass what the UI claims is enforced.
 
-      // Step 2: Upsert profile for full_name
+      // Upsert profile for full_name
       const fullName =
         typeof body.full_name === 'string' && body.full_name.trim()
           ? body.full_name.trim()

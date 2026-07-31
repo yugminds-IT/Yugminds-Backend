@@ -62,6 +62,45 @@ export type LeaderboardRow = {
 
 @Injectable()
 export class StudentRankingService {
+  /**
+   * Best/latest graded submission per key, honoring each submission's
+   * assignment's `retakeScoringRule`. This is the single canonical selection
+   * algorithm for "the officially recognized graded submission" — rankings,
+   * student analytics, and the student-facing assignment list/detail
+   * endpoints all need this exact rule, and used to each hand-roll their own
+   * copy, risking silent divergence if only one copy was ever updated.
+   *
+   * `submissions` MUST already be sorted by ascending attemptNumber (or
+   * equivalent chronological order) — the 'latest'-rule branch relies on
+   * "last one seen for a key wins" to mean "most recent attempt".
+   */
+  static pickBestGraded<
+    T extends { assignmentId: string; score: number | null; status: string },
+  >(
+    submissions: T[],
+    keyOf: (s: T) => string,
+    scoringRuleOf: (assignmentId: string) => string,
+  ): Map<string, T> {
+    const best = new Map<string, T>();
+    for (const s of submissions) {
+      if (s.status !== 'graded') continue;
+      const key = keyOf(s);
+      const rule = scoringRuleOf(s.assignmentId).toLowerCase();
+      const existing = best.get(key);
+      if (!existing) {
+        best.set(key, s);
+      } else if (
+        rule === 'highest' &&
+        Number(s.score ?? 0) > Number(existing.score ?? 0)
+      ) {
+        best.set(key, s);
+      } else if (rule !== 'highest') {
+        best.set(key, s); // latest: ascending order → last wins
+      }
+    }
+    return best;
+  }
+
   constructor(
     private readonly db: DatabaseService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis,
@@ -117,6 +156,7 @@ export class StudentRankingService {
             score: true,
             maxScore: true,
             attemptNumber: true,
+            status: true,
           },
           orderBy: [
             { studentId: 'asc' },
@@ -136,24 +176,12 @@ export class StudentRankingService {
     const asgnTypeMap = new Map(asgns.map((a) => [a.id, a]));
 
     // Best graded submission per (student, assignment), honoring retake rule.
-    const bestByKey = new Map<string, (typeof allSubs)[0]>();
-    for (const s of allSubs) {
-      const key = `${s.studentId}:${s.assignmentId}`;
-      const rule = String(
-        asgnTypeMap.get(s.assignmentId)?.retakeScoringRule ?? 'latest',
-      ).toLowerCase();
-      const existing = bestByKey.get(key);
-      if (!existing) {
-        bestByKey.set(key, s);
-      } else if (
-        rule === 'highest' &&
-        Number(s.score ?? 0) > Number(existing.score ?? 0)
-      ) {
-        bestByKey.set(key, s);
-      } else if (rule !== 'highest') {
-        bestByKey.set(key, s); // latest: ascending order → last wins
-      }
-    }
+    const bestByKey = StudentRankingService.pickBestGraded(
+      allSubs,
+      (s) => `${s.studentId}:${s.assignmentId}`,
+      (assignmentId) =>
+        asgnTypeMap.get(assignmentId)?.retakeScoringRule ?? 'latest',
+    );
 
     // Aggregate per-student course/daily totals + graded count.
     const agg = new Map<

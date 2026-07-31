@@ -3,7 +3,7 @@ import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
 import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
 import { authHeader, mintAccessToken } from './support/auth';
-import { closePool } from './support/db';
+import { closePool, pool } from './support/db';
 
 describe('Admin student-progress', () => {
   let app: INestApplication;
@@ -141,6 +141,90 @@ describe('Admin student-progress', () => {
         .send({ isActive: true })
         .expect(200);
     }
+  });
+
+  it('summary.total_courses excludes soft-deleted courses, and purging one removes orphaned enrollment/progress rows', async () => {
+    // A dedicated second course (not the shared fixture.courseId, which
+    // every other test in this file depends on) — published so it
+    // auto-enrolls the fixture students, exactly like fixtures.ts's own
+    // course creation.
+    const createRes = await request(app.getHttpServer())
+      .post('/admin/courses')
+      .set(...authHeader(fixture.admin.token))
+      .send({
+        name: '__qa_test_extra_progress_course',
+        description: 'QA extra course for total_courses regression test',
+        school_ids: [fixture.schoolId],
+        grades: [fixture.grade],
+        is_published: true,
+        status: 'Published',
+      })
+      .expect(201);
+    const extraCourseId: string =
+      createRes.body?.data?.id ?? createRes.body?.id;
+    expect(extraCourseId).toBeDefined();
+
+    const before = await request(app.getHttpServer())
+      .get(`/admin/student-progress?school_id=${fixture.schoolId}&limit=500`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    const beforeTotal = before.body.summary.total_courses;
+    expect(
+      before.body.courses.some(
+        (c: { course_id: string }) => c.course_id === extraCourseId,
+      ),
+    ).toBe(true);
+
+    // Confirm it actually auto-enrolled real students — otherwise the
+    // orphan-cleanup assertion below would trivially pass with 0 rows.
+    const enrolledBefore = await pool.query(
+      'SELECT count(*)::int AS c FROM "StudentCourse" WHERE "courseId" = $1',
+      [extraCourseId],
+    );
+    expect(enrolledBefore.rows[0].c).toBeGreaterThan(0);
+
+    // Soft-delete — must disappear from the summary count and the courses
+    // list/per-student course lists immediately (Course.deletedAt has no
+    // cascade to StudentCourse/CourseProgress; the endpoint must filter it
+    // itself).
+    await request(app.getHttpServer())
+      .delete(`/admin/courses/${extraCourseId}`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+
+    const after = await request(app.getHttpServer())
+      .get(`/admin/student-progress?school_id=${fixture.schoolId}&limit=500`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+    expect(after.body.summary.total_courses).toBe(beforeTotal - 1);
+    expect(
+      after.body.courses.some(
+        (c: { course_id: string }) => c.course_id === extraCourseId,
+      ),
+    ).toBe(false);
+    for (const s of after.body.students) {
+      expect(
+        s.courses.some((c: { course_id: string }) => c.course_id === extraCourseId),
+      ).toBe(false);
+    }
+
+    // Purge — StudentCourse/CourseProgress rows for it must be cleaned up,
+    // not left permanently orphaned (no FK/cascade exists for either table).
+    await request(app.getHttpServer())
+      .delete(`/admin/trash?entity_type=courses&id=${extraCourseId}`)
+      .set(...authHeader(fixture.admin.token))
+      .expect(200);
+
+    const enrolledAfterPurge = await pool.query(
+      'SELECT count(*)::int AS c FROM "StudentCourse" WHERE "courseId" = $1',
+      [extraCourseId],
+    );
+    expect(enrolledAfterPurge.rows[0].c).toBe(0);
+    const progressAfterPurge = await pool.query(
+      'SELECT count(*)::int AS c FROM "CourseProgress" WHERE "courseId" = $1',
+      [extraCourseId],
+    );
+    expect(progressAfterPurge.rows[0].c).toBe(0);
   });
 
   it('rejects unauthenticated requests', async () => {

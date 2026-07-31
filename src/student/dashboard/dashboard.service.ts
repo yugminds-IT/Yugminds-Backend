@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
+import { computeCourseProgress } from '../../common/utils/course-progress.util';
 
 @Injectable()
 export class StudentDashboardService {
@@ -68,6 +69,8 @@ export class StudentDashboardService {
           chapterId: true,
           contentId: true,
           progress: true,
+          completedAt: true,
+          updatedAt: true,
         } as any,
       }),
       this.db.notification.count({
@@ -88,84 +91,43 @@ export class StudentDashboardService {
       chaptersByCourse.set(ch.courseId, arr);
     }
 
-    const contentsByChapter = new Map<string, string[]>();
-    for (const c of contents) {
-      const arr = contentsByChapter.get(c.chapterId) ?? [];
-      arr.push(c.id);
-      contentsByChapter.set(c.chapterId, arr);
-    }
-
-    const completedContentIdsByCourse = new Map<string, Set<string>>();
-    const completedChapterIdsByCourse = new Map<string, Set<string>>();
-
-    for (const courseId of courseIds) {
-      const courseProgress = progressRows.filter(
-        (p) => p.courseId === courseId,
-      );
-
-      const completedContentIds = new Set(
-        courseProgress
-          .filter(
-            (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
-          )
-          .map((p) => (p as any).contentId as string),
-      );
-
-      const completedChapterIds = new Set(
-        courseProgress
-          .filter((p) => {
-            const cid = (p as any).contentId;
-            const isChapterRecord =
-              !cid || cid === '' || cid === 'null' || cid === 'undefined';
-            return (
-              isChapterRecord &&
-              p.chapterId &&
-              (p.progress >= 99 || p.completedAt)
-            );
-          })
-          .map((p) => p.chapterId as string),
-      );
-
-      completedContentIdsByCourse.set(courseId, completedContentIds);
-      completedChapterIdsByCourse.set(courseId, completedChapterIds);
-    }
-
+    // Same computeCourseProgress used by /student/courses, admin/school-admin
+    // student-progress, teacher student-progress, and certificates — keeps
+    // these stat cards in agreement with the "Active Courses" list below it
+    // (which is built from /student/courses), instead of re-deriving
+    // completion with slightly different edge-case rules.
     let activeCourses = 0;
     let completedCourses = 0;
     for (const courseId of courseIds) {
-      const courseChapters = chaptersByCourse.get(courseId) ?? [];
-      const totalChapters = courseChapters.length;
-      if (totalChapters === 0) continue;
+      const courseChapters = (chaptersByCourse.get(courseId) ?? []).map(
+        (id) => ({ id }),
+      );
+      const courseChapterIdSet = new Set(courseChapters.map((c) => c.id));
+      const courseContents = contents
+        .filter((c) => courseChapterIdSet.has(c.chapterId))
+        .map((c) => ({ id: c.id, chapterId: c.chapterId }));
+      const courseProgressRows = progressRows
+        .filter((p) => p.courseId === courseId)
+        .map((p) => ({
+          contentId: (p as any).contentId ?? null,
+          chapterId: p.chapterId ?? null,
+          progress: p.progress,
+          completedAt: (p as any).completedAt ?? null,
+          updatedAt: (p as any).updatedAt ?? new Date(0),
+        }));
 
-      const completedContentIds =
-        completedContentIdsByCourse.get(courseId) ?? new Set();
-      const completedChapterIds =
-        completedChapterIdsByCourse.get(courseId) ?? new Set();
+      const { status } = computeCourseProgress(
+        courseChapters,
+        courseContents,
+        courseProgressRows,
+      );
 
-      let hybridCompletedCount = 0;
-      let totalCourseContentCount = 0;
-
-      for (const chId of courseChapters) {
-        const chContents = contentsByChapter.get(chId) || [];
-        totalCourseContentCount += chContents.length;
-
-        for (const cid of chContents) {
-          if (completedContentIds.has(cid) || completedChapterIds.has(chId)) {
-            hybridCompletedCount++;
-          }
-        }
-      }
-
-      const progressPercentage =
-        totalCourseContentCount > 0
-          ? Math.round((hybridCompletedCount / totalCourseContentCount) * 100)
-          : completedChapterIds.size >= totalChapters
-            ? 100
-            : 0;
-
-      if (progressPercentage >= 100) {
+      if (status === 'completed') {
         completedCourses += 1;
-      } else if (progressPercentage > 0) {
+      } else {
+        // Matches the frontend's "Active Courses" list filter
+        // (progress_percentage < 100), which counts not-yet-started
+        // enrollments as active too.
         activeCourses += 1;
       }
     }

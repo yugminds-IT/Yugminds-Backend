@@ -25,12 +25,14 @@ import { DataImportDto } from './dto/data-import.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
-
-interface PlaceholderResponse {
-  endpoint: string;
-  method: string;
-  message: string;
-}
+import { getTodayIstDateOnly } from '../../common/utils/date.util';
+import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import {
+  WEEKDAY_NAMES,
+  DEFAULT_OPERATING_DAYS,
+} from '../../common/utils/weekdays.util';
+import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import { toReportUiStatus } from '../../common/utils/report-status.util';
 
 function currentAcademicYear(): string {
   const now = new Date();
@@ -53,14 +55,6 @@ export class SchoolAdminExtraController {
     private readonly notificationsService: NotificationsService,
   ) {}
 
-  private buildResponse(endpoint: string, method: string): PlaceholderResponse {
-    return {
-      endpoint,
-      method,
-      message:
-        'This endpoint is implemented as a placeholder. Replace with real business logic as needed.',
-    };
-  }
 
   /** Resolve school ID for the current school admin. */
   private async getSchoolId(userId: number): Promise<string | null> {
@@ -69,6 +63,80 @@ export class SchoolAdminExtraController {
       select: { schoolId: true },
     });
     return sa?.schoolId ?? null;
+  }
+
+  /**
+   * Guards Class Scheduling against assigning a teacher who isn't actually
+   * assigned to this school, isn't working here on this weekday, or is
+   * outside the calendar date range the platform admin assigned them for
+   * (TeacherSchool.assignedFrom/assignedUntil — set via admin Teachers
+   * Management). Previously none of this was checked: any teacher id could
+   * be scheduled into any day/period regardless of real assignment data.
+   */
+  private async assertTeacherSchedulable(
+    schoolId: string,
+    teacherId: number,
+    dayOfWeek: number,
+  ): Promise<void> {
+    const teacherSchool = await this.db.teacherSchool.findUnique({
+      where: { teacherId_schoolId: { teacherId, schoolId } },
+    });
+    if (!teacherSchool) {
+      throw new BadRequestException(
+        'This teacher is not assigned to your school.',
+      );
+    }
+
+    const today = getTodayIstDateOnly();
+    if (teacherSchool.assignedFrom && today < teacherSchool.assignedFrom) {
+      const d = teacherSchool.assignedFrom.toISOString().split('T')[0];
+      throw new BadRequestException(
+        `This teacher's assignment to your school starts on ${d}.`,
+      );
+    }
+    if (teacherSchool.assignedUntil && today > teacherSchool.assignedUntil) {
+      const d = teacherSchool.assignedUntil.toISOString().split('T')[0];
+      throw new BadRequestException(
+        `This teacher's assignment to your school ended on ${d}.`,
+      );
+    }
+
+    const history = await this.db.teacherWorkingDaysHistory.findMany({
+      where: { teacherId, schoolId },
+      select: { effectiveFrom: true, workingDays: true },
+      orderBy: { effectiveFrom: 'asc' },
+    });
+    const workingDays =
+      history.length > 0
+        ? resolveWorkingDaysForDate(history, today)
+        : teacherSchool.workingDays;
+    if (!workingDays.includes(dayOfWeek)) {
+      throw new BadRequestException(
+        `This teacher doesn't work at your school on ${WEEKDAY_NAMES[dayOfWeek]}s.`,
+      );
+    }
+  }
+
+  /**
+   * A school-wide constraint, independent of which (if any) teacher is
+   * being scheduled — School.operatingDays didn't exist before, so nothing
+   * stopped a schedule from being created on a day the school itself
+   * doesn't hold classes at all.
+   */
+  private async assertSchoolOperatesOnDay(
+    schoolId: string,
+    dayOfWeek: number,
+  ): Promise<void> {
+    const school = await this.db.school.findUnique({
+      where: { id: schoolId },
+      select: { operatingDays: true },
+    });
+    const operatingDays = school?.operatingDays ?? DEFAULT_OPERATING_DAYS;
+    if (!operatingDays.includes(dayOfWeek)) {
+      throw new BadRequestException(
+        `Your school doesn't operate on ${WEEKDAY_NAMES[dayOfWeek]}s.`,
+      );
+    }
   }
 
   // School & profile: GET school / GET stats handled by dedicated controllers.
@@ -106,9 +174,19 @@ export class SchoolAdminExtraController {
     @CurrentUser() user: { id: number },
     @Body() body: { full_name?: string; phone?: string },
   ) {
+    // An empty/whitespace-only value means "no change requested," not "clear
+    // the name" — matches AdminProfileService.update's semantics. This used
+    // to trim to '' and still write it (`fullName || null`), so a PATCH with
+    // full_name: '   ' silently wiped an existing name instead of no-op'ing
+    // like the admin dashboard's equivalent endpoint does for the same input.
     const fullName =
-      body?.full_name != null ? String(body.full_name).trim() : undefined;
-    const phone = body?.phone != null ? String(body.phone).trim() : undefined;
+      typeof body?.full_name === 'string' && body.full_name.trim()
+        ? body.full_name.trim()
+        : undefined;
+    const phone =
+      typeof body?.phone === 'string' && body.phone.trim()
+        ? body.phone.trim()
+        : undefined;
 
     if (fullName !== undefined || phone !== undefined) {
       await this.db.profile.upsert({
@@ -119,8 +197,8 @@ export class SchoolAdminExtraController {
           phone: phone ?? null,
         },
         update: {
-          ...(fullName !== undefined && { fullName: fullName || null }),
-          ...(phone !== undefined && { phone: phone || null }),
+          ...(fullName !== undefined && { fullName }),
+          ...(phone !== undefined && { phone }),
         },
       });
     }
@@ -223,6 +301,76 @@ export class SchoolAdminExtraController {
         school_id: room.schoolId,
         is_active: (room as { isActive?: boolean }).isActive !== false,
       },
+    };
+  }
+
+  /**
+   * Creates several rooms in one call (e.g. "R101".."R110") so an admin
+   * doesn't have to reopen the Manage Rooms dialog once per room. All rows
+   * are inserted in a single transaction — either all rooms are created or
+   * none are.
+   */
+  @Post('rooms/bulk')
+  async bulkCreateRooms(
+    @CurrentUser() user: { id: number },
+    @Body()
+    body: {
+      rooms?: Array<{
+        room_number?: string;
+        room_name?: string;
+        capacity?: number | string;
+        location?: string;
+        facilities?: string[];
+        is_active?: boolean;
+      }>;
+    },
+  ) {
+    const schoolId = await this.getSchoolId(user.id);
+    if (!schoolId) throw new BadRequestException('School not found');
+    const items = Array.isArray(body?.rooms) ? body.rooms : [];
+    if (items.length === 0)
+      throw new BadRequestException('rooms must be a non-empty array');
+    if (items.length > 100)
+      throw new BadRequestException('Cannot create more than 100 rooms at once');
+    const roomNumbers = items.map((r) => String(r?.room_number ?? '').trim());
+    if (roomNumbers.some((n) => !n))
+      throw new BadRequestException('room_number is required for every room');
+
+    const created = await this.db.$transaction(
+      items.map((item, i) =>
+        this.db.room.create({
+          data: {
+            schoolId,
+            name: roomNumbers[i],
+            roomNumber: roomNumbers[i],
+            roomName:
+              item?.room_name != null ? String(item.room_name).trim() : null,
+            capacity:
+              item?.capacity != null && String(item.capacity).trim() !== ''
+                ? Number(item.capacity)
+                : null,
+            location:
+              item?.location != null ? String(item.location).trim() : null,
+            facilities: Array.isArray(item?.facilities)
+              ? item.facilities.map((s) => String(s).trim()).filter(Boolean)
+              : [],
+            isActive:
+              typeof item?.is_active === 'boolean' ? item.is_active : true,
+          },
+        }),
+      ),
+    );
+    return {
+      rooms: created.map((room) => ({
+        id: room.id,
+        room_number: room.roomNumber ?? room.name,
+        room_name: room.roomName ?? null,
+        capacity: room.capacity ?? null,
+        location: room.location ?? null,
+        facilities: Array.isArray(room.facilities) ? room.facilities : [],
+        school_id: room.schoolId,
+        is_active: (room as { isActive?: boolean }).isActive !== false,
+      })),
     };
   }
 
@@ -574,6 +722,15 @@ export class SchoolAdminExtraController {
               ],
               subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
               working_days_per_week: ts.workingDaysPerWeek ?? 5,
+              working_days: Array.isArray(ts.workingDays)
+                ? ts.workingDays
+                : [1, 2, 3, 4, 5],
+              assigned_from: ts.assignedFrom
+                ? ts.assignedFrom.toISOString().split('T')[0]
+                : null,
+              assigned_until: ts.assignedUntil
+                ? ts.assignedUntil.toISOString().split('T')[0]
+                : null,
               max_students_per_session: 30,
             },
           ],
@@ -1202,25 +1359,38 @@ export class SchoolAdminExtraController {
     if (grade) schoolFilter.grade = grade;
     if (section) schoolFilter.section = section;
 
+    // isActive/deletedAt exclusion matches /admin/student-progress and
+    // /school-admin/students — without it, a deactivated or soft-deleted
+    // student (who never appears in the Students Management table) still
+    // inflated total_students/students_with_progress/students_completed here.
     const studentWhere: {
       role: Role;
       id?: number;
+      isActive: boolean;
+      deletedAt: null;
       studentSchools: { some: typeof schoolFilter };
     } = {
       role: Role.student,
+      isActive: true,
+      deletedAt: null,
       studentSchools: { some: schoolFilter },
     };
     if (studentId) {
       studentWhere.id = parseInt(studentId, 10) || 0;
     }
-    const allStudentsFiltered = await this.db.user.findMany({
-      where: studentWhere,
-      include: { profile: true, studentSchools: true },
-      orderBy: { createdAt: 'desc' },
-      // Defensive cap — protects against a pathologically large school
-      // without affecting any realistically sized school's results.
-      take: 5000,
-    });
+    const [totalStudents, allStudentsFiltered] = await Promise.all([
+      // Real COUNT(*), decoupled from the `take: 5000` cap below — so
+      // total_students stays accurate even for a pathologically large school.
+      this.db.user.count({ where: studentWhere }),
+      this.db.user.findMany({
+        where: studentWhere,
+        include: { profile: true, studentSchools: true },
+        orderBy: { createdAt: 'desc' },
+        // Defensive cap — protects against a pathologically large school
+        // without affecting any realistically sized school's results.
+        take: 5000,
+      }),
+    ]);
     const studentIds = allStudentsFiltered.map((u) => u.id);
     if (studentIds.length === 0) {
       return {
@@ -1228,7 +1398,7 @@ export class SchoolAdminExtraController {
         teachers: [],
         courses: [],
         summary: {
-          total_students: 0,
+          total_students: totalStudents,
           students_with_progress: 0,
           students_completed: 0,
           average_system_progress: 0,
@@ -1236,16 +1406,29 @@ export class SchoolAdminExtraController {
         },
       };
     }
+    // StudentCourse/CourseProgress have bare courseId columns with no
+    // enforced FK to Course, so soft-deleting a course never cleans up its
+    // enrollment/progress rows — without this filter a deleted course kept
+    // contributing to total_courses, per-student course counts, and showed a
+    // blank-titled row in the Courses tab (matches /admin/student-progress).
+    const activeCourseIds = (
+      await this.db.course.findMany({
+        where: { deletedAt: null },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
     const [studentCourses, courseProgress] = await Promise.all([
       this.db.studentCourse.findMany({
         where: {
           studentId: { in: studentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
       this.db.courseProgress.findMany({
         where: {
           studentId: { in: studentIds },
+          courseId: { in: activeCourseIds },
           ...(courseId ? { courseId } : {}),
         },
       }),
@@ -1319,88 +1502,30 @@ export class SchoolAdminExtraController {
         const progressEntries = progressForUser.filter(
           (cp) => cp.courseId === cid,
         );
-        const last = progressEntries.reduce<Date | null>((latest, p) => {
-          const ts = p.completedAt ?? p.updatedAt;
-          return !latest ? ts : ts > latest ? ts : latest;
-        }, null);
-
-        // Content-item based progress (matches student's own view)
-        const courseContents = contentsByCourseS.get(cid) ?? [];
-        const totalContentItems = courseContents.length;
-        const completedContentIds = new Set(
-          progressEntries
-            .filter(
-              (p) =>
-                (p as any).contentId && (p.progress >= 99 || p.completedAt),
-            )
-            .map((p) => (p as any).contentId as string),
+        // Same computeCourseProgress used by /admin/student-progress and
+        // everywhere else in this controller — this endpoint used to have
+        // its own hand-copied version whose completed-status rule (a plain
+        // progressPercentage >= 100) didn't require completedChapters >=
+        // totalChapters the way the shared util does, so a chapterless
+        // course with one stray progress row could show "Completed" here
+        // while the admin dashboard correctly showed the same student+course
+        // as not completed.
+        const computed = computeCourseProgress(
+          chaptersByCourseS.get(cid) ?? [],
+          contentsByCourseS.get(cid) ?? [],
+          progressEntries,
         );
-        const completedChapterIds = new Set(
-          progressEntries
-            .filter((p) => {
-              const cntId = (p as any).contentId;
-              return (
-                (!cntId || cntId === '' || cntId === 'null') &&
-                p.chapterId &&
-                p.progress >= 99
-              );
-            })
-            .map((p) => p.chapterId as string),
-        );
-        let hybridCompleted = 0;
-        for (const c of courseContents) {
-          if (
-            completedContentIds.has(c.id) ||
-            completedChapterIds.has(c.chapterId)
-          ) {
-            hybridCompleted++;
-          }
-        }
-        const progressPercentage =
-          totalContentItems > 0
-            ? Math.min(
-                100,
-                Math.round((hybridCompleted / totalContentItems) * 100),
-              )
-            : progressEntries.some((p) => p.progress >= 99)
-              ? 100
-              : 0;
-
-        // Completed chapters: all contents done OR explicitly marked
-        const courseChapters = chaptersByCourseS.get(cid) ?? [];
-        const chapterContentsMap = new Map<string, string[]>();
-        for (const c of courseContents) {
-          const arr = chapterContentsMap.get(c.chapterId) ?? [];
-          arr.push(c.id);
-          chapterContentsMap.set(c.chapterId, arr);
-        }
-        let completedChapters = 0;
-        for (const ch of courseChapters) {
-          const chContents = chapterContentsMap.get(ch.id) ?? [];
-          const chDone = completedChapterIds.has(ch.id);
-          if (chContents.length > 0) {
-            const allDone = chContents.every((id) =>
-              completedContentIds.has(id),
-            );
-            if (allDone || chDone) completedChapters++;
-          } else if (chDone) {
-            completedChapters++;
-          }
-        }
-
         const status: 'completed' | 'in_progress' | 'not_started' =
-          progressPercentage >= 100
-            ? 'completed'
-            : progressPercentage > 0
-              ? 'in_progress'
-              : 'not_started';
+          computed.status === 'active' ? 'in_progress' : computed.status;
         return {
           course_id: cid,
           course_name: course?.title ?? '',
-          total_chapters: courseChapters.length,
-          completed_chapters: completedChapters,
-          progress_percentage: progressPercentage,
-          last_accessed: last ? last.toISOString() : '',
+          total_chapters: computed.totalChapters,
+          completed_chapters: computed.completedChapters,
+          progress_percentage: Number(computed.progressPercentage.toFixed(2)),
+          last_accessed: computed.lastAccessed
+            ? computed.lastAccessed.toISOString()
+            : '',
           enrolled_on:
             studentCourseForUser
               .find((sc) => sc.courseId === cid)
@@ -1502,7 +1627,7 @@ export class SchoolAdminExtraController {
       })),
       courses: coursesDto,
       summary: {
-        total_students: studentsDto.length,
+        total_students: totalStudents,
         students_with_progress: studentsWithProgress.length,
         students_completed: studentsCompleted.length,
         average_system_progress: Number(averageSystemProgress.toFixed(2)),
@@ -1526,7 +1651,11 @@ export class SchoolAdminExtraController {
       ? Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100)
       : 100;
     const access = await this.db.courseAccess.findMany({
-      where: { schoolId },
+      // CourseAccess.course has onDelete: Cascade, but that only fires on a
+      // hard delete — Course.delete() (soft-delete) just sets deletedAt and
+      // leaves the CourseAccess grant in place, so a trashed course would
+      // otherwise keep showing up here as if it still existed.
+      where: { schoolId, course: { deletedAt: null } },
       take,
       include: {
         gradeAccess: { select: { gradeName: true } },
@@ -1589,25 +1718,37 @@ export class SchoolAdminExtraController {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId) return { progress: [] };
     const access = await this.db.courseAccess.findMany({
-      where: { schoolId },
+      where: { schoolId, course: { deletedAt: null } },
       include: { course: true },
     });
     const courseIds = access.map((a) => a.courseId);
     if (courseIds.length === 0) return { progress: [] };
-    const enrollments = await this.db.studentCourse.findMany({
-      where: { courseId: { in: courseIds } },
+
+    // StudentCourse.studentId is a bare column with no enforced FK to User
+    // (no @relation in schema.prisma) — a ghost enrollment row (student
+    // deleted elsewhere, or never a real member of this school) would
+    // otherwise inflate total_students. Real membership of THIS school is
+    // the source of truth, not the raw enrollment row.
+    const studentSchools = await this.db.studentSchool.findMany({
+      where: {
+        schoolId,
+        isActive: true,
+        student: { role: Role.student, isActive: true, deletedAt: null },
+      },
+      select: { studentId: true, grade: true },
     });
-    const allStudentIds = Array.from(
-      new Set(enrollments.map((e) => e.studentId)),
-    );
-    const studentSchools = allStudentIds.length
-      ? await this.db.studentSchool.findMany({
-          where: { schoolId, studentId: { in: allStudentIds } },
-          select: { studentId: true, grade: true },
-        })
-      : [];
+    const realStudentIds = studentSchools.map((ss) => ss.studentId);
     const gradeByStudentId = new Map(
       studentSchools.map((ss) => [ss.studentId, ss.grade ?? '']),
+    );
+
+    const enrollments = realStudentIds.length
+      ? await this.db.studentCourse.findMany({
+          where: { courseId: { in: courseIds }, studentId: { in: realStudentIds } },
+        })
+      : [];
+    const allStudentIds = Array.from(
+      new Set(enrollments.map((e) => e.studentId)),
     );
 
     const progressRows = allStudentIds.length
@@ -1619,25 +1760,36 @@ export class SchoolAdminExtraController {
         })
       : [];
 
-    const chapters = await this.db.chapter.findMany({
-      where: { courseId: { in: courseIds } },
-      select: { id: true, courseId: true },
-    });
+    const [chapters, chapterContents] = await Promise.all([
+      this.db.chapter.findMany({
+        where: { courseId: { in: courseIds } },
+        select: { id: true, courseId: true },
+      }),
+      this.db.chapterContent.findMany({
+        where: { chapter: { courseId: { in: courseIds } } },
+        select: { id: true, chapterId: true, durationMinutes: true },
+      }),
+    ]);
+    const chaptersByCourse = new Map<string, Array<{ id: string }>>();
+    for (const ch of chapters) {
+      if (!chaptersByCourse.has(ch.courseId)) chaptersByCourse.set(ch.courseId, []);
+      chaptersByCourse.get(ch.courseId)!.push({ id: ch.id });
+    }
+    const chapterToCourse = new Map(chapters.map((ch) => [ch.id, ch.courseId]));
+    const contentsByCourse = new Map<
+      string,
+      Array<{ id: string; chapterId: string; durationMinutes: number | null }>
+    >();
+    for (const cc of chapterContents) {
+      const cid = chapterToCourse.get(cc.chapterId);
+      if (!cid) continue;
+      if (!contentsByCourse.has(cid)) contentsByCourse.set(cid, []);
+      contentsByCourse.get(cid)!.push(cc);
+    }
     const totalChaptersByCourse: Record<string, number> = {};
     for (const ch of chapters) {
       totalChaptersByCourse[ch.courseId] =
         (totalChaptersByCourse[ch.courseId] ?? 0) + 1;
-    }
-
-    // chapter completion per student per course (distinct chapterId with progress >= 99)
-    const completedChaptersSetByStudentCourse: Record<string, Set<string>> = {};
-    for (const r of progressRows) {
-      if (!r.chapterId) continue;
-      if (r.progress < 99) continue;
-      const key = `${r.courseId}:${r.studentId}`;
-      if (!completedChaptersSetByStudentCourse[key])
-        completedChaptersSetByStudentCourse[key] = new Set();
-      completedChaptersSetByStudentCourse[key].add(String(r.chapterId));
     }
 
     const byCourse: Record<
@@ -1679,30 +1831,35 @@ export class SchoolAdminExtraController {
       }
     }
 
-    // compute per-student average per course (across chapter rows)
-    const perStudentCourse: Record<string, { sum: number; count: number }> = {};
-    for (const r of progressRows) {
-      const key = `${r.courseId}:${r.studentId}`;
-      if (!perStudentCourse[key]) perStudentCourse[key] = { sum: 0, count: 0 };
-      perStudentCourse[key].sum += r.progress;
-      perStudentCourse[key].count += 1;
-    }
-    for (const [key, v] of Object.entries(perStudentCourse)) {
-      const [courseId, studentIdStr] = key.split(':');
-      const studentId = parseInt(studentIdStr, 10);
-      const avg = v.count > 0 ? v.sum / v.count : 0;
-      const bucket = byCourse[courseId];
+    // Driven by enrollment (byCourse[cid].studentIds), not by presence of
+    // progress rows — an enrolled student who never opened any content must
+    // count as 0% in both the numerator and denominator, not be silently
+    // excluded from the average entirely (the previous hand-rolled version
+    // only ever iterated progressRows, so a course average could be
+    // computed from a single active student while ignoring every other
+    // enrolled-but-untouched one). Uses the same computeCourseProgress used
+    // by the admin dashboard and student "My Learning" page so this number
+    // can never drift from those.
+    for (const e of enrollments) {
+      const bucket = byCourse[e.courseId];
       if (!bucket) continue;
-      bucket.sum += avg;
+      const studentProgressRows = progressRows.filter(
+        (r) => r.courseId === e.courseId && r.studentId === e.studentId,
+      );
+      const computed = computeCourseProgress(
+        chaptersByCourse.get(e.courseId) ?? [],
+        contentsByCourse.get(e.courseId) ?? [],
+        studentProgressRows,
+      );
+      bucket.sum += computed.progressPercentage;
       bucket.count += 1;
-      if (avg >= 99) bucket.completedSet.add(studentId);
-      bucket.completedChaptersSum +=
-        completedChaptersSetByStudentCourse[key]?.size ?? 0;
-      const g = String(gradeByStudentId.get(studentId) ?? '').trim();
+      if (computed.status === 'completed') bucket.completedSet.add(e.studentId);
+      bucket.completedChaptersSum += computed.completedChapters;
+      const g = String(gradeByStudentId.get(e.studentId) ?? '').trim();
       if (g && bucket.byGrade[g]) {
-        bucket.byGrade[g].sum += avg;
+        bucket.byGrade[g].sum += computed.progressPercentage;
         bucket.byGrade[g].count += 1;
-        if (avg >= 99) bucket.byGrade[g].completed += 1;
+        if (computed.status === 'completed') bucket.byGrade[g].completed += 1;
       }
     }
 
@@ -1752,7 +1909,7 @@ export class SchoolAdminExtraController {
       ? [courseId]
       : (
           await this.db.courseAccess.findMany({
-            where: { schoolId },
+            where: { schoolId, course: { deletedAt: null } },
             select: { courseId: true },
           })
         ).map((a) => a.courseId);
@@ -1763,7 +1920,12 @@ export class SchoolAdminExtraController {
     const studentIds = Array.from(new Set(enrollments.map((e) => e.studentId)));
     if (studentIds.length === 0) return { students: [] };
     const users = await this.db.user.findMany({
-      where: { id: { in: studentIds }, role: Role.student },
+      where: {
+        id: { in: studentIds },
+        role: Role.student,
+        isActive: true,
+        deletedAt: null,
+      },
       include: { profile: true },
     });
     const progressRows = await this.db.courseProgress.findMany({
@@ -1792,6 +1954,10 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId || !courseId) return { students: [], chapters: [] };
+    const course = await this.db.course.findFirst({
+      where: { id: courseId, deletedAt: null },
+    });
+    if (!course) return { students: [], chapters: [] };
     const studentIdNum = studentId ? parseInt(studentId, 10) : undefined;
     const enrollments = await this.db.studentCourse.findMany({
       where: {
@@ -1801,24 +1967,28 @@ export class SchoolAdminExtraController {
     });
     const ids = enrollments.map((e) => e.studentId);
     if (ids.length === 0) return { students: [], chapters: [] };
-    const [progress, users, studentSchools, chapters] = await Promise.all([
-      this.db.courseProgress.findMany({
-        where: { courseId, studentId: { in: ids } },
-      }),
-      this.db.user.findMany({
-        where: { id: { in: ids } },
-        include: { profile: true },
-      }),
-      this.db.studentSchool.findMany({
-        where: { schoolId, studentId: { in: ids } },
-        select: { studentId: true, grade: true, section: true },
-      }),
-      this.db.chapter.findMany({
-        where: { courseId },
-        orderBy: { sortOrder: 'asc' },
-      }),
-    ]);
-    const course = await this.db.course.findUnique({ where: { id: courseId } });
+    const [progress, users, studentSchools, chapters, chapterContents] =
+      await Promise.all([
+        this.db.courseProgress.findMany({
+          where: { courseId, studentId: { in: ids } },
+        }),
+        this.db.user.findMany({
+          where: { id: { in: ids }, role: Role.student, isActive: true, deletedAt: null },
+          include: { profile: true },
+        }),
+        this.db.studentSchool.findMany({
+          where: { schoolId, studentId: { in: ids } },
+          select: { studentId: true, grade: true, section: true },
+        }),
+        this.db.chapter.findMany({
+          where: { courseId },
+          orderBy: { sortOrder: 'asc' },
+        }),
+        this.db.chapterContent.findMany({
+          where: { chapter: { courseId } },
+          select: { id: true, chapterId: true, durationMinutes: true },
+        }),
+      ]);
     const ssByStudentId = new Map(
       studentSchools.map((ss) => [ss.studentId, ss]),
     );
@@ -1827,23 +1997,27 @@ export class SchoolAdminExtraController {
       title: ch.title,
       chapter_number: ch.sortOrder,
     }));
+    const chapterShape = chapters.map((ch) => ({ id: ch.id }));
     const students = users.map((u) => {
       const ss = ssByStudentId.get(u.id);
       const per = progress.filter((r) => r.studentId === u.id);
       const byChapter = new Map(
         per.filter((r) => r.chapterId).map((r) => [String(r.chapterId), r]),
       );
-      const overall = per.length
-        ? per.reduce((s, r) => s + r.progress, 0) / per.length
-        : 0;
+      // Same computeCourseProgress used everywhere else — a chapter/content
+      // item the student never touched must count as 0% in the overall
+      // figure, not be excluded from the average (raw per.reduce() only
+      // averaged the rows that existed, silently inflating students who'd
+      // only opened a handful of items).
+      const computed = computeCourseProgress(chapterShape, chapterContents, per);
       return {
         id: String(u.id),
         full_name: u.profile?.fullName ?? u.email,
         email: u.email,
         grade: ss?.grade ?? '',
         section: ss?.section ?? '',
-        overall_progress: Number(overall.toFixed(2)),
-        completed: overall >= 99,
+        overall_progress: computed.progressPercentage,
+        completed: computed.status === 'completed',
         chapters: chapterMeta.map((ch) => ({
           id: ch.id,
           title: ch.title,
@@ -2099,15 +2273,22 @@ export class SchoolAdminExtraController {
       });
       if (!room) throw new BadRequestException('Invalid room_id');
     }
+    await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
+    if (teacherId != null) {
+      await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
+    }
 
-    // Conflict checks: same room or teacher in same day+period
+    const academicYear = body?.academic_year ?? currentAcademicYear();
+    // Conflict checks: same room or teacher in same day+period+academic year
+    // (previously unscoped by year, so the same teacher/day/period in a
+    // DIFFERENT academic year falsely collided with an unrelated schedule).
     const conflictFilters = [
       ...(teacherId != null ? [{ teacherId }] : []),
       ...(roomId ? [{ roomId }] : []),
     ];
     if (conflictFilters.length > 0) {
       const conflict = await this.db.classSchedule.findFirst({
-        where: { schoolId, dayOfWeek, periodId, OR: conflictFilters },
+        where: { schoolId, dayOfWeek, periodId, academicYear, OR: conflictFilters },
       });
       if (conflict)
         throw new BadRequestException(
@@ -2125,7 +2306,7 @@ export class SchoolAdminExtraController {
         grade,
         subject,
         classId: body?.class_id ?? null,
-        academicYear: body?.academic_year ?? currentAcademicYear(),
+        academicYear,
         startTime: body?.start_time ?? null,
         endTime: body?.end_time ?? null,
         notes: body?.notes ?? null,
@@ -2230,7 +2411,16 @@ export class SchoolAdminExtraController {
       });
       if (!room) throw new BadRequestException('Invalid room_id');
     }
+    await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
+    if (teacherId != null) {
+      await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
+    }
 
+    const updateAcademicYear =
+      body?.academic_year !== undefined
+        ? (body.academic_year ?? currentAcademicYear())
+        : ((existing as { academicYear?: string | null }).academicYear ??
+          currentAcademicYear());
     const updateConflictFilters = [
       ...(teacherId != null ? [{ teacherId }] : []),
       ...(roomId ? [{ roomId }] : []),
@@ -2241,6 +2431,7 @@ export class SchoolAdminExtraController {
           schoolId,
           dayOfWeek,
           periodId,
+          academicYear: updateAcademicYear,
           id: { not: id },
           OR: updateConflictFilters,
         },
@@ -2264,11 +2455,7 @@ export class SchoolAdminExtraController {
           body?.class_id !== undefined
             ? body.class_id
             : ((existing as { classId?: string | null }).classId ?? null),
-        academicYear:
-          body?.academic_year !== undefined
-            ? body.academic_year
-            : ((existing as { academicYear?: string | null }).academicYear ??
-              currentAcademicYear()),
+        academicYear: updateAcademicYear,
         startTime:
           body?.start_time !== undefined
             ? body.start_time
@@ -2406,11 +2593,16 @@ export class SchoolAdminExtraController {
   async listNotifications(
     @CurrentUser() user: { id: number },
     @Query('limit') limit?: string,
+    @Query('offset') offset?: string,
     @Query('mode') mode?: string,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
     @Query('school_id') schoolIdParam?: string,
   ) {
     const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
+    const skip = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
     const m = (mode ?? 'received').trim().toLowerCase() as 'received' | 'sent' | 'all';
+    const s = (status ?? 'all').trim().toLowerCase() as 'all' | 'read' | 'unread';
 
     // For sent/all views, scope to this school's members only.
     let allowedRecipientIds: number[] | undefined;
@@ -2430,12 +2622,15 @@ export class SchoolAdminExtraController {
       }
     }
 
-    const { items } = await this.notificationsService.listWithProfiles(user.id, {
+    const { items, total } = await this.notificationsService.listWithProfiles(user.id, {
       mode: m,
       limit: take,
+      offset: skip,
+      search,
+      status: s,
       allowedRecipientIds,
     });
-    return { notifications: items };
+    return { notifications: items, total };
   }
 
   @Post('notifications')
@@ -2547,6 +2742,7 @@ export class SchoolAdminExtraController {
 
   // Reports - TeacherReport (school-scoped)
 
+
   @Get('reports')
   async getReports(
     @CurrentUser() user: { id: number },
@@ -2554,7 +2750,8 @@ export class SchoolAdminExtraController {
     @Query('pending') pending?: string,
   ) {
     const schoolId = await this.getSchoolId(user.id);
-    if (!schoolId) return { reports: [] };
+    if (!schoolId)
+      return { reports: [], stats: { total: 0, pending: 0, approved: 0, rejected: 0 } };
     // Cap raised to 500: the reports management page derives its own
     // Total/Pending/Approved/Rejected counts and per-teacher coverage from this
     // list, so a 100-row ceiling produced wrong numbers for busy schools.
@@ -2563,11 +2760,23 @@ export class SchoolAdminExtraController {
       : 50;
     const where: { schoolId: string; status?: string } = { schoolId };
     if (pending === '1' || pending === 'true') where.status = 'submitted';
-    const reports = await this.db.teacherReport.findMany({
-      where,
-      orderBy: { reportDate: 'desc' },
-      take,
-    });
+    const [reports, total, pendingCount, approvedCount, rejectedCount] =
+      await Promise.all([
+        this.db.teacherReport.findMany({
+          where,
+          orderBy: { reportDate: 'desc' },
+          take,
+        }),
+        // Real COUNT(*) queries, scoped to the whole school — independent of
+        // the `take` cap above, so stat cards stay accurate even when a
+        // school has more reports than the list page fetches at once.
+        this.db.teacherReport.count({ where: { schoolId } }),
+        this.db.teacherReport.count({
+          where: { schoolId, status: { in: ['submitted', 'reviewed'] } },
+        }),
+        this.db.teacherReport.count({ where: { schoolId, status: 'approved' } }),
+        this.db.teacherReport.count({ where: { schoolId, status: 'rejected' } }),
+      ]);
     const teacherIds = Array.from(new Set(reports.map((r) => r.teacherId)));
     const teachers =
       teacherIds.length > 0
@@ -2577,14 +2786,6 @@ export class SchoolAdminExtraController {
           })
         : [];
     const teacherMap = new Map(teachers.map((t) => [t.id, t]));
-    const toUiStatus = (
-      s?: string | null,
-    ): 'Pending' | 'Approved' | 'Rejected' => {
-      const v = String(s ?? 'submitted').toLowerCase();
-      if (v === 'approved') return 'Approved';
-      if (v === 'rejected') return 'Rejected';
-      return 'Pending';
-    };
     return {
       reports: reports.map((r) => {
         const t = teacherMap.get(r.teacherId);
@@ -2595,8 +2796,9 @@ export class SchoolAdminExtraController {
           date: r.reportDate.toISOString(),
           grade: r.grade ?? '',
           period_id: r.periodId,
-          status: toUiStatus(r.status as string),
+          status: toReportUiStatus(r.status as string),
           topics_taught: r.topicsTaught ?? '',
+          activities: r.activities ?? '',
           student_count: r.studentCount ?? 0,
           duration_hours: r.durationHours ?? 0,
           notes: r.notes ?? '',
@@ -2606,6 +2808,12 @@ export class SchoolAdminExtraController {
           },
         };
       }),
+      stats: {
+        total,
+        pending: pendingCount,
+        approved: approvedCount,
+        rejected: rejectedCount,
+      },
     };
   }
 
@@ -2632,8 +2840,9 @@ export class SchoolAdminExtraController {
         date: report.reportDate.toISOString(),
         grade: report.grade ?? '',
         period_id: report.periodId,
-        status: report.status,
+        status: toReportUiStatus(report.status as string),
         topics_taught: report.topicsTaught ?? '',
+        activities: report.activities ?? '',
         student_count: report.studentCount ?? 0,
         duration_hours: report.durationHours ?? 0,
         notes: report.notes ?? '',
@@ -2654,12 +2863,14 @@ export class SchoolAdminExtraController {
     if (!schoolId) throw new BadRequestException('School not found');
     const ids = Array.isArray(body?.report_ids) ? body.report_ids : [];
     if (ids.length === 0) return { approved: 0 };
-    const action =
-      body?.action === 'approve'
-        ? 'approved'
-        : body?.action === 'reject'
-          ? 'rejected'
-          : 'submitted';
+    // A missing/invalid action used to silently fall back to 'submitted' —
+    // i.e. "Bulk Approve" would quietly no-op (reports were already
+    // 'submitted') while still showing a success toast. Reject explicitly
+    // instead so a caller bug like that surfaces immediately.
+    if (body?.action !== 'approve' && body?.action !== 'reject') {
+      throw new BadRequestException("action must be 'approve' or 'reject'");
+    }
+    const action = body.action === 'approve' ? 'approved' : 'rejected';
     await this.db.teacherReport.updateMany({
       where: { id: { in: ids }, schoolId },
       data: { status: action },
@@ -2822,14 +3033,20 @@ export class SchoolAdminExtraController {
         created_at: l.createdAt.toISOString(),
         approved_by: l.approvedBy ?? null,
         approved_at: l.status === 'approved' ? l.updatedAt.toISOString() : null,
-        reviewed_by: null,
-        reviewed_at: null,
+        // approvedBy records whoever last actioned the request (approve OR
+        // reject — see updateLeave), so it doubles as the "reviewed by"
+        // identity for a rejected leave too.
+        reviewed_by: l.status === 'rejected' ? (l.approvedBy ?? null) : null,
+        reviewed_at:
+          l.status === 'rejected' ? l.updatedAt.toISOString() : null,
         profiles: {
           id: String(l.teacherId),
           full_name: l.teacher?.profile?.fullName ?? l.teacher?.email ?? '',
           email: l.teacher?.email ?? '',
         },
-        reviewer: null,
+        reviewer: l.approvedBy
+          ? (approverById.get(parseInt(String(l.approvedBy), 10)) ?? null)
+          : null,
         approver: l.approvedBy
           ? (approverById.get(parseInt(String(l.approvedBy), 10)) ?? null)
           : null,
@@ -2908,6 +3125,13 @@ export class SchoolAdminExtraController {
     });
     if (!leave) throw new BadRequestException('Leave not found');
     const normalize = (s: string) => s.trim().toLowerCase();
+    // An unrecognized action/status used to silently fall back to the
+    // leave's current status and return 200 OK with no actual change —
+    // matches admin's equivalent (AdminLeavesService.update) throwing
+    // instead of guessing.
+    if (body?.action === undefined && body?.status === undefined) {
+      throw new BadRequestException('action or status is required');
+    }
     const statusRaw =
       body?.action === 'approve'
         ? 'approved'
@@ -2915,13 +3139,17 @@ export class SchoolAdminExtraController {
           ? 'rejected'
           : body?.status
             ? normalize(body.status)
-            : leave.status;
-    const status =
-      statusRaw === 'approved' ||
-      statusRaw === 'rejected' ||
-      statusRaw === 'pending'
-        ? statusRaw
-        : leave.status;
+            : null;
+    if (
+      statusRaw !== 'approved' &&
+      statusRaw !== 'rejected' &&
+      statusRaw !== 'pending'
+    ) {
+      throw new BadRequestException(
+        "action must be 'approve' or 'reject' (or status must be 'approved'/'rejected'/'pending')",
+      );
+    }
+    const status = statusRaw;
 
     const updated = await this.db.teacherLeave.update({
       where: { id },
@@ -2930,12 +3158,13 @@ export class SchoolAdminExtraController {
         ...(body?.admin_remarks !== undefined && {
           adminRemarks: body.admin_remarks,
         }),
+        // Record whoever actioned the request for BOTH approve and reject —
+        // previously this was nulled out on reject, silently discarding the
+        // rejecter's identity ("Reviewed by" always showed N/A).
         approvedBy:
-          status === 'approved'
+          status === 'approved' || status === 'rejected'
             ? (body?.approved_by ?? String(user.id))
-            : status === 'rejected'
-              ? null
-              : undefined,
+            : undefined,
       },
     });
 
@@ -2980,6 +3209,26 @@ export class SchoolAdminExtraController {
         });
       }
     }
+
+    // On rejection, revert any Leave-Approved days from a prior approval
+    // (e.g. approve -> later flipped to reject) back to Unreported —
+    // otherwise those Attendance rows stayed permanently stuck showing the
+    // teacher as on approved leave for a leave that's no longer approved.
+    if (status === 'rejected') {
+      const rejStart = new Date(updated.startDate);
+      rejStart.setUTCHours(0, 0, 0, 0);
+      const rejEnd = new Date(updated.endDate);
+      rejEnd.setUTCHours(23, 59, 59, 999);
+      await this.db.attendance.updateMany({
+        where: {
+          teacherId: updated.teacherId,
+          schoolId: updated.schoolId,
+          date: { gte: rejStart, lte: rejEnd },
+          status: 'Leave-Approved',
+        },
+        data: { status: 'Unreported' },
+      });
+    }
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
         where: { schoolId },
@@ -2999,6 +3248,21 @@ export class SchoolAdminExtraController {
   }
 
   // Password reset requests - scoped to this school admin's school
+
+  // Mirrors admin's GET password-reset-requests/pending-count — the admin
+  // sidebar shows a live-updating pending-request badge via this endpoint
+  // (see usePendingPasswordResetCount), but school admins had no equivalent
+  // to power the same badge, school-scoped to their own requests.
+  @SkipThrottle({ default: true })
+  @Get('password-reset-requests/pending-count')
+  async pendingPasswordResetCount(@CurrentUser() user: { id: number }) {
+    const schoolId = await this.getSchoolId(user.id);
+    if (!schoolId) return { count: 0 };
+    const count = await this.db.passwordResetRequest.count({
+      where: { status: 'pending', schoolId },
+    });
+    return { count };
+  }
 
   @Get('password-reset-requests')
   async listPasswordResetRequests(

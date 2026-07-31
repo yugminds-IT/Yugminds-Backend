@@ -95,6 +95,76 @@ describe('school-admin rooms & periods CRUD', () => {
     });
   });
 
+  describe('rooms bulk create', () => {
+    let createdIds: string[] = [];
+
+    afterAll(async () => {
+      for (const id of createdIds) {
+        await request(app.getHttpServer())
+          .delete(`/school-admin/rooms/${id}`)
+          .set(...auth)
+          .catch(() => undefined);
+      }
+    });
+
+    it('creates several rooms in one call, all sharing the given template fields', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/school-admin/rooms/bulk')
+        .set(...auth)
+        .send({
+          rooms: ['QA-BULK-101', 'QA-BULK-102', 'QA-BULK-103'].map((room_number) => ({
+            room_number,
+            capacity: 30,
+            location: 'Block B',
+            facilities: ['Projector'],
+          })),
+        })
+        .expect(201);
+      expect(res.body.rooms).toHaveLength(3);
+      expect(res.body.rooms.map((r: any) => r.room_number)).toEqual([
+        'QA-BULK-101',
+        'QA-BULK-102',
+        'QA-BULK-103',
+      ]);
+      expect(res.body.rooms.every((r: any) => r.capacity === 30)).toBe(true);
+      createdIds = res.body.rooms.map((r: any) => r.id);
+
+      const list = await request(app.getHttpServer())
+        .get('/school-admin/rooms')
+        .set(...auth)
+        .expect(200);
+      for (const id of createdIds) {
+        expect(list.body.rooms.some((r: any) => r.id === id)).toBe(true);
+      }
+    });
+
+    it('rejects an empty rooms array', async () => {
+      await request(app.getHttpServer())
+        .post('/school-admin/rooms/bulk')
+        .set(...auth)
+        .send({ rooms: [] })
+        .expect(400);
+    });
+
+    it('rejects a batch with a blank room_number', async () => {
+      await request(app.getHttpServer())
+        .post('/school-admin/rooms/bulk')
+        .set(...auth)
+        .send({ rooms: [{ room_number: 'QA-BULK-201' }, { room_number: '  ' }] })
+        .expect(400);
+    });
+
+    it('rejects a batch larger than 100', async () => {
+      await request(app.getHttpServer())
+        .post('/school-admin/rooms/bulk')
+        .set(...auth)
+        .send({
+          rooms: Array.from({ length: 101 }, (_, i) => ({ room_number: `QA-BULK-BIG-${i}` })),
+        })
+        .expect(400);
+    });
+  });
+
   describe('periods', () => {
     let periodId: string;
 

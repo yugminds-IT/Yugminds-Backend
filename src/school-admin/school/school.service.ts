@@ -1,5 +1,6 @@
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { DEFAULT_OPERATING_DAYS } from '../../common/utils/weekdays.util';
 
 @Injectable()
 export class SchoolAdminSchoolService {
@@ -31,7 +32,17 @@ export class SchoolAdminSchoolService {
         school_code: school.schoolCode,
         grades_offered: gradesOffered,
         sections_offered: sectionNames,
+        // Per-grade section breakdown — the flat sections_offered above
+        // (deduped across every grade) is what let the Add/Edit student
+        // forms offer sections that don't actually exist for the selected
+        // grade. Mirrors the shape admin/schools already returns.
+        grades: grades.map((g) => ({
+          id: g.id,
+          name: g.name,
+          sections: (g.sections ?? []).map((s) => ({ id: s.id, name: s.name })),
+        })),
         number_of_sections: numberOfSections,
+        operating_days: school.operatingDays ?? DEFAULT_OPERATING_DAYS,
         is_active: school.isActive,
         created_at: school.createdAt,
         updated_at: school.updatedAt,

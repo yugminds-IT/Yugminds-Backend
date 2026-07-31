@@ -25,6 +25,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "test:e2e:admin": "jest --config ./test/jest-e2e-admin.json --runInBand --forceExit",
     "test:e2e:teacher": "jest --config ./test/jest-e2e-teacher.json --runInBand --forceExit",
+    "test:e2e:student": "jest --config ./test/jest-e2e-student.json --runInBand --forceExit",
     "db:generate": "prisma generate",
     "db:migrate:dev": "prisma migrate dev",
     "db:migrate:deploy": "prisma migrate deploy",

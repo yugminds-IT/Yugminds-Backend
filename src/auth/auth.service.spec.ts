@@ -83,13 +83,22 @@ describe('AuthService', () => {
         password: currentPasswordHash,
         mustChangePassword: false,
       });
-      mockDb.user.update.mockReset().mockResolvedValue({});
+      mockDb.user.update.mockReset().mockResolvedValue({
+        id: userId,
+        email: 'user@example.test',
+        role: 'teacher',
+        tenantId: 'school-1',
+        tokenVersion: 1,
+      });
     });
 
-    it('accepts a password satisfying all complexity rules', async () => {
+    it('accepts a password satisfying all complexity rules, re-issuing fresh tokens for the caller\'s own session', async () => {
+      // updatePassword now bumps tokenVersion (invalidating every access
+      // token, including the one this very request used) and re-issues a
+      // matching pair for the caller so their own session keeps working.
       await expect(
         service.updatePassword(userId, 'CurrentPass1', 'NewPass123'),
-      ).resolves.toBeUndefined();
+      ).resolves.not.toBeUndefined();
       expect(mockDb.user.update).toHaveBeenCalled();
       expect(mockRefreshTokenStore.revokeAll).toHaveBeenCalledWith(userId);
     });

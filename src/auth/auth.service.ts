@@ -540,7 +540,7 @@ export class AuthService {
     userId: number,
     currentPassword: string,
     newPassword: string,
-  ): Promise<void> {
+  ): Promise<AuthTokens> {
     if (!userId) throw new UnauthorizedException('Authentication required');
     if (!newPassword) throw new BadRequestException('New password is required');
     if (newPassword.length < 8)
@@ -575,13 +575,41 @@ export class AuthService {
     }
 
     const hashed = await this.hashPassword(newPassword);
-    await this.db.user.update({
+    const updated = await this.db.user.update({
       where: { id: userId },
-      data: { password: hashed, mustChangePassword: false, initialPassword: null } as never,
+      data: {
+        password: hashed,
+        mustChangePassword: false,
+        initialPassword: null,
+        // Revoking refresh tokens alone leaves any already-issued
+        // short-lived access token (this session or another device) valid
+        // until its own natural expiry — jwt.strategy.ts checks
+        // tokenVersion on every request, so bumping it here invalidates
+        // those immediately too. Matches the same fix already applied to
+        // every admin-initiated password reset/deactivation path. The
+        // CALLER's own current session is re-issued fresh tokens below
+        // (matching the new tokenVersion) so this doesn't also log the
+        // user themselves out — only every OTHER session/device.
+        tokenVersion: { increment: 1 },
+      } as never,
     });
 
     // Invalidate all refresh tokens for the user (force re-login in other sessions)
     await this.refreshTokenStore.revokeAll(userId);
+    // The JWT strategy's 120s auth cache short-circuits the DB lookup and
+    // would keep validating against the pre-change tokenVersion until it
+    // expires on its own — invalidate it so the bump above takes effect on
+    // the very next request instead of up to 2 minutes later.
+    await this.authCache.invalidate(userId);
+
+    // Re-issue tokens for the current session against the new tokenVersion,
+    // and re-register the new refresh token — otherwise the very next
+    // request this same browser tab makes (e.g. reloading the profile) gets
+    // rejected as "Access token invalidated" immediately after a successful
+    // change.
+    const tokens = await this.generateTokens(updated);
+    await this.storeRefreshToken(userId, tokens.refreshToken!);
+    return tokens;
   }
 
   /**
@@ -601,10 +629,21 @@ export class AuthService {
     const hashed = await this.hashPassword(newPassword);
     await this.db.user.update({
       where: { id: userId },
-      data: { password: hashed, mustChangePassword: false, initialPassword: null } as never,
+      data: {
+        password: hashed,
+        mustChangePassword: false,
+        initialPassword: null,
+        // Same reasoning as updatePassword() — no token reissue needed here
+        // since every caller of this endpoint (self-service reset-password
+        // page, admin-initiated reset in AdminSchoolsService) already
+        // discards/redirects the session afterward rather than continuing
+        // to use it.
+        tokenVersion: { increment: 1 },
+      } as never,
     });
 
     await this.refreshTokenStore.revokeAll(userId);
+    await this.authCache.invalidate(userId);
   }
 
   async logout(userId: number, refreshToken?: string): Promise<void> {

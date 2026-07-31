@@ -32,6 +32,29 @@ export class AdminLeavesService {
       : [];
     const schoolMap = new Map(schools.map((s) => [s.id, s]));
 
+    // approvedBy is a numeric user id (as a string) — resolve to a display
+    // name/email, same as SchoolAdminExtraController.listLeaves, so a leave
+    // reviewed by either dashboard shows a real reviewer identity on both.
+    const reviewerIds = Array.from(
+      new Set(
+        leaves
+          .map((l) => (l.approvedBy ? parseInt(String(l.approvedBy), 10) : NaN))
+          .filter((n) => Number.isFinite(n) && n > 0),
+      ),
+    );
+    const reviewers = reviewerIds.length
+      ? await this.db.user.findMany({
+          where: { id: { in: reviewerIds } },
+          include: { profile: true },
+        })
+      : [];
+    const reviewerById = new Map(
+      reviewers.map((r) => [
+        r.id,
+        { id: String(r.id), full_name: r.profile?.fullName ?? r.email, email: r.email },
+      ]),
+    );
+
     const leavesList = leaves.map((l) => {
       const start = l.startDate.getTime();
       const end = l.endDate.getTime();
@@ -59,6 +82,21 @@ export class AdminLeavesService {
                 : l.status,
         applied_at: l.createdAt.toISOString(),
         approved_by: l.approvedBy ?? undefined,
+        // Real timestamps (the row's own updatedAt, which only changes when
+        // the status transitions) — previously declared/rendered on the
+        // frontend but never sent, so "Approved on" / "Rejected on" was
+        // permanently dead UI.
+        approved_at: l.status === 'approved' ? l.updatedAt.toISOString() : undefined,
+        rejected_at: l.status === 'rejected' ? l.updatedAt.toISOString() : undefined,
+        reviewer: l.approvedBy
+          ? (reviewerById.get(parseInt(String(l.approvedBy), 10)) ?? null)
+          : null,
+        // Matches SchoolAdminExtraController.listLeaves — the School Admin
+        // dashboard shows this as a "Substitute Required" badge; it was
+        // silently missing here, so a System Admin reviewing a request had
+        // no way to see whether a substitute was requested.
+        substitute_required:
+          (l as { substituteRequired?: boolean }).substituteRequired ?? false,
         admin_remarks: l.adminRemarks ?? undefined,
         profiles: l.teacher?.profile
           ? {
@@ -91,10 +129,19 @@ export class AdminLeavesService {
     status: string;
     admin_remarks?: string;
     approved_by?: string;
-    /** Set from JWT in controller; preferred over client-supplied approved_by */
-    actor_email?: string;
+    /**
+     * Set from JWT in controller; preferred over client-supplied approved_by.
+     * Must be the numeric user id as a string (NOT an email) — the
+     * school-admin dashboard's reviewer-identity lookup does
+     * `parseInt(approvedBy, 10)` to resolve who reviewed a leave (see
+     * SchoolAdminExtraController.listLeaves). This field used to be set to
+     * the acting admin's email, which silently broke that lookup (parseInt
+     * on an email is NaN) — a leave a System Admin approved would show
+     * "Reviewed by: N/A" on the School Admin dashboard.
+     */
+    actor_user_id?: string;
   }) {
-    const { id, status, admin_remarks, approved_by, actor_email } = body;
+    const { id, status, admin_remarks, approved_by, actor_user_id } = body;
     if (!id) throw new BadRequestException('id is required');
     const normalized = status?.trim().toLowerCase();
     if (normalized !== 'approved' && normalized !== 'rejected') {
@@ -109,7 +156,7 @@ export class AdminLeavesService {
       data: {
         status: normalized === 'approved' ? 'approved' : 'rejected',
         adminRemarks: admin_remarks ?? leave.adminRemarks,
-        approvedBy: actor_email ?? approved_by ?? leave.approvedBy,
+        approvedBy: actor_user_id ?? approved_by ?? leave.approvedBy,
       },
     });
 
