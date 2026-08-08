@@ -806,6 +806,11 @@ export class AdminSchoolsService {
       body.usage_type ?? body.usageType ?? 'single',
     ).toLowerCase();
     const usageType = usageTypeStr === 'multiple' ? 'multiple' : 'single';
+    const rawMaxUses = body.max_uses ?? body.maxUses;
+    const maxUses =
+      rawMaxUses != null && Number.isFinite(Number(rawMaxUses))
+        ? Number(rawMaxUses)
+        : null;
 
     for (const gradeName of gradeNames) {
       const grade = await this.db.grade.upsert({
@@ -838,6 +843,7 @@ export class AdminSchoolsService {
             grade: gradeName,
             code,
             usageType,
+            maxUses,
             isActive: true,
           },
         });
