@@ -122,4 +122,5 @@ describe('Admin teachers CRUD + role matrix + cross-school isolation', () => {
       .expect(201);
     expect(res.body?.updated ?? res.body?.data?.updated).toBe(1);
   });
+
 });

@@ -69,6 +69,32 @@ describe('Admin courses CRUD + publish auto-enrollment', () => {
       .expect(201);
   });
 
+  it('POST /admin/courses/:id/publish rejects a course with zero chapters', async () => {
+    const createRes = await request(app.getHttpServer())
+      .post('/admin/courses')
+      .set(...authHeader(fixture.admin.token))
+      .send({ name: `QA Empty Course ${Date.now()}` })
+      .expect(201);
+    const emptyCourseId: string = createRes.body?.data?.id ?? createRes.body?.id;
+    expect(emptyCourseId).toBeDefined();
+
+    const res = await request(app.getHttpServer())
+      .post(`/admin/courses/${emptyCourseId}/publish`)
+      .set(...authHeader(fixture.admin.token))
+      .send({ publish: true })
+      .expect(400);
+    expect(res.body?.message).toMatch(/chapter/i);
+
+    await request(app.getHttpServer())
+      .delete(`/admin/courses/${emptyCourseId}`)
+      .set(...authHeader(fixture.admin.token))
+      .catch(() => undefined);
+    await request(app.getHttpServer())
+      .delete(`/admin/trash?entity_type=courses&id=${emptyCourseId}`)
+      .set(...authHeader(fixture.admin.token))
+      .catch(() => undefined);
+  });
+
   it('POST /admin/courses/:id/publish auto-enrolls fixture students', async () => {
     await request(app.getHttpServer())
       .post(`/admin/courses/${fixture.courseId}/publish`)

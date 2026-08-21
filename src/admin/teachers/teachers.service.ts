@@ -513,6 +513,85 @@ export class AdminTeachersService {
     });
   }
 
+  /**
+   * Writes a brand-new (never-existed-before) school assignment for a
+   * teacher: duplicate-section check, TeacherSchool upsert, initial working-
+   * days history entry, and the TeacherSectionAssignment rows. Shared by
+   * create() and copyAssignment() — both are "this teacher has never had
+   * this school before" writes, unlike update()'s "did the pattern change"
+   * logic, which stays separate.
+   */
+  private async writeNewSchoolAssignment(
+    tx: Prisma.TransactionClient,
+    teacherId: number,
+    resolved: {
+      schoolId: string;
+      subjects: string[];
+      workingDays: number[];
+      workingDaysPerWeek: number;
+      effectiveFrom: Date;
+      assignedFrom: Date | null;
+      assignedUntil: Date | null;
+      sectionIdsToAssign: string[];
+    },
+    actorId?: number,
+  ): Promise<void> {
+    const {
+      schoolId,
+      subjects,
+      workingDays,
+      workingDaysPerWeek,
+      effectiveFrom,
+      assignedFrom,
+      assignedUntil,
+      sectionIdsToAssign,
+    } = resolved;
+
+    await this.checkDuplicateSectionAssignments(
+      schoolId,
+      sectionIdsToAssign,
+      teacherId,
+    );
+
+    await tx.teacherSchool.upsert({
+      where: { teacherId_schoolId: { teacherId, schoolId } },
+      create: {
+        teacherId,
+        schoolId,
+        subjects,
+        workingDays,
+        workingDaysPerWeek,
+        assignedFrom,
+        assignedUntil,
+      },
+      update: {
+        subjects,
+        workingDays,
+        workingDaysPerWeek,
+        assignedFrom,
+        assignedUntil,
+      },
+    });
+    // Brand-new assignment — always record an initial history entry.
+    await this.recordWorkingDaysChange(
+      tx,
+      teacherId,
+      schoolId,
+      workingDays,
+      effectiveFrom,
+      actorId,
+    );
+
+    await tx.teacherSectionAssignment.deleteMany({
+      where: { teacherId, schoolId },
+    });
+    for (const sectionId of sectionIdsToAssign) {
+      await tx.teacherSectionAssignment.create({
+        data: { teacherId, sectionId, schoolId },
+      });
+    }
+  }
+
   async create(
     body: Record<string, unknown>,
     actorId?: number,
@@ -642,60 +721,8 @@ export class AdminTeachersService {
         },
       });
 
-      for (const {
-        schoolId,
-        gradesAssigned,
-        subjects,
-        workingDays,
-        workingDaysPerWeek,
-        effectiveFrom,
-        assignedFrom,
-        assignedUntil,
-        sectionIdsToAssign,
-      } of resolvedAssignments) {
-        await this.checkDuplicateSectionAssignments(
-          schoolId,
-          sectionIdsToAssign,
-          user.id,
-        );
-
-        await tx.teacherSchool.upsert({
-          where: { teacherId_schoolId: { teacherId: user.id, schoolId } },
-          create: {
-            teacherId: user.id,
-            schoolId,
-            subjects,
-            workingDays,
-            workingDaysPerWeek,
-            assignedFrom,
-            assignedUntil,
-          },
-          update: {
-            subjects,
-            workingDays,
-            workingDaysPerWeek,
-            assignedFrom,
-            assignedUntil,
-          },
-        });
-        // Brand-new assignment — always record an initial history entry.
-        await this.recordWorkingDaysChange(
-          tx,
-          user.id,
-          schoolId,
-          workingDays,
-          effectiveFrom,
-          actorId,
-        );
-
-        await tx.teacherSectionAssignment.deleteMany({
-          where: { teacherId: user.id, schoolId },
-        });
-        for (const sectionId of sectionIdsToAssign) {
-          await tx.teacherSectionAssignment.create({
-            data: { teacherId: user.id, sectionId, schoolId },
-          });
-        }
+      for (const resolved of resolvedAssignments) {
+        await this.writeNewSchoolAssignment(tx, user.id, resolved, actorId);
       }
 
       if (firstSchoolId && !tenantId && firstSchoolId !== firstSchoolIdEarly) {

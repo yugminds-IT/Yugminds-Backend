@@ -9,6 +9,7 @@ import {
   UseGuards,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
@@ -518,6 +519,148 @@ export class StudentExtraController {
     return { courses };
   }
 
+  /**
+   * Single source of truth for "can this student enter this chapter right
+   * now" — combines the drip schedule (Course.chapterUnlockIntervalDays:
+   * chapter at position K unlocks at enrolledAt + K*interval days) with the
+   * existing sequential completion-gate (chapter N-1 must be done). BOTH
+   * must hold. Used by listCourseChapters (display), getChapterContents
+   * (enforcement — a locked chapter's content must not be fetchable just
+   * because the frontend's disabled button was bypassed), and
+   * submitAssignment (enforcement — a COURSE-type assignment inside a
+   * locked chapter must not be submittable early).
+   */
+  private async computeChapterUnlockStates(
+    studentId: number,
+    courseId: string,
+  ): Promise<
+    Map<
+      string,
+      {
+        isUnlocked: boolean;
+        isCompleted: boolean;
+        unlockDate: Date | null;
+        unlocksInDays: number | null;
+        lockReason: 'time' | 'sequential' | null;
+      }
+    >
+  > {
+    const [enrolled, course, chapters] = await Promise.all([
+      this.db.studentCourse.findUnique({
+        where: { studentId_courseId: { studentId, courseId } },
+      }),
+      this.db.course.findUnique({
+        where: { id: courseId },
+        select: { chapterUnlockIntervalDays: true },
+      }),
+      this.db.chapter.findMany({
+        where: { courseId },
+        orderBy: { sortOrder: 'asc' },
+      }),
+    ]);
+    if (!enrolled) return new Map();
+
+    const chapterIds = chapters.map((ch) => ch.id);
+    const [contents, chapterAssignments, progress] = await Promise.all([
+      this.db.chapterContent.findMany({
+        where: { chapterId: { in: chapterIds } },
+        select: { id: true, chapterId: true },
+      }),
+      this.db.assignment.findMany({
+        where: { chapterId: { in: chapterIds } },
+        select: { id: true, chapterId: true },
+      }),
+      this.db.courseProgress.findMany({
+        where: { studentId, courseId },
+      }),
+    ]);
+    const contentsByChapter = new Map<string, Array<{ id: string }>>();
+    contents.forEach((c) => {
+      const list = contentsByChapter.get(c.chapterId) ?? [];
+      list.push(c);
+      contentsByChapter.set(c.chapterId, list);
+    });
+    const assignmentsByChapter = new Map<string, Array<{ id: string }>>();
+    chapterAssignments.forEach((a) => {
+      if (!a.chapterId) return;
+      const list = assignmentsByChapter.get(a.chapterId) ?? [];
+      list.push(a);
+      assignmentsByChapter.set(a.chapterId, list);
+    });
+    // Same completion predicate as computeCourseProgress / listCourseChapters.
+    const completedContentIds = new Set(
+      progress
+        .filter(
+          (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
+        )
+        .map((p) => (p as any).contentId as string),
+    );
+    const completedChapterIds = new Set(
+      progress
+        .filter(
+          (p) =>
+            !(p as any).contentId &&
+            p.chapterId &&
+            (p.progress >= 99 || p.completedAt),
+        )
+        .map((p) => p.chapterId as string),
+    );
+
+    const intervalDays = course?.chapterUnlockIntervalDays ?? 0;
+    const now = new Date();
+    const result = new Map<
+      string,
+      {
+        isUnlocked: boolean;
+        isCompleted: boolean;
+        unlockDate: Date | null;
+        unlocksInDays: number | null;
+        lockReason: 'time' | 'sequential' | null;
+      }
+    >();
+    let previousCompleted = true; // chapter 0 has no previous-chapter requirement
+    chapters.forEach((ch, index) => {
+      const items = [
+        ...(contentsByChapter.get(ch.id) ?? []),
+        ...(assignmentsByChapter.get(ch.id) ?? []),
+      ];
+      const completedInChapter = items.filter((it) =>
+        completedContentIds.has(it.id),
+      ).length;
+      const isCompleted =
+        completedChapterIds.has(ch.id) ||
+        (items.length > 0 && completedInChapter === items.length);
+
+      const unlockDate =
+        intervalDays > 0
+          ? new Date(
+              enrolled.enrolledAt.getTime() +
+                index * intervalDays * 24 * 60 * 60 * 1000,
+            )
+          : null;
+      const timeUnlocked = !unlockDate || now >= unlockDate;
+      const isUnlocked = timeUnlocked && previousCompleted;
+      const lockReason: 'time' | 'sequential' | null = isUnlocked
+        ? null
+        : !timeUnlocked
+          ? 'time'
+          : 'sequential';
+
+      result.set(ch.id, {
+        isUnlocked,
+        isCompleted,
+        unlockDate,
+        unlocksInDays:
+          !timeUnlocked && unlockDate
+            ? StudentExtraController.daysUntil(unlockDate, now)
+            : null,
+        lockReason,
+      });
+      previousCompleted = isCompleted;
+    });
+    return result;
+  }
+
   @Get('courses/:courseId/chapters')
   async listCourseChapters(
     @CurrentUser() user: { id: number },
@@ -621,21 +764,26 @@ export class StudentExtraController {
         content_count: allItems.length,
         completed_count: displayCompletedCount,
         is_completed: isCompleted,
-        // We'll calculate is_unlocked in a second pass to use the updated isCompleted
-        _isCompleted: isCompleted,
       };
     });
 
-    return {
-      chapters: resultChapters.map((ch, index) => {
-        // First chapter is always unlocked. Others are unlocked if the previous one is completed.
-        const isUnlocked =
-          index === 0 || resultChapters[index - 1]._isCompleted;
+    // Combines this same completion state with the drip schedule (Course.
+    // chapterUnlockIntervalDays) — a chapter needs BOTH the previous one
+    // done AND its own scheduled date to have arrived.
+    const unlockStates = await this.computeChapterUnlockStates(
+      user.id,
+      courseId,
+    );
 
+    return {
+      chapters: resultChapters.map((ch) => {
+        const state = unlockStates.get(ch.id);
         return {
           ...ch,
-          is_unlocked: isUnlocked,
-          _isCompleted: undefined, // cleanup
+          is_unlocked: state?.isUnlocked ?? true,
+          unlock_date: state?.unlockDate?.toISOString() ?? null,
+          unlocks_in_days: state?.unlocksInDays ?? null,
+          lock_reason: state?.lockReason ?? null,
         };
       }),
     };
@@ -661,6 +809,24 @@ export class StudentExtraController {
     if (!chapter) {
       throw new NotFoundException('Chapter not found');
     }
+
+    // The frontend already disables a locked chapter's button, but that's
+    // only a UI affordance — without this check, a student could still hit
+    // this endpoint directly for a chapter whose drip date hasn't arrived
+    // yet, or whose predecessor isn't complete.
+    const unlockStates = await this.computeChapterUnlockStates(
+      user.id,
+      courseId,
+    );
+    const chapterState = unlockStates.get(chapterId);
+    if (chapterState && !chapterState.isUnlocked) {
+      throw new ForbiddenException(
+        chapterState.lockReason === 'time'
+          ? `This chapter unlocks in ${chapterState.unlocksInDays} day${chapterState.unlocksInDays === 1 ? '' : 's'}`
+          : 'Complete the previous chapter to unlock this one',
+      );
+    }
+
     const [contents, assignments, progress] = await Promise.all([
       this.db.chapterContent.findMany({
         where: { chapterId },
@@ -912,6 +1078,18 @@ export class StudentExtraController {
       submissionsByAssignmentId.set(s.assignmentId, list);
     }
     const assignmentById = new Map(assignments.map((a) => [a.id, a]));
+    // One unlock-states lookup per distinct course (not per assignment) —
+    // same combined drip + sequential-completion gate the course player and
+    // submitAssignment enforce, surfaced here so a locked assignment shows
+    // as locked in this list instead of only failing once opened/submitted.
+    const unlockStatesByCourse = new Map(
+      await Promise.all(
+        courseIds.map(
+          async (cid) =>
+            [cid, await this.computeChapterUnlockStates(user.id, cid)] as const,
+        ),
+      ),
+    );
     // Same official-score selection as GET /student/assignments/:id and
     // StudentRankingService — honors retakeScoringRule instead of relying on
     // implicit (unordered) row order, which previously made attempt
@@ -936,10 +1114,18 @@ export class StudentExtraController {
       submissionByAssignmentId.set(assignmentId, chosen);
     }
     return {
-      assignments: assignments.map((a) => ({
+      assignments: assignments.map((a) => {
+        const assignmentCourseId = a.chapter?.courseId ?? '';
+        const chapterState = a.chapterId
+          ? unlockStatesByCourse.get(assignmentCourseId)?.get(a.chapterId)
+          : undefined;
+        return {
         id: a.id,
         chapter_id: a.chapterId,
         course_id: a.chapter?.courseId ?? '',
+        is_locked: chapterState ? !chapterState.isUnlocked : false,
+        unlocks_in_days: chapterState?.unlocksInDays ?? null,
+        lock_reason: chapterState?.lockReason ?? null,
         title: a.title,
         description: a.description,
         course_title: (() => {
@@ -1000,7 +1186,8 @@ export class StudentExtraController {
             status: s.status,
           };
         })(),
-      })),
+        };
+      }),
     };
   }
 
@@ -1051,22 +1238,38 @@ export class StudentExtraController {
       });
     }
 
+    // One unlock-states lookup per distinct course — same combined drip +
+    // sequential-completion gate as the chapter list / course player.
+    const unlockStatesByCourse = new Map(
+      await Promise.all(
+        courseIds.map(
+          async (cid) =>
+            [cid, await this.computeChapterUnlockStates(user.id, cid)] as const,
+        ),
+      ),
+    );
+
     const chaptersByCourse = new Map<
       string,
       Array<{
         id: string;
         title: string;
         sort_order: number;
+        is_locked: boolean;
+        unlocks_in_days: number | null;
         assignments: Array<{ id: string; title: string; sort_order: number }>;
       }>
     >();
     for (const ch of chapters) {
       if (!chaptersByCourse.has(ch.courseId))
         chaptersByCourse.set(ch.courseId, []);
+      const chapterState = unlockStatesByCourse.get(ch.courseId)?.get(ch.id);
       chaptersByCourse.get(ch.courseId)!.push({
         id: ch.id,
         title: ch.title,
         sort_order: ch.sortOrder,
+        is_locked: chapterState ? !chapterState.isUnlocked : false,
+        unlocks_in_days: chapterState?.unlocksInDays ?? null,
         assignments: assignmentsByChapter.get(ch.id) ?? [],
       });
     }
@@ -1452,6 +1655,23 @@ export class StudentExtraController {
         where: { studentId_courseId: { studentId: user.id, courseId } },
       });
       if (!enrolled) throw new NotFoundException('Not enrolled in this course');
+
+      // The chapter this assignment belongs to must itself be unlocked —
+      // same combined drip + sequential-completion gate as its content.
+      if (assignment.chapterId) {
+        const unlockStates = await this.computeChapterUnlockStates(
+          user.id,
+          courseId,
+        );
+        const chapterState = unlockStates.get(assignment.chapterId);
+        if (chapterState && !chapterState.isUnlocked) {
+          throw new BadRequestException(
+            chapterState.lockReason === 'time'
+              ? `This assignment unlocks in ${chapterState.unlocksInDays} day${chapterState.unlocksInDays === 1 ? '' : 's'}`
+              : 'Complete the previous chapter to unlock this assignment',
+          );
+        }
+      }
     }
 
     const existingAttempts = await this.db.assignmentSubmission.findMany({

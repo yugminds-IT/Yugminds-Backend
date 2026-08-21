@@ -32,6 +32,8 @@ type CourseListItem = {
   total_videos: number;
   total_materials: number;
   total_assignments: number;
+  /** Drip schedule: chapter K unlocks K * this many days after enrollment. null/0 = no drip. */
+  chapter_unlock_interval_days: number | null;
   created_at: string;
   updated_at: string;
   course_access?: Array<{
@@ -192,6 +194,14 @@ export class AdminCoursesService {
    * new structured `access` array or the legacy flat `school_ids` + `grades`
    * (still sent by duplicate/version-revert snapshots).
    */
+  /** null/0/absent/negative/non-numeric all mean "no drip" (chapters unlock purely by completion, as before this feature existed). */
+  private static parseUnlockInterval(raw: unknown): number | null {
+    if (raw == null || raw === '') return null;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return Math.floor(n);
+  }
+
   private static resolveAccessMap(
     body: Record<string, unknown>,
   ): Map<string, Map<string, string[]>> | null {
@@ -246,6 +256,7 @@ export class AdminCoursesService {
     description: string | null;
     thumbnailUrl: string | null;
     isPublished: boolean;
+    chapterUnlockIntervalDays?: number | null;
     createdAt: Date;
     updatedAt: Date;
     chapters?: Array<{
@@ -337,6 +348,7 @@ export class AdminCoursesService {
       total_videos: totalVideos,
       total_materials: totalMaterials,
       total_assignments: totalAssignments,
+      chapter_unlock_interval_days: course.chapterUnlockIntervalDays ?? null,
       created_at: course.createdAt.toISOString(),
       updated_at: course.updatedAt.toISOString(),
       course_access,
@@ -777,6 +789,9 @@ export class AdminCoursesService {
       (body.thumbnail_url as string | undefined)?.trim() || null;
     const isPublished =
       (body.is_published as boolean | undefined) ?? body.status === 'Published';
+    const chapterUnlockIntervalDays = AdminCoursesService.parseUnlockInterval(
+      body.chapter_unlock_interval_days,
+    );
 
     // The findFirst check above is a read-then-write race (two concurrent
     // creates with the same name can both pass it before either commits) —
@@ -786,7 +801,13 @@ export class AdminCoursesService {
     let created: { id: string };
     try {
       created = await this.db.course.create({
-        data: { title: name, description, thumbnailUrl, isPublished },
+        data: {
+          title: name,
+          description,
+          thumbnailUrl,
+          isPublished,
+          chapterUnlockIntervalDays,
+        },
       });
     } catch (err: unknown) {
       if ((err as { code?: string })?.code === 'P2002') {
@@ -869,6 +890,11 @@ export class AdminCoursesService {
       data.isPublished =
         (body.is_published as boolean | undefined) ??
         body.status === 'Published';
+    }
+    if (body.chapter_unlock_interval_days !== undefined) {
+      data.chapterUnlockIntervalDays = AdminCoursesService.parseUnlockInterval(
+        body.chapter_unlock_interval_days,
+      );
     }
 
     if (Object.keys(data).length > 0) {
@@ -999,6 +1025,12 @@ export class AdminCoursesService {
     const publishFlag = body?.publish ?? true;
 
     if (publishFlag) {
+      const chapterCount = await this.db.chapter.count({ where: { courseId } });
+      if (chapterCount === 0) {
+        throw new BadRequestException(
+          'Add at least one chapter before publishing this course',
+        );
+      }
       await this.saveVersion(courseId, body.changes_summary);
     }
 

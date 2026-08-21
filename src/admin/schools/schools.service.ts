@@ -225,6 +225,7 @@ export class AdminSchoolsService {
       school_admin_name:
         primaryGetAdmin?.user?.profile?.fullName?.trim() || null,
       school_admin_email: primaryGetAdmin?.user?.email ?? null,
+      school_admin_phone: primaryGetAdmin?.user?.profile?.phone ?? null,
       school_admin_user_id: primaryGetAdmin?.user?.id ?? null,
     };
   }
@@ -380,6 +381,48 @@ export class AdminSchoolsService {
         where: { id: school.id },
         data: schoolData,
       });
+    }
+
+    // Only touch academic structure when the caller actually sent a grade
+    // list — grade/section upserts and the join-code dedup guard above make
+    // this safe to re-run with an existing school's unchanged grades (pure
+    // no-op), so this is how an admin adds a new grade (and its sections) to
+    // a school after creation, from the same "Edit School" form.
+    const rawGrades = body.grades_offered ?? body.gradesOffered;
+    if (Array.isArray(rawGrades) && rawGrades.length > 0) {
+      const wantedGradeNames = new Set(
+        (rawGrades as unknown[])
+          .map((g) => String(g).trim())
+          .filter((g) => g.length > 0),
+      );
+      // A grade dropped from the list is actually removed — cascades its
+      // Sections -> TeacherSectionAssignment/JoinCode via the schema's own
+      // FK onDelete: Cascade. No dependent check, matching how every other
+      // delete in this codebase already behaves (course/teacher/student
+      // deletion never blocks on existing dependents either).
+      const currentGrades = await this.db.grade.findMany({
+        where: { schoolId: school.id },
+        select: { id: true, name: true },
+      });
+      for (const grade of currentGrades) {
+        if (!wantedGradeNames.has(grade.name)) {
+          await this.db.grade.delete({ where: { id: grade.id } });
+        }
+      }
+
+      let schoolCode = school.schoolCode;
+      if (!schoolCode) {
+        // Mirrors initAcademicStructure()'s existing persist-if-missing
+        // pattern — deriving a code without saving it meant a legacy
+        // school with no schoolCode yet re-derived it from scratch on
+        // every single edit instead of establishing it once.
+        schoolCode = await this.deriveUniqueSchoolCode(school.name);
+        await this.db.school.update({
+          where: { id: school.id },
+          data: { schoolCode },
+        });
+      }
+      await this.createAcademicStructureFromBody(school.id, body, schoolCode);
     }
 
     await this.applySchoolAdminUpdates(id, body);
@@ -830,6 +873,18 @@ export class AdminSchoolsService {
           update: {},
         });
 
+        // This method is also called from update() so an admin can add new
+        // grades/sections to an existing school — grade/section upserts are
+        // already safe no-ops for ones that already exist, but a join code
+        // was unconditionally created every call, so re-saving an existing
+        // school's unchanged grade list minted a fresh duplicate code for
+        // every already-existing section on every save.
+        const existingCode = await this.db.joinCode.findFirst({
+          where: { sectionId: section.id },
+          select: { id: true },
+        });
+        if (existingCode) continue;
+
         const code = await this.generateUniqueJoinCode(
           schoolCode,
           gradeName,
@@ -847,6 +902,29 @@ export class AdminSchoolsService {
             isActive: true,
           },
         });
+      }
+
+      // A grade whose section count shrank (e.g. 3 -> 2) should drop the
+      // trailing section(s) that are no longer wanted — cascades their
+      // TeacherSectionAssignment/JoinCode rows via the schema's own FK
+      // onDelete: Cascade. Only enforced when the caller explicitly sent a
+      // count for THIS grade — an update() call that only names OTHER
+      // grades (e.g. "add Grade 9") must never reinterpret "didn't mention
+      // this grade" as "shrink it to the 1-section default" and delete an
+      // existing grade's real sections out from under it.
+      const explicitSectionCount =
+        !!sectionsPerGrade && gradeName in sectionsPerGrade;
+      if (explicitSectionCount) {
+        const wantedSectionNames = new Set(sectionNamesForGrade(gradeName));
+        const existingSections = await this.db.section.findMany({
+          where: { gradeId: grade.id },
+          select: { id: true, name: true },
+        });
+        for (const section of existingSections) {
+          if (!wantedSectionNames.has(section.name)) {
+            await this.db.section.delete({ where: { id: section.id } });
+          }
+        }
       }
     }
   }

@@ -289,6 +289,11 @@ model Course {
   // Without `@db.Text`, Postgres rejects uploads with "value too long".
   thumbnailUrl String? @db.Text
   isPublished Boolean  @default(false)
+  // Drip schedule: chapter at position K (0-based, by sortOrder) unlocks at
+  // enrollment date + K * this many days, ANDed with the existing
+  // completion-gate (chapter N-1 done). null/0 = no drip, chapters unlock
+  // purely by completing the previous one, same as before this field existed.
+  chapterUnlockIntervalDays Int?
   deletedAt   DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
