@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import type Redis from 'ioredis';
 import { randomUUID, createHash, timingSafeEqual } from 'crypto';
 import { REDIS_CLIENT } from '../common/redis/redis.constants';
@@ -24,6 +24,8 @@ import { REDIS_CLIENT } from '../common/redis/redis.constants';
  */
 @Injectable()
 export class RefreshTokenStoreService {
+  private readonly logger = new Logger(RefreshTokenStoreService.name);
+
   constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
 
   private setKey(userId: number): string {
@@ -45,17 +47,28 @@ export class RefreshTokenStoreService {
     refreshExpirySeconds: number,
   ): Promise<void> {
     const tokenId = randomUUID();
-    await this.redis
-      .multi()
-      .set(
-        this.tokenKey(userId, tokenId),
-        this.hash(rawToken),
-        'EX',
-        refreshExpirySeconds,
-      )
-      .sadd(this.setKey(userId), tokenId)
-      .expire(this.setKey(userId), refreshExpirySeconds)
-      .exec();
+    try {
+      await this.redis
+        .multi()
+        .set(
+          this.tokenKey(userId, tokenId),
+          this.hash(rawToken),
+          'EX',
+          refreshExpirySeconds,
+        )
+        .sadd(this.setKey(userId), tokenId)
+        .expire(this.setKey(userId), refreshExpirySeconds)
+        .exec();
+    } catch (err) {
+      // Login/signup must not 500 just because Redis is briefly unreachable —
+      // fail open here (the caller still gets a working access token). The
+      // refresh token simply won't be redeemable later (findMatch fails
+      // closed below), so the user re-logs in instead of refreshing; that's
+      // an acceptable degradation, not a security gap.
+      this.logger.warn(
+        `Redis refresh-token store failed, continuing without persisting it: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -64,46 +77,71 @@ export class RefreshTokenStoreService {
    * set members whose token key already expired.
    */
   async findMatch(userId: number, rawToken: string): Promise<string | null> {
-    const tokenIds = await this.redis.smembers(this.setKey(userId));
-    if (!tokenIds.length) return null;
+    try {
+      const tokenIds = await this.redis.smembers(this.setKey(userId));
+      if (!tokenIds.length) return null;
 
-    const hashes = await this.redis.mget(
-      ...tokenIds.map((id) => this.tokenKey(userId, id)),
-    );
-
-    const staleIds = tokenIds.filter((_, i) => hashes[i] === null);
-    if (staleIds.length) {
-      await this.redis.srem(this.setKey(userId), ...staleIds);
-    }
-
-    const target = Buffer.from(this.hash(rawToken));
-    const matched = tokenIds.find((_, i) => {
-      const hash = hashes[i];
-      if (!hash) return false;
-      const candidate = Buffer.from(hash);
-      return (
-        candidate.length === target.length &&
-        timingSafeEqual(candidate, target)
+      const hashes = await this.redis.mget(
+        ...tokenIds.map((id) => this.tokenKey(userId, id)),
       );
-    });
-    return matched ?? null;
+
+      const staleIds = tokenIds.filter((_, i) => hashes[i] === null);
+      if (staleIds.length) {
+        await this.redis.srem(this.setKey(userId), ...staleIds);
+      }
+
+      const target = Buffer.from(this.hash(rawToken));
+      const matched = tokenIds.find((_, i) => {
+        const hash = hashes[i];
+        if (!hash) return false;
+        const candidate = Buffer.from(hash);
+        return (
+          candidate.length === target.length &&
+          timingSafeEqual(candidate, target)
+        );
+      });
+      return matched ?? null;
+    } catch (err) {
+      // Unlike store/revoke, this is a security check — if Redis can't be
+      // consulted we cannot confirm the token is legitimate, so fail closed
+      // (no match) rather than risk accepting an unverifiable refresh token.
+      this.logger.warn(
+        `Redis refresh-token lookup failed, denying refresh: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /** Revokes one specific token (used on rotation and single-session logout). */
   async revoke(userId: number, tokenId: string): Promise<void> {
-    await this.redis
-      .multi()
-      .del(this.tokenKey(userId, tokenId))
-      .srem(this.setKey(userId), tokenId)
-      .exec();
+    try {
+      await this.redis
+        .multi()
+        .del(this.tokenKey(userId, tokenId))
+        .srem(this.setKey(userId), tokenId)
+        .exec();
+    } catch (err) {
+      // Logout must not 500 just because Redis is briefly unreachable — if
+      // Redis is down the stored token is equally unreachable to findMatch,
+      // so it can't be redeemed anyway even though revoke() didn't run.
+      this.logger.warn(
+        `Redis refresh-token revoke failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Revokes every refresh token for the user (logout-everywhere, password change, deactivation). */
   async revokeAll(userId: number): Promise<void> {
-    const tokenIds = await this.redis.smembers(this.setKey(userId));
-    if (tokenIds.length) {
-      await this.redis.del(...tokenIds.map((id) => this.tokenKey(userId, id)));
+    try {
+      const tokenIds = await this.redis.smembers(this.setKey(userId));
+      if (tokenIds.length) {
+        await this.redis.del(...tokenIds.map((id) => this.tokenKey(userId, id)));
+      }
+      await this.redis.del(this.setKey(userId));
+    } catch (err) {
+      this.logger.warn(
+        `Redis refresh-token revokeAll failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    await this.redis.del(this.setKey(userId));
   }
 }
