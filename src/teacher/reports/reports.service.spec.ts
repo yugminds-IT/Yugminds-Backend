@@ -4,7 +4,7 @@ import { TeacherReportsService } from './reports.service';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
-import { getTodayIstDateStr } from '../../common/utils/date.util';
+import { getTodayIstDateOnly, getTodayIstDateStr } from '../../common/utils/date.util';
 
 describe('TeacherReportsService.create', () => {
   let service: TeacherReportsService;
@@ -95,11 +95,14 @@ describe('TeacherReportsService.create', () => {
   });
 
   it('rejects a report for a future date', async () => {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    // Derived from the same IST-anchored source as getTodayIstDateStr(),
+    // not a raw `new Date()` — that used to compare a UTC "tomorrow"
+    // against an IST "today", which are the same calendar date for ~5.5
+    // hours every day (00:00-05:30 IST, while UTC hasn't rolled over yet),
+    // making this test fail deterministically during that window.
+    const tomorrow = getTodayIstDateOnly();
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
     const futureDateStr = tomorrow.toISOString().split('T')[0];
-    // Guard against a flake if this test somehow runs exactly at a date
-    // rollover boundary — futureDateStr must actually be after "today".
     expect(futureDateStr > getTodayIstDateStr()).toBe(true);
 
     await expect(
