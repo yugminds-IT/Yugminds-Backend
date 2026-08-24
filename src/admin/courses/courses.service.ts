@@ -624,7 +624,14 @@ export class AdminCoursesService {
         contentText: cc.content_text ?? null,
         contentUrl: cc.content_url ?? null,
         sortOrder: typeof cc.order_index === 'number' ? cc.order_index : 0,
-        durationMinutes: cc.duration_minutes ?? null,
+        // ChapterContent.durationMinutes is an Int column, but the admin
+        // duration input allows decimals (step="0.1"), so a value like 15.5
+        // reached Prisma as a Float and made the whole course save fail.
+        durationMinutes:
+          typeof cc.duration_minutes === 'number' &&
+          Number.isFinite(cc.duration_minutes)
+            ? Math.max(0, Math.round(cc.duration_minutes))
+            : null,
       };
 
       if (isValidUuid(cc.id) && existingContentIds.has(cc.id)) {
