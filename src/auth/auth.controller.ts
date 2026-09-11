@@ -130,9 +130,15 @@ export class AuthController {
     const refreshExpiry =
       this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
     const cookieOptions = getCookieOptions(refreshExpiry);
-    const refreshToken = (req as any).cookies?.[REFRESH_TOKEN_COOKIE_NAME] as
-      | string
+    const body = req.body as
+      | { refreshToken?: string; refresh_token?: string }
       | undefined;
+    const refreshToken =
+      ((req as { cookies?: Record<string, string> }).cookies?.[
+        REFRESH_TOKEN_COOKIE_NAME
+      ] as string | undefined) ||
+      body?.refreshToken ||
+      body?.refresh_token;
 
     if (!refreshToken) {
       // Ensure stale cookie is removed.

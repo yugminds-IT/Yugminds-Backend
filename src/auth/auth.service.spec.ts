@@ -131,4 +131,59 @@ describe('AuthService', () => {
       expect(mockDb.user.update).not.toHaveBeenCalled();
     });
   });
+
+  describe('generateTokens expiry defaults', () => {
+    it('signs access tokens for 15m and refresh tokens for 7d when env is unset', async () => {
+      mockJwtService.signAsync.mockReset();
+      mockJwtService.signAsync
+        .mockResolvedValueOnce('access-jwt')
+        .mockResolvedValueOnce('refresh-jwt');
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === 'JWT_ACCESS_SECRET') return 'access-secret';
+        if (key === 'JWT_REFRESH_SECRET') return 'refresh-secret';
+        return undefined;
+      });
+
+      const tokens = await (
+        service as unknown as {
+          generateTokens: (user: {
+            id: number;
+            email: string;
+            role: string;
+            isSuperAdmin: boolean;
+            tenantId: string | null;
+            tokenVersion: number;
+          }) => Promise<{ accessToken: string; refreshToken: string }>;
+        }
+      ).generateTokens({
+        id: 1,
+        email: 'admin@example.test',
+        role: 'admin',
+        isSuperAdmin: true,
+        tenantId: null,
+        tokenVersion: 0,
+      });
+
+      expect(mockJwtService.signAsync).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ sub: 1, role: 'admin' }),
+        expect.objectContaining({
+          secret: 'access-secret',
+          expiresIn: '15m',
+        }),
+      );
+      expect(mockJwtService.signAsync).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ sub: 1 }),
+        expect.objectContaining({
+          secret: 'refresh-secret',
+          expiresIn: '7d',
+        }),
+      );
+      expect(tokens).toEqual({
+        accessToken: 'access-jwt',
+        refreshToken: 'refresh-jwt',
+      });
+    });
+  });
 });

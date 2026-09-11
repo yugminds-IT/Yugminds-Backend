@@ -1437,6 +1437,14 @@ export class TeacherExtraController {
         school_id: assignment.schoolId,
         is_published: assignment.isPublished,
         retake_enabled: assignment.retakeEnabled,
+        academic_year: assignment.academicYear,
+        publish_scope: assignment.publishScope,
+        published_grade_ids: assignment.publishedGradeIds ?? [],
+        published_section_ids: assignment.publishedSectionIds ?? [],
+        grade_id: assignment.gradeId,
+        submission_count: await this.db.assignmentSubmission.count({
+          where: { assignmentId },
+        }),
         questions: assignment.questions.map((q) => ({
           id: q.id,
           question_type: q.questionType,
@@ -1500,6 +1508,12 @@ export class TeacherExtraController {
         publishedSectionIds: Array.isArray(body.publishedSectionIds)
           ? (body.publishedSectionIds as unknown[]).map(String)
           : undefined,
+        gradeId:
+          body.gradeId === null
+            ? null
+            : body.gradeId != null
+              ? String(body.gradeId)
+              : undefined,
       },
     });
 
@@ -1512,6 +1526,23 @@ export class TeacherExtraController {
     }
 
     if (Array.isArray(body.questions)) {
+      const submissionCount = await this.db.assignmentSubmission.count({
+        where: { assignmentId },
+      });
+      // After publish (or once any student has submitted), rewriting questions
+      // would orphan answer maps keyed by question id and could silently change
+      // the meaning of already-stored scores. Require an unpublished draft with
+      // zero submissions before question content can change.
+      const nextPublished =
+        body.isPublished != null ? !!body.isPublished : updated.isPublished;
+      if (submissionCount > 0 || nextPublished) {
+        throw new BadRequestException(
+          submissionCount > 0
+            ? 'Questions cannot be changed after students have submitted. Create a new assignment if the content must change; existing scores are left as-is.'
+            : 'Questions cannot be changed while the assignment is published. Unpublish it first (with no submissions), then edit questions.',
+        );
+      }
+
       const questions = body.questions as Array<Record<string, unknown>>;
       await this.db.assignmentQuestion.deleteMany({ where: { assignmentId } });
       if (questions.length) {
