@@ -33,6 +33,42 @@ import {
 } from '../../common/utils/weekdays.util';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
+import * as fs from 'fs';
+
+// #region agent log
+function agentDebugLog(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+) {
+  const payload = {
+    sessionId: '990e57',
+    runId: 'pre-fix',
+    hypothesisId,
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+  };
+  try {
+    fs.appendFileSync(
+      '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
+      JSON.stringify(payload) + '\n',
+    );
+  } catch {
+    /* ignore */
+  }
+  fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Debug-Session-Id': '990e57',
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
+// #endregion
 
 function currentAcademicYear(): string {
   const now = new Date();
@@ -3080,6 +3116,15 @@ export class SchoolAdminExtraController {
       where: { id },
       data: { status },
     });
+    // #region agent log
+    agentDebugLog('A', 'school-admin-extra:updateReport:after-update', 'report status updated', {
+      reportId: id,
+      status,
+      teacherId: report.teacherId,
+      schoolId,
+      actorUserId: user.id,
+    });
+    // #endregion
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
         where: { schoolId },
@@ -3090,11 +3135,43 @@ export class SchoolAdminExtraController {
         select: { id: true },
       }),
     ]);
-    await this.realtimeGateway.emitDashboardStatsForUsers([
+    const emitTargets = [
       report.teacherId,
       ...schoolAdmins.map((s) => s.userId),
       ...adminUsers.map((u) => u.id),
-    ]);
+    ];
+    // #region agent log
+    agentDebugLog('A', 'school-admin-extra:updateReport:before-emit', 'about to emit dashboard stats', {
+      reportId: id,
+      emitTargetCount: emitTargets.length,
+      emitTargets: emitTargets.slice(0, 20),
+      schoolAdminCount: schoolAdmins.length,
+      platformAdminCount: adminUsers.length,
+    });
+    // #endregion
+    try {
+      await this.realtimeGateway.emitDashboardStatsForUsers(emitTargets);
+      // #region agent log
+      agentDebugLog('A', 'school-admin-extra:updateReport:after-emit', 'emit dashboard stats ok', {
+        reportId: id,
+        runId: 'post-fix',
+      });
+      // #endregion
+    } catch (emitErr: unknown) {
+      // #region agent log
+      agentDebugLog('A', 'school-admin-extra:updateReport:emit-error', 'emit dashboard stats failed (ignored)', {
+        reportId: id,
+        runId: 'post-fix',
+        errName: emitErr instanceof Error ? emitErr.name : null,
+        errMessage: emitErr instanceof Error ? emitErr.message : String(emitErr),
+        errStatus:
+          emitErr && typeof emitErr === 'object' && 'status' in emitErr
+            ? (emitErr as { status?: number }).status ?? null
+            : null,
+      });
+      // #endregion
+      // Approval already persisted — never surface emit failures as HTTP 401.
+    }
     return { success: true };
   }
 

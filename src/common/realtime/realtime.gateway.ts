@@ -12,6 +12,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { Server, Socket } from 'socket.io';
 import { DatabaseService } from '../../database/database.service';
+import { tenantContext } from '../../tenants/tenant-context';
 import { Role } from '@prisma/client';
 
 type JwtPayload = {
@@ -120,7 +121,14 @@ export class RealtimeGateway
     const cached = this.statsCache.get(userId);
     if (cached && Date.now() < cached.expiry) return cached.data;
 
-    const data = await this._computeDashboardStats(userId);
+    // Stats broadcasts run for teachers + school admins + platform admins, often
+    // from a school-admin request ALS (or from a socket with no tenant ALS at
+    // all). Inherit neither — compute each user's own dashboard as a privileged
+    // internal read so multi-school teachers / global admin counts don't trip
+    // cross-tenant 401s that the SPA misreads as session expiry.
+    const data = await tenantContext.runSuperAdmin(() =>
+      this._computeDashboardStats(userId),
+    );
     this.statsCache.set(userId, { data, expiry: Date.now() + this.STATS_TTL_MS });
     return data;
   }
@@ -450,20 +458,29 @@ export class RealtimeGateway
   }
 
   async handleConnection(client: Socket) {
+    let userId: number;
     try {
-      const userId = await this.resolveUserId(client);
+      userId = await this.resolveUserId(client);
       const room = this.getRoom(userId);
       await client.join(room);
       client.data.userId = userId;
       this.logger.debug(`Socket connected: ${client.id} -> ${room}`);
-      const stats = await this.buildDashboardStatsForUser(userId);
-      client.emit('dashboard:stats', stats);
     } catch (_err) {
       this.logger.warn(`Socket rejected: ${client.id}`);
       client.emit('socket:error', {
         message: 'Unauthorized socket connection',
       });
       client.disconnect(true);
+      return;
+    }
+    // Auth succeeded — never disconnect just because initial stats failed.
+    try {
+      const stats = await this.buildDashboardStatsForUser(userId);
+      client.emit('dashboard:stats', stats);
+    } catch (err) {
+      this.logger.warn(
+        `Initial dashboard stats failed for user ${userId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -526,8 +543,60 @@ export class RealtimeGateway
   }
 
   async emitDashboardStatsForUser(userId: number): Promise<void> {
-    const payload = await this.buildDashboardStatsForUser(userId);
-    this.emitDashboardStats(userId, payload);
+    // #region agent log
+    const fs = await import('fs');
+    const logEmit = (hypothesisId: string, message: string, data: Record<string, unknown>) => {
+      const payload = {
+        sessionId: '990e57',
+        runId: 'post-fix',
+        hypothesisId,
+        location: 'realtime.gateway.ts:emitDashboardStatsForUser',
+        message,
+        data,
+        timestamp: Date.now(),
+      };
+      try {
+        fs.appendFileSync(
+          '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
+          JSON.stringify(payload) + '\n',
+        );
+      } catch {
+        /* ignore */
+      }
+      fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Debug-Session-Id': '990e57',
+        },
+        body: JSON.stringify(payload),
+      }).catch(() => {});
+    };
+    // #endregion
+    try {
+      this.invalidateStatsCache(userId);
+      const payload = await this.buildDashboardStatsForUser(userId);
+      this.emitDashboardStats(userId, payload);
+      // #region agent log
+      logEmit('A', 'buildDashboardStats ok', { userId });
+      // #endregion
+    } catch (err: unknown) {
+      // #region agent log
+      logEmit('A', 'buildDashboardStats failed for user (swallowed)', {
+        userId,
+        errMessage: err instanceof Error ? err.message : String(err),
+        errStatus:
+          err && typeof err === 'object' && 'status' in err
+            ? (err as { status?: number }).status ?? null
+            : null,
+      });
+      // #endregion
+      // Best-effort broadcast — never fail the mutating HTTP request (approve /
+      // reject / etc.) with a cross-tenant 401 that force-logs the caller out.
+      this.logger.warn(
+        `emitDashboardStatsForUser(${userId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async emitDashboardStatsForUsers(userIds: number[]): Promise<void> {

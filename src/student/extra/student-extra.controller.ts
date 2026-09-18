@@ -1363,7 +1363,7 @@ export class StudentExtraController {
       officialGradedAttempt ?? attempts[attempts.length - 1] ?? null;
     const retakeGrant = await this.db.retakeGrant.findUnique({
       where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
-      select: { isActive: true },
+      select: { isActive: true, grantCount: true, grantedAt: true },
     });
     const latestRetakeRequest = await this.db.retakeRequest.findFirst({
       where: { assignmentId, studentId: user.id },
@@ -1477,6 +1477,8 @@ export class StudentExtraController {
         max_attempts: assignment.maxRetakeAttempts,
         current_attempts: attempts.length,
         granted: !!retakeGrant?.isActive,
+        grant_count: retakeGrant?.grantCount ?? 0,
+        granted_at: retakeGrant?.grantedAt?.toISOString() ?? null,
         scoring_rule: assignment.retakeScoringRule ?? 'latest',
         // Mirror exactly the canRetake logic used in the submit handler so that
         // the frontend's "Retake" button appears iff the submit will be accepted.

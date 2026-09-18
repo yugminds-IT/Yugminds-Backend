@@ -462,6 +462,8 @@ model RetakeGrant {
   grantedByTeacher   User       @relation("TeacherRetakeGrants", fields: [grantedByTeacherId], references: [id], onDelete: Cascade)
   grantedAt          DateTime   @default(now())
   isActive           Boolean    @default(true)
+  /// How many times a teacher has activated/re-granted access for this student.
+  grantCount         Int        @default(1)
   specific           Boolean    @default(true) // true = individual grant; false = class-wide
   @@unique([assignmentId, studentId])
   @@index([studentId])

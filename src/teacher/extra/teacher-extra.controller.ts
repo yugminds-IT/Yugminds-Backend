@@ -1825,11 +1825,14 @@ export class TeacherExtraController {
             studentId,
             grantedByTeacherId: user.id,
             isActive,
+            grantCount: 1,
           },
           update: {
             grantedByTeacherId: user.id,
             isActive,
             grantedAt: new Date(),
+            // Only count activations — revoke must not inflate the counter.
+            ...(isActive ? { grantCount: { increment: 1 } } : {}),
           },
         }),
       ),
@@ -1988,8 +1991,13 @@ export class TeacherExtraController {
                 grantedByTeacherId: user.id,
                 isActive: true,
                 specific: false,
+                grantCount: 1,
               },
-              update: { isActive: true, grantedAt: new Date() },
+              update: {
+                isActive: true,
+                grantedAt: new Date(),
+                grantCount: { increment: 1 },
+              },
             }),
           ),
         );
@@ -2146,11 +2154,13 @@ export class TeacherExtraController {
           studentId: request.studentId,
           grantedByTeacherId: user.id,
           isActive: true,
+          grantCount: 1,
         },
         update: {
           grantedByTeacherId: user.id,
           isActive: true,
           grantedAt: new Date(),
+          grantCount: { increment: 1 },
         },
       });
       // Same fix as grantRetake(): retakeEnabled must be on for the grant to
@@ -2354,6 +2364,15 @@ export class TeacherExtraController {
         },
       },
     });
+    const grants = await this.db.retakeGrant.findMany({
+      where: { assignmentId },
+      select: {
+        studentId: true,
+        isActive: true,
+        grantedAt: true,
+        grantCount: true,
+      },
+    });
     return {
       submissions: submissions.map((s) => {
         const ss = s.student.studentSchools?.[0];
@@ -2377,6 +2396,12 @@ export class TeacherExtraController {
           school_name: ss?.school?.name ?? null,
         };
       }),
+      retake_grants: grants.map((g) => ({
+        student_id: g.studentId,
+        is_active: g.isActive,
+        granted_at: g.grantedAt.toISOString(),
+        grant_count: g.grantCount,
+      })),
     };
   }
 
