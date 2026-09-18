@@ -22,6 +22,8 @@ export class ProfileService {
       assignment_reminders: profileRow?.assignmentReminders ?? true,
       grade_notifications: profileRow?.gradeNotifications ?? true,
       course_updates: profileRow?.courseUpdates ?? true,
+      system_alerts: profileRow?.systemAlerts ?? true,
+      teacher_leave_requests: profileRow?.teacherLeaveRequests ?? true,
       // Student dashboard's greeting subtitle reads
       // profile.students[0].schools[0].name / .grade / .section — this was
       // always undefined (the frontend expected a relation this endpoint
@@ -86,6 +88,12 @@ export class ProfileService {
       undefined;
     const courseUpdates =
       asBool(body.course_updates) ?? asBool(body.courseUpdates) ?? undefined;
+    const systemAlerts =
+      asBool(body.system_alerts) ?? asBool(body.systemAlerts) ?? undefined;
+    const teacherLeaveRequests =
+      asBool(body.teacher_leave_requests) ??
+      asBool(body.teacherLeaveRequests) ??
+      undefined;
 
     if (typeof emailNotifications === 'boolean')
       profilePatch.emailNotifications = emailNotifications;
@@ -95,6 +103,10 @@ export class ProfileService {
       profilePatch.gradeNotifications = gradeNotifications;
     if (typeof courseUpdates === 'boolean')
       profilePatch.courseUpdates = courseUpdates;
+    if (typeof systemAlerts === 'boolean')
+      profilePatch.systemAlerts = systemAlerts;
+    if (typeof teacherLeaveRequests === 'boolean')
+      profilePatch.teacherLeaveRequests = teacherLeaveRequests;
 
     const updated = await this.db.user.update({
       where: { id: userId },
@@ -124,6 +136,8 @@ export class ProfileService {
         assignment_reminders: profileRow?.assignmentReminders ?? true,
         grade_notifications: profileRow?.gradeNotifications ?? true,
         course_updates: profileRow?.courseUpdates ?? true,
+        system_alerts: profileRow?.systemAlerts ?? true,
+        teacher_leave_requests: profileRow?.teacherLeaveRequests ?? true,
       },
     };
   }

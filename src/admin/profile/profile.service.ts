@@ -7,22 +7,31 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 
+function asBool(v: unknown): boolean | undefined {
+  return typeof v === 'boolean' ? v : undefined;
+}
+
 @Injectable()
 export class AdminProfileService {
   constructor(private readonly db: DatabaseService) {}
 
   async get(userId: number) {
-    const user = await (this.db as any).user.findUnique({
+    const user = await this.db.user.findUnique({
       where: { id: userId },
       include: { profile: true },
     });
     if (!user) throw new NotFoundException('User not found');
     const { password: _, profile: profileRow, ...rest } = user;
-    return { ...rest, full_name: profileRow?.fullName ?? undefined };
+    return {
+      ...rest,
+      full_name: profileRow?.fullName ?? undefined,
+      system_alerts: profileRow?.systemAlerts ?? true,
+      teacher_leave_requests: profileRow?.teacherLeaveRequests ?? true,
+    };
   }
 
   async update(userId: number, body: Record<string, unknown>) {
-    const user = await (this.db as any).user.findUnique({
+    const user = await this.db.user.findUnique({
       where: { id: userId },
     });
     if (!user) throw new NotFoundException('User not found');
@@ -36,16 +45,28 @@ export class AdminProfileService {
       // silently ignored rather than honored, so a direct API call can't
       // bypass what the UI claims is enforced.
 
-      // Upsert profile for full_name
+      const profilePatch: Record<string, unknown> = {};
       const fullName =
         typeof body.full_name === 'string' && body.full_name.trim()
           ? body.full_name.trim()
           : undefined;
-      if (fullName !== undefined) {
-        await (this.db as any).profile.upsert({
+      if (fullName !== undefined) profilePatch.fullName = fullName;
+
+      const systemAlerts =
+        asBool(body.system_alerts) ?? asBool(body.systemAlerts);
+      const teacherLeaveRequests =
+        asBool(body.teacher_leave_requests) ??
+        asBool(body.teacherLeaveRequests);
+      if (typeof systemAlerts === 'boolean')
+        profilePatch.systemAlerts = systemAlerts;
+      if (typeof teacherLeaveRequests === 'boolean')
+        profilePatch.teacherLeaveRequests = teacherLeaveRequests;
+
+      if (Object.keys(profilePatch).length > 0) {
+        await this.db.profile.upsert({
           where: { userId },
-          create: { userId, fullName },
-          update: { fullName },
+          create: { userId, ...profilePatch } as never,
+          update: profilePatch as never,
         });
       }
     } catch (err: unknown) {
@@ -56,12 +77,17 @@ export class AdminProfileService {
       throw new InternalServerErrorException('Failed to update profile');
     }
 
-    // Return fresh data
-    const updated = await (this.db as any).user.findUnique({
+    const updated = await this.db.user.findUnique({
       where: { id: userId },
       include: { profile: true },
     });
+    if (!updated) throw new NotFoundException('User not found');
     const { password: _, profile: profileRow, ...rest } = updated;
-    return { ...rest, full_name: profileRow?.fullName ?? undefined };
+    return {
+      ...rest,
+      full_name: profileRow?.fullName ?? undefined,
+      system_alerts: profileRow?.systemAlerts ?? true,
+      teacher_leave_requests: profileRow?.teacherLeaveRequests ?? true,
+    };
   }
 }

@@ -99,6 +99,7 @@ export class SchoolAdminStatsService {
         leaderboard: [],
         summary: {},
         grade_breakdown: [],
+        section_breakdown: [],
         subject_breakdown: [],
         assignment_table: [],
       };
@@ -305,6 +306,62 @@ export class SchoolAdminStatsService {
       }))
       .sort((a, b) => b.avg_overall - a.avg_overall);
 
+    // Section breakdown (grade + section)
+    const sectionMap = new Map<
+      string,
+      {
+        grade: string;
+        section: string;
+        courseTotal: number;
+        courseMax: number;
+        dailyTotal: number;
+        dailyMax: number;
+      }
+    >();
+    for (const sub of bestSubmissions) {
+      const enrollment = enrollments.find((e) => e.studentId === sub.studentId);
+      const grade = enrollment?.grade ?? 'Unknown';
+      const section = String(enrollment?.section ?? '').trim();
+      const key = `${grade}\0${section}`;
+      const g = sectionMap.get(key) ?? {
+        grade,
+        section,
+        courseTotal: 0,
+        courseMax: 0,
+        dailyTotal: 0,
+        dailyMax: 0,
+      };
+      const isCourse = courseAssignmentIds.includes(sub.assignmentId);
+      if (isCourse) {
+        g.courseTotal += Number(sub.score ?? 0);
+        g.courseMax += Number(sub.maxScore ?? 0);
+      } else {
+        g.dailyTotal += Number(sub.score ?? 0);
+        g.dailyMax += Number(sub.maxScore ?? 0);
+      }
+      sectionMap.set(key, g);
+    }
+    const section_breakdown = [...sectionMap.values()]
+      .map((g) => ({
+        grade: g.grade,
+        section: g.section || null,
+        avg_course_score:
+          g.courseMax > 0
+            ? Number(((g.courseTotal / g.courseMax) * 100).toFixed(2))
+            : 0,
+        avg_daily_score:
+          g.dailyMax > 0
+            ? Number(((g.dailyTotal / g.dailyMax) * 100).toFixed(2))
+            : 0,
+        avg_overall: Number(
+          (
+            (g.courseMax > 0 ? (g.courseTotal / g.courseMax) * 100 * 0.6 : 0) +
+            (g.dailyMax > 0 ? (g.dailyTotal / g.dailyMax) * 100 * 0.4 : 0)
+          ).toFixed(2),
+        ),
+      }))
+      .sort((a, b) => b.avg_overall - a.avg_overall);
+
     // Subject breakdown
     const subjectMap = new Map<string, { total: number; max: number }>();
     for (const sub of bestSubmissions) {
@@ -372,6 +429,7 @@ export class SchoolAdminStatsService {
       },
       leaderboard: ranked,
       grade_breakdown,
+      section_breakdown,
       subject_breakdown,
       assignment_table,
     };

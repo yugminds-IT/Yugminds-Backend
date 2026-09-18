@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
 
 /**
@@ -12,7 +13,10 @@ import { Role } from '@prisma/client';
 export class DigestService {
   private readonly logger = new Logger(DigestService.name);
 
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   @Cron('0 8 * * 1')
   async weeklyDigestCron(): Promise<void> {
@@ -122,21 +126,21 @@ export class DigestService {
     });
     if (admins.length === 0) return { recipients: 0 };
 
-    await this.db.notification.createMany({
-      data: admins.map((a) => ({
+    const recipients = await this.notifications.createManyRespectingPrefs(
+      admins.map((a) => ({
         userId: a.id,
         title,
         message,
         mode: 'system_alert',
         allowReplies: false,
       })),
-    });
+    );
     await this.db.systemSetting.upsert({
       where: { key: DigestService.DIGEST_LOCK_KEY },
       create: { key: DigestService.DIGEST_LOCK_KEY, value: new Date().toISOString() },
       update: { value: new Date().toISOString() },
     });
-    this.logger.log(`Weekly digest sent to ${admins.length} admin(s)`);
-    return { recipients: admins.length };
+    this.logger.log(`Weekly digest sent to ${recipients} admin(s)`);
+    return { recipients };
   }
 }

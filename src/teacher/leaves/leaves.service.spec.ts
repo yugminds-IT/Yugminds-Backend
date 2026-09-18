@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { TeacherLeavesService } from './leaves.service';
 import { DatabaseService } from '../../database/database.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 
 describe('TeacherLeavesService', () => {
   let service: TeacherLeavesService;
@@ -9,7 +10,10 @@ describe('TeacherLeavesService', () => {
     teacherSchool: { findFirst: jest.Mock; findMany: jest.Mock };
     teacherWorkingDaysHistory: { findMany: jest.Mock };
     teacherLeave: { findFirst: jest.Mock; create: jest.Mock; findMany: jest.Mock };
+    user: { findUnique: jest.Mock; findMany: jest.Mock };
+    schoolAdmin: { findMany: jest.Mock };
   };
+  let notifications: { createManyRespectingPrefs: jest.Mock };
 
   const baseBody = {
     school_id: 'school-a',
@@ -38,9 +42,24 @@ describe('TeacherLeavesService', () => {
         }),
         findMany: jest.fn().mockResolvedValue([]),
       },
+      user: {
+        findUnique: jest.fn().mockResolvedValue({
+          email: 't@example.com',
+          profile: { fullName: 'Teacher' },
+        }),
+        findMany: jest.fn().mockResolvedValue([{ id: 99 }]),
+      },
+      schoolAdmin: { findMany: jest.fn().mockResolvedValue([{ userId: 10 }]) },
+    };
+    notifications = {
+      createManyRespectingPrefs: jest.fn().mockResolvedValue(2),
     };
     const module: TestingModule = await Test.createTestingModule({
-      providers: [TeacherLeavesService, { provide: DatabaseService, useValue: db }],
+      providers: [
+        TeacherLeavesService,
+        { provide: DatabaseService, useValue: db },
+        { provide: NotificationsService, useValue: notifications },
+      ],
     }).compile();
 
     service = module.get<TeacherLeavesService>(TeacherLeavesService);

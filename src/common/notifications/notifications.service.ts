@@ -31,6 +31,27 @@ export interface NotificationWithProfileDto extends NotificationDto {
   };
 }
 
+/** In-app preference flag on Profile for a given notification mode. */
+type PrefFlag =
+  | 'assignmentReminders'
+  | 'gradeNotifications'
+  | 'courseUpdates'
+  | 'systemAlerts'
+  | 'teacherLeaveRequests';
+
+/**
+ * System modes that honor Settings → In-app notification preferences.
+ * Manual/person-to-person messages (general, student_message, etc.) are never filtered.
+ */
+const MODE_TO_PREF: Record<string, PrefFlag> = {
+  assignment_due: 'assignmentReminders',
+  grade_posted: 'gradeNotifications',
+  certificate: 'courseUpdates',
+  system_alert: 'systemAlerts',
+  teacher_leave: 'teacherLeaveRequests',
+  schedule: 'systemAlerts',
+};
+
 @Injectable()
 export class NotificationsService {
   constructor(
@@ -38,12 +59,81 @@ export class NotificationsService {
     private readonly realtimeGateway: RealtimeGateway,
   ) {}
 
+  /**
+   * Drop recipients who opted out of this notification mode in Settings.
+   * Unknown modes / missing profile rows default to allow (schema defaults are true).
+   */
+  async filterRecipientsByPreference(
+    userIds: number[],
+    mode?: string | null,
+  ): Promise<number[]> {
+    const prefKey = mode ? MODE_TO_PREF[mode] : undefined;
+    if (!prefKey || userIds.length === 0) return userIds;
+
+    const unique = Array.from(new Set(userIds));
+    const profiles = await this.db.profile.findMany({
+      where: { userId: { in: unique } },
+      select: {
+        userId: true,
+        assignmentReminders: true,
+        gradeNotifications: true,
+        courseUpdates: true,
+        systemAlerts: true,
+        teacherLeaveRequests: true,
+      },
+    });
+    const byUser = new Map(profiles.map((p) => [p.userId, p]));
+    return unique.filter((id) => {
+      const p = byUser.get(id);
+      if (!p) return true;
+      return p[prefKey] !== false;
+    });
+  }
+
+  /**
+   * Batch-insert system notifications, skipping users who opted out of `mode`.
+   * Does not emit websocket events (matches existing assignment/grade createMany paths).
+   */
+  async createManyRespectingPrefs(
+    rows: Array<{
+      userId: number;
+      senderId?: number | null;
+      title: string;
+      message: string;
+      mode: string;
+      allowReplies?: boolean;
+    }>,
+  ): Promise<number> {
+    if (rows.length === 0) return 0;
+    const mode = rows[0]?.mode;
+    const allowed = new Set(
+      await this.filterRecipientsByPreference(
+        rows.map((r) => r.userId),
+        mode,
+      ),
+    );
+    const data = rows.filter((r) => allowed.has(r.userId));
+    if (data.length === 0) return 0;
+    await this.db.notification.createMany({
+      data: data.map((r) => ({
+        userId: r.userId,
+        senderId: r.senderId ?? null,
+        title: r.title,
+        message: r.message,
+        mode: r.mode,
+        allowReplies: r.allowReplies !== false,
+      })),
+    });
+    return data.length;
+  }
+
   // ─── Core send ────────────────────────────────────────────────────────────
 
   /**
    * Batch-send notifications to multiple users.
    * Uses a single createMany INSERT then emits per-user WS events.
    * Does NOT trigger per-user dashboard stat recomputation (too expensive at scale).
+   * Honors in-app prefs when `data.type` maps to a preference (e.g. certificate).
    */
   async sendBroadcast(
     senderId: number,
@@ -55,7 +145,11 @@ export class NotificationsService {
       allowReplies?: boolean;
     },
   ): Promise<{ sent: number }> {
-    const ids = Array.from(new Set(userIds)).filter((id) => id !== senderId);
+    const mode = data.type ?? 'general';
+    const ids = await this.filterRecipientsByPreference(
+      Array.from(new Set(userIds)).filter((id) => id !== senderId),
+      mode,
+    );
     if (ids.length === 0) return { sent: 0 };
 
     const now = new Date();
@@ -66,7 +160,7 @@ export class NotificationsService {
         senderId,
         title: data.title,
         message: data.message,
-        mode: data.type ?? 'general',
+        mode,
         allowReplies: data.allowReplies !== false,
         broadcastId,
         createdAt: now,
@@ -108,6 +202,7 @@ export class NotificationsService {
   /**
    * Send a single notification to one user and emit WS events.
    * Used for system-generated notifications (schedule sync, grade notifications, etc.).
+   * Returns null when the recipient opted out of this mode.
    */
   async sendOne(
     senderId: number,
@@ -118,14 +213,18 @@ export class NotificationsService {
       type?: string;
       allowReplies?: boolean;
     },
-  ): Promise<NotificationDto> {
+  ): Promise<NotificationDto | null> {
+    const mode = data.type ?? 'general';
+    const allowed = await this.filterRecipientsByPreference([userId], mode);
+    if (allowed.length === 0) return null;
+
     const n = await this.db.notification.create({
       data: {
         userId,
         senderId,
         title: data.title,
         message: data.message,
-        mode: data.type ?? 'general',
+        mode,
         allowReplies: data.allowReplies !== false,
       },
     });
@@ -568,7 +667,7 @@ export class NotificationsService {
       senderId?: number;
       allowReplies?: boolean;
     },
-  ): Promise<NotificationDto> {
+  ): Promise<NotificationDto | null> {
     return this.sendOne(data.senderId ?? userId, userId, data);
   }
 }

@@ -17,6 +17,9 @@ describe('NotificationsService', () => {
       create: jest.Mock;
       createMany: jest.Mock;
     };
+    profile: {
+      findMany: jest.Mock;
+    };
   };
 
   beforeEach(async () => {
@@ -37,6 +40,9 @@ describe('NotificationsService', () => {
           createdAt: new Date(),
         }),
         createMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      profile: {
+        findMany: jest.fn().mockResolvedValue([]),
       },
     };
     const module: TestingModule = await Test.createTestingModule({
@@ -225,6 +231,53 @@ describe('NotificationsService', () => {
       );
       expect(broadcastIds.size).toBe(1);
       expect([...broadcastIds][0]).toEqual(expect.any(String));
+    });
+  });
+
+  describe('in-app preference filtering', () => {
+    it('sendOne skips create when recipient opted out of grade_posted', async () => {
+      db.profile.findMany.mockResolvedValue([
+        { userId: 2, assignmentReminders: true, gradeNotifications: false, courseUpdates: true },
+      ]);
+
+      const result = await service.sendOne(1, 2, {
+        title: 'Graded',
+        message: 'Done',
+        type: 'grade_posted',
+      });
+
+      expect(result).toBeNull();
+      expect(db.notification.create).not.toHaveBeenCalled();
+    });
+
+    it('createManyRespectingPrefs drops opted-out recipients for assignment_due', async () => {
+      db.profile.findMany.mockResolvedValue([
+        { userId: 2, assignmentReminders: false, gradeNotifications: true, courseUpdates: true },
+        { userId: 3, assignmentReminders: true, gradeNotifications: true, courseUpdates: true },
+      ]);
+
+      const sent = await service.createManyRespectingPrefs([
+        { userId: 2, title: 'A', message: 'M', mode: 'assignment_due' },
+        { userId: 3, title: 'A', message: 'M', mode: 'assignment_due' },
+      ]);
+
+      expect(sent).toBe(1);
+      expect(db.notification.createMany).toHaveBeenCalledWith({
+        data: [
+          expect.objectContaining({ userId: 3, mode: 'assignment_due' }),
+        ],
+      });
+    });
+
+    it('does not filter manual/general messages', async () => {
+      db.profile.findMany.mockResolvedValue([
+        { userId: 2, assignmentReminders: false, gradeNotifications: false, courseUpdates: false },
+      ]);
+
+      await service.sendOne(1, 2, { title: 'Hi', message: 'Hello', type: 'general' });
+
+      expect(db.profile.findMany).not.toHaveBeenCalled();
+      expect(db.notification.create).toHaveBeenCalled();
     });
   });
 });

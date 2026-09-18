@@ -87,6 +87,59 @@ export class TeacherExtraController {
     await this.ranking.recomputeStudentScores(studentId, assignmentCourseId);
   }
 
+  private async resolveTargetedStudentIds(
+    schoolId: string,
+    assignment: {
+      gradeId?: string | null;
+      publishScope?: string | null;
+      publishedGradeIds?: string[] | null;
+      publishedSectionIds?: string[] | null;
+    },
+  ): Promise<number[]> {
+    const enrollments = await this.db.studentSchool.findMany({
+      where: { schoolId, isActive: true },
+      select: { studentId: true, grade: true, section: true },
+    });
+
+    const scope = assignment.publishScope ?? 'grade';
+    const publishedGradeIds = assignment.publishedGradeIds ?? [];
+    const publishedSectionIds = assignment.publishedSectionIds ?? [];
+
+    if (scope === 'section' && publishedSectionIds.length) {
+      const sections = await this.db.section.findMany({
+        where: { id: { in: publishedSectionIds } },
+        select: { name: true, grade: { select: { name: true } } },
+      });
+      const targets = new Set(
+        sections.map((s) => `${s.grade.name}::${s.name}`),
+      );
+      return enrollments
+        .filter((e) => targets.has(`${e.grade ?? ''}::${e.section ?? ''}`))
+        .map((e) => e.studentId);
+    }
+    if (publishedGradeIds.length) {
+      const grades = await this.db.grade.findMany({
+        where: { id: { in: publishedGradeIds } },
+        select: { name: true },
+      });
+      const gradeNames = new Set(grades.map((g) => g.name));
+      return enrollments
+        .filter((e) => gradeNames.has(e.grade ?? ''))
+        .map((e) => e.studentId);
+    }
+    if (assignment.gradeId) {
+      const grade = await this.db.grade.findUnique({
+        where: { id: assignment.gradeId },
+        select: { name: true },
+      });
+      const gradeName = grade?.name ?? '';
+      return enrollments
+        .filter((e) => e.grade === gradeName)
+        .map((e) => e.studentId);
+    }
+    return enrollments.map((e) => e.studentId);
+  }
+
   private async notifyTargetedStudents(
     assignmentId: string,
     schoolId: string,
@@ -100,50 +153,15 @@ export class TeacherExtraController {
       publishedGradeIds?: string[];
       publishedSectionIds?: string[];
     },
+    /** When set, only these students are notified (audience expansion diff). */
+    onlyStudentIds?: number[],
   ) {
-    const enrollments = await this.db.studentSchool.findMany({
-      where: { schoolId, isActive: true },
-      select: { studentId: true, grade: true, section: true },
-    });
-
-    const scope = assignment.publishScope ?? 'grade';
-    let studentIds: number[];
-
-    if (scope === 'section' && assignment.publishedSectionIds?.length) {
-      // Target specific sections — resolve section names
-      const sections = await this.db.section.findMany({
-        where: { id: { in: assignment.publishedSectionIds } },
-        select: { name: true, grade: { select: { name: true } } },
-      });
-      const targets = new Set(
-        sections.map((s) => `${s.grade.name}::${s.name}`),
-      );
-      studentIds = enrollments
-        .filter((e) => targets.has(`${e.grade ?? ''}::${e.section ?? ''}`))
-        .map((e) => e.studentId);
-    } else if (assignment.publishedGradeIds?.length) {
-      // Target specific grades (publishScope=grade or fallback)
-      const grades = await this.db.grade.findMany({
-        where: { id: { in: assignment.publishedGradeIds } },
-        select: { name: true },
-      });
-      const gradeNames = new Set(grades.map((g) => g.name));
-      studentIds = enrollments
-        .filter((e) => gradeNames.has(e.grade ?? ''))
-        .map((e) => e.studentId);
-    } else if (assignment.gradeId) {
-      // Legacy single-grade targeting via gradeId field
-      const grade = await this.db.grade.findUnique({
-        where: { id: assignment.gradeId },
-        select: { name: true },
-      });
-      const gradeName = grade?.name ?? '';
-      studentIds = enrollments
-        .filter((e) => e.grade === gradeName)
-        .map((e) => e.studentId);
-    } else {
-      // Broadcast to entire school
-      studentIds = enrollments.map((e) => e.studentId);
+    let studentIds =
+      onlyStudentIds ??
+      (await this.resolveTargetedStudentIds(schoolId, assignment));
+    if (onlyStudentIds) {
+      // Dedupe while preserving caller filter
+      studentIds = [...new Set(onlyStudentIds)];
     }
 
     if (studentIds.length === 0) return;
@@ -153,14 +171,14 @@ export class TeacherExtraController {
     const subjectPart = assignment.subject
       ? `. Subject: ${assignment.subject}`
       : '';
-    await this.db.notification.createMany({
-      data: studentIds.map((userId) => ({
+    await this.notificationsService.createManyRespectingPrefs(
+      studentIds.map((userId) => ({
         userId,
         title: `New assignment posted: ${assignment.title}`,
         message: `New assignment posted: ${assignment.title}${duePart}${subjectPart}.`,
         mode: 'assignment_due',
       })),
-    });
+    );
   }
 
   private async recomputeStudentScoreSummary(
@@ -926,9 +944,13 @@ export class TeacherExtraController {
       schoolId: string;
       teacherId: number;
       dayOfWeek?: number;
+      isActive: boolean;
     } = {
       schoolId,
       teacherId: user.id,
+      // Inactive schedules must not appear as reportable periods — attendance
+      // Present only counts active schedule rows.
+      isActive: true,
     };
     if (day !== undefined && day !== '') {
       const dayNum = TeacherExtraController.DAY_OF_WEEK_MAP[day];
@@ -945,16 +967,17 @@ export class TeacherExtraController {
       }),
     ]);
 
-    // Build a map from periodId → matching schedule (grade + subject)
+    // Build a map from periodId → matching schedule (grade + section + subject)
     // When filtered by day, each period should map to at most one schedule
     const scheduleByPeriod = new Map<
       string,
-      { grade: string | null; subject: string | null }
+      { grade: string | null; section: string | null; subject: string | null }
     >();
     for (const s of schedules) {
       if (!scheduleByPeriod.has(s.periodId)) {
         scheduleByPeriod.set(s.periodId, {
           grade: (s as { grade?: string | null }).grade ?? null,
+          section: (s as { section?: string | null }).section ?? null,
           subject: (s as { subject?: string | null }).subject ?? null,
         });
       }
@@ -972,6 +995,7 @@ export class TeacherExtraController {
         school_id: p.schoolId,
         is_active: (p as { isActive?: boolean }).isActive !== false,
         grade: sched?.grade ?? null,
+        section: sched?.section ?? null,
         subject: sched?.subject ?? null,
         has_schedule: !!sched,
       };
@@ -1003,142 +1027,186 @@ export class TeacherExtraController {
     @Query('school_id') schoolId?: string,
     @Query('day') day?: string,
   ) {
-    // When no school_id is given, aggregate across every school the teacher
-    // is assigned to (previously this returned an empty list, which made a
-    // multi-school teacher's "all schools" view — e.g. the Classes page's
-    // in-page School filter — silently show nothing).
-    let schoolIdFilter: string | { in: string[] };
-    if (schoolId) {
-      schoolIdFilter = schoolId;
-    } else {
-      const assigned = await this.db.teacherSchool.findMany({
-        where: { teacherId: user.id },
-        select: { schoolId: true },
+    // Aggregate path must run in super-admin tenant context: Prisma's tenant
+    // extension rewrites `schoolId: { in: [...] }` down to the active tenant
+    // only. Without this, "All Schools" silently returns the teacher's
+    // primary school schedule even when they have ClassSchedule rows elsewhere.
+    // Await INSIDE runSuperAdmin so ALS stays active for every query.
+    const load = async () => {
+      let schoolIdFilter: string | { in: string[] };
+      if (schoolId) {
+        schoolIdFilter = schoolId;
+      } else {
+        const assigned = await this.db.teacherSchool.findMany({
+          where: { teacherId: user.id },
+          select: { schoolId: true },
+        });
+        if (assigned.length === 0) return { schedules: [] as any[] };
+        schoolIdFilter = { in: assigned.map((s) => s.schoolId) };
+      }
+      const where: {
+        schoolId: string | { in: string[] };
+        teacherId: number;
+        dayOfWeek?: number;
+      } = {
+        schoolId: schoolIdFilter,
+        teacherId: user.id,
+      };
+      if (day !== undefined && day !== '') {
+        const dayNum = TeacherExtraController.DAY_OF_WEEK_MAP[day];
+        if (dayNum !== undefined) where.dayOfWeek = dayNum;
+      }
+      const schedules = await this.db.classSchedule.findMany({
+        where,
+        orderBy: [{ dayOfWeek: 'asc' }, { id: 'asc' }],
       });
-      if (assigned.length === 0) return { schedules: [] };
-      schoolIdFilter = { in: assigned.map((s) => s.schoolId) };
-    }
-    const where: {
-      schoolId: string | { in: string[] };
-      teacherId: number;
-      dayOfWeek?: number;
-    } = {
-      schoolId: schoolIdFilter,
-      teacherId: user.id,
+      const periodIds = Array.from(new Set(schedules.map((s) => s.periodId)));
+      const roomIds = Array.from(
+        new Set(schedules.map((s) => s.roomId).filter(Boolean)),
+      ) as string[];
+      const teacherIds = Array.from(
+        new Set(schedules.map((s) => s.teacherId).filter(Boolean)),
+      ) as number[];
+      const scheduleSchoolIds = Array.from(
+        new Set(schedules.map((s) => s.schoolId)),
+      );
+      const [periods, rooms, teachers, schoolRows] = await Promise.all([
+        periodIds.length > 0
+          ? this.db.period.findMany({ where: { id: { in: periodIds } } })
+          : ([] as any[]),
+        roomIds.length > 0
+          ? this.db.room.findMany({ where: { id: { in: roomIds } } })
+          : ([] as any[]),
+        teacherIds.length > 0
+          ? this.db.user.findMany({
+              where: { id: { in: teacherIds } },
+              include: { profile: true },
+            })
+          : ([] as any[]),
+        scheduleSchoolIds.length > 0
+          ? this.db.school.findMany({
+              where: { id: { in: scheduleSchoolIds } },
+              select: { id: true, name: true },
+            })
+          : ([] as any[]),
+      ]);
+      const periodMap = new Map<string, any>(
+        periods.map((p: any) => [p.id, p] as [string, any]),
+      );
+      const roomMap = new Map<string, any>(
+        rooms.map((r: any) => [r.id, r] as [string, any]),
+      );
+      const teacherMap = new Map<number, any>(
+        teachers.map((t: any) => [t.id, t] as [number, any]),
+      );
+      const schoolMap = new Map<string, { id: string; name: string }>(
+        schoolRows.map(
+          (s: any) => [s.id, s] as [string, { id: string; name: string }],
+        ),
+      );
+      return {
+        schedules: schedules
+          .map((s) => ({
+            id: s.id,
+            school_id: s.schoolId,
+            class_id: (s as { classId?: string | null }).classId ?? null,
+            teacher_id: s.teacherId ? String(s.teacherId) : null,
+            subject: (s as { subject?: string | null }).subject ?? '',
+            grade: (s as { grade?: string | null }).grade ?? '',
+            section: (s as { section?: string | null }).section ?? null,
+            period_id: s.periodId,
+            day_of_week: Object.entries(
+              TeacherExtraController.DAY_OF_WEEK_MAP,
+            ).find(([_, n]) => n === s.dayOfWeek)?.[0],
+            day: Object.entries(TeacherExtraController.DAY_OF_WEEK_MAP).find(
+              ([_, n]) => n === s.dayOfWeek,
+            )?.[0],
+            start_time:
+              (s as { startTime?: string | null }).startTime ??
+              periodMap.get(s.periodId)?.startTime ??
+              null,
+            end_time:
+              (s as { endTime?: string | null }).endTime ??
+              periodMap.get(s.periodId)?.endTime ??
+              null,
+            academic_year:
+              (s as { academicYear?: string | null }).academicYear ?? '2024-25',
+            is_active: (s as { isActive?: boolean }).isActive !== false,
+            notes: (s as { notes?: string | null }).notes ?? null,
+            period: (() => {
+              const p = periodMap.get(s.periodId);
+              return p
+                ? {
+                    id: p.id,
+                    period_number: p.periodNumber,
+                    start_time: p.startTime,
+                    end_time: p.endTime,
+                  }
+                : null;
+            })(),
+            room: (() => {
+              const r = s.roomId ? roomMap.get(s.roomId) : undefined;
+              return r
+                ? {
+                    id: r.id,
+                    room_number: r.roomNumber ?? r.name,
+                    room_name: r.roomName ?? null,
+                    capacity: r.capacity ?? null,
+                  }
+                : null;
+            })(),
+            teacher: (() => {
+              const t = s.teacherId ? teacherMap.get(s.teacherId) : undefined;
+              return t
+                ? {
+                    id: String(t.id),
+                    full_name: t.profile?.fullName ?? t.email,
+                    email: t.email,
+                  }
+                : null;
+            })(),
+            school: (() => {
+              const sc = schoolMap.get(s.schoolId);
+              return sc ? { id: sc.id, name: sc.name } : null;
+            })(),
+          }))
+          .sort((a, b) => {
+            // Mon-first weekday order (matches teacher UI day filter).
+            const monFirst = [1, 2, 3, 4, 5, 6, 0];
+            const dayNum = (name?: string) =>
+              name
+                ? (TeacherExtraController.DAY_OF_WEEK_MAP[name] ?? 99)
+                : 99;
+            const dayA = monFirst.indexOf(dayNum(a.day_of_week));
+            const dayB = monFirst.indexOf(dayNum(b.day_of_week));
+            const dayDiff =
+              (dayA < 0 ? 99 : dayA) - (dayB < 0 ? 99 : dayB);
+            if (dayDiff !== 0) return dayDiff;
+            const tA =
+              a.start_time ??
+              (a.period as { start_time?: string } | null)?.start_time ??
+              '';
+            const tB =
+              b.start_time ??
+              (b.period as { start_time?: string } | null)?.start_time ??
+              '';
+            const timeCmp = String(tA).localeCompare(String(tB));
+            if (timeCmp !== 0) return timeCmp;
+            const pA =
+              (a.period as { period_number?: number } | null)?.period_number ??
+              0;
+            const pB =
+              (b.period as { period_number?: number } | null)?.period_number ??
+              0;
+            return pA - pB;
+          }),
+      };
     };
-    if (day !== undefined && day !== '') {
-      const dayNum = TeacherExtraController.DAY_OF_WEEK_MAP[day];
-      if (dayNum !== undefined) where.dayOfWeek = dayNum;
+
+    if (schoolId) {
+      return load();
     }
-    const schedules = await this.db.classSchedule.findMany({
-      where,
-      orderBy: [{ dayOfWeek: 'asc' }, { id: 'asc' }],
-    });
-    const periodIds = Array.from(new Set(schedules.map((s) => s.periodId)));
-    const roomIds = Array.from(
-      new Set(schedules.map((s) => s.roomId).filter(Boolean)),
-    ) as string[];
-    const teacherIds = Array.from(
-      new Set(schedules.map((s) => s.teacherId).filter(Boolean)),
-    ) as number[];
-    const scheduleSchoolIds = Array.from(new Set(schedules.map((s) => s.schoolId)));
-    const [periods, rooms, teachers, schoolRows] = await Promise.all([
-      periodIds.length > 0
-        ? this.db.period.findMany({ where: { id: { in: periodIds } } })
-        : ([] as any[]),
-      roomIds.length > 0
-        ? this.db.room.findMany({ where: { id: { in: roomIds } } })
-        : ([] as any[]),
-      teacherIds.length > 0
-        ? this.db.user.findMany({
-            where: { id: { in: teacherIds } },
-            include: { profile: true },
-          })
-        : ([] as any[]),
-      scheduleSchoolIds.length > 0
-        ? this.db.school.findMany({
-            where: { id: { in: scheduleSchoolIds } },
-            select: { id: true, name: true },
-          })
-        : ([] as any[]),
-    ]);
-    const periodMap = new Map<string, any>(
-      periods.map((p: any) => [p.id, p] as [string, any]),
-    );
-    const roomMap = new Map<string, any>(
-      rooms.map((r: any) => [r.id, r] as [string, any]),
-    );
-    const teacherMap = new Map<number, any>(
-      teachers.map((t: any) => [t.id, t] as [number, any]),
-    );
-    const schoolMap = new Map<string, { id: string; name: string }>(
-      schoolRows.map((s: any) => [s.id, s] as [string, { id: string; name: string }]),
-    );
-    return {
-      schedules: schedules.map((s) => ({
-        id: s.id,
-        school_id: s.schoolId,
-        class_id: (s as { classId?: string | null }).classId ?? null,
-        teacher_id: s.teacherId ? String(s.teacherId) : null,
-        subject: (s as { subject?: string | null }).subject ?? '',
-        grade: (s as { grade?: string | null }).grade ?? '',
-        period_id: s.periodId,
-        day_of_week: Object.entries(
-          TeacherExtraController.DAY_OF_WEEK_MAP,
-        ).find(([_, n]) => n === s.dayOfWeek)?.[0],
-        day: Object.entries(TeacherExtraController.DAY_OF_WEEK_MAP).find(
-          ([_, n]) => n === s.dayOfWeek,
-        )?.[0],
-        start_time:
-          (s as { startTime?: string | null }).startTime ??
-          periodMap.get(s.periodId)?.startTime ??
-          null,
-        end_time:
-          (s as { endTime?: string | null }).endTime ??
-          periodMap.get(s.periodId)?.endTime ??
-          null,
-        academic_year:
-          (s as { academicYear?: string | null }).academicYear ?? '2024-25',
-        is_active: (s as { isActive?: boolean }).isActive !== false,
-        notes: (s as { notes?: string | null }).notes ?? null,
-        period: (() => {
-          const p = periodMap.get(s.periodId);
-          return p
-            ? {
-                id: p.id,
-                period_number: p.periodNumber,
-                start_time: p.startTime,
-                end_time: p.endTime,
-              }
-            : null;
-        })(),
-        room: (() => {
-          const r = s.roomId ? roomMap.get(s.roomId) : undefined;
-          return r
-            ? {
-                id: r.id,
-                room_number: r.roomNumber ?? r.name,
-                room_name: r.roomName ?? null,
-                capacity: r.capacity ?? null,
-              }
-            : null;
-        })(),
-        teacher: (() => {
-          const t = s.teacherId ? teacherMap.get(s.teacherId) : undefined;
-          return t
-            ? {
-                id: String(t.id),
-                full_name: t.profile?.fullName ?? t.email,
-                email: t.email,
-              }
-            : null;
-        })(),
-        school: (() => {
-          const sc = schoolMap.get(s.schoolId);
-          return sc ? { id: sc.id, name: sc.name } : null;
-        })(),
-      })),
-    };
+    return tenantContext.runSuperAdmin(async () => await load());
   }
 
   @Get('assignments')
@@ -1254,6 +1322,9 @@ export class TeacherExtraController {
         // so the ★ average-score chip in the assignment list never rendered.
         avg_score: avgScoreMap.get(a.id) ?? null,
         academic_year: (a as any).academicYear ?? null,
+        publish_scope: (a as any).publishScope ?? null,
+        published_grade_ids: (a as any).publishedGradeIds ?? [],
+        published_section_ids: (a as any).publishedSectionIds ?? [],
       })),
     };
   }
@@ -1472,6 +1543,13 @@ export class TeacherExtraController {
         courseId: true,
         chapterId: true,
         isPublished: true,
+        title: true,
+        dueDate: true,
+        subject: true,
+        gradeId: true,
+        publishScope: true,
+        publishedGradeIds: true,
+        publishedSectionIds: true,
       },
     });
     if (
@@ -1517,12 +1595,26 @@ export class TeacherExtraController {
       },
     });
 
-    // Notify students when an assignment is first published via PATCH
-    if (!wasPublished && updated.isPublished && updated.schoolId) {
+    // Notify only newly targeted students when published (2A).
+    // Drafts stay silent. Narrowing audience does not notify and never deletes submissions.
+    if (updated.isPublished && updated.schoolId) {
       const sid = updated.schoolId;
-      await this.runInSchool(sid, () =>
-        this.notifyTargetedStudents(assignmentId, sid, updated),
-      );
+      await this.runInSchool(sid, async () => {
+        const previousIds = wasPublished
+          ? await this.resolveTargetedStudentIds(sid, current)
+          : [];
+        const nextIds = await this.resolveTargetedStudentIds(sid, updated);
+        const prevSet = new Set(previousIds);
+        const newlyTargeted = nextIds.filter((id) => !prevSet.has(id));
+        if (newlyTargeted.length > 0) {
+          await this.notifyTargetedStudents(
+            assignmentId,
+            sid,
+            updated,
+            newlyTargeted,
+          );
+        }
+      });
     }
 
     if (Array.isArray(body.questions)) {
@@ -1762,15 +1854,15 @@ export class TeacherExtraController {
       where: { id: assignmentId },
       select: { title: true, maxRetakeAttempts: true },
     });
-    await this.db.notification.createMany({
-      data: studentIds.map((studentId) => ({
+    await this.notificationsService.createManyRespectingPrefs(
+      studentIds.map((studentId) => ({
         userId: studentId,
         senderId: user.id,
         title: `Retake granted: ${fullAssignment?.title ?? 'Assignment'}`,
         message: `Your teacher has allowed a retake for "${fullAssignment?.title ?? 'an assignment'}". Attempts remaining: ${fullAssignment?.maxRetakeAttempts ?? 'Unlimited'}.`,
         mode: 'assignment_due',
       })),
-    });
+    );
     return { success: true, granted_count: studentIds.length };
   }
 
@@ -1778,7 +1870,7 @@ export class TeacherExtraController {
   async openRetakeForAll(
     @CurrentUser() user: { id: number },
     @Param('assignmentId') assignmentId: string,
-    @Body() body: { gradeId?: string },
+    @Body() body: { gradeId?: string; sectionId?: string },
   ) {
     const assignment = await this.db.assignment.findUnique({
       where: { id: assignmentId },
@@ -1790,6 +1882,9 @@ export class TeacherExtraController {
         chapterId: true,
         title: true,
         maxRetakeAttempts: true,
+        publishScope: true,
+        publishedGradeIds: true,
+        publishedSectionIds: true,
       },
     });
     if (
@@ -1808,7 +1903,8 @@ export class TeacherExtraController {
       data: {
         retakeEnabled: true,
         retakeWindowOpen: true,
-        retakeAccessScope: body.gradeId ? 'selected' : 'all',
+        retakeAccessScope:
+          body.sectionId || body.gradeId ? 'selected' : 'all',
       },
     });
 
@@ -1819,12 +1915,39 @@ export class TeacherExtraController {
           schoolId,
           isActive: true,
         },
-        select: { studentId: true, grade: true },
+        select: { studentId: true, grade: true, section: true },
       });
 
       let studentIds = enrollments.map((e) => e.studentId);
 
-      if (body.gradeId) {
+      if (
+        assignment.publishScope === 'section' &&
+        assignment.publishedSectionIds?.length
+      ) {
+        const sections = await this.db.section.findMany({
+          where: { id: { in: assignment.publishedSectionIds } },
+          select: { name: true, grade: { select: { name: true } } },
+        });
+        const targets = new Set(
+          sections.map((s) => `${s.grade.name}::${s.name}`),
+        );
+        studentIds = enrollments
+          .filter((e) => targets.has(`${e.grade ?? ''}::${e.section ?? ''}`))
+          .map((e) => e.studentId);
+      } else if (body.sectionId) {
+        const section = await this.db.section.findUnique({
+          where: { id: body.sectionId },
+          select: { name: true, grade: { select: { name: true } } },
+        });
+        if (section) {
+          studentIds = enrollments
+            .filter(
+              (e) =>
+                e.grade === section.grade.name && e.section === section.name,
+            )
+            .map((e) => e.studentId);
+        }
+      } else if (body.gradeId) {
         const grade = await this.db.grade.findUnique({
           where: { id: body.gradeId },
           select: { name: true },
@@ -1834,6 +1957,15 @@ export class TeacherExtraController {
             .filter((e) => e.grade === grade.name)
             .map((e) => e.studentId);
         }
+      } else if (assignment.publishedGradeIds?.length) {
+        const grades = await this.db.grade.findMany({
+          where: { id: { in: assignment.publishedGradeIds } },
+          select: { name: true },
+        });
+        const names = new Set(grades.map((g) => g.name));
+        studentIds = enrollments
+          .filter((e) => names.has(e.grade ?? ''))
+          .map((e) => e.studentId);
       }
 
       // Only grant to students who have already submitted at least once
@@ -1861,15 +1993,15 @@ export class TeacherExtraController {
             }),
           ),
         );
-        await this.db.notification.createMany({
-          data: submittedStudentIds.map((studentId) => ({
+        await this.notificationsService.createManyRespectingPrefs(
+          submittedStudentIds.map((studentId) => ({
             userId: studentId,
             senderId: user.id,
             title: `Retake now available: ${assignment.title}`,
             message: `Retake window is now open for "${assignment.title}". Attempts allowed: ${assignment.maxRetakeAttempts ?? 'Unlimited'}.`,
             mode: 'assignment_due',
           })),
-        });
+        );
       }
 
       return submittedStudentIds.length;
@@ -2150,7 +2282,9 @@ export class TeacherExtraController {
 
     // Single batch insert instead of one INSERT per grade.
     if (pendingNotifications.length) {
-      await this.db.notification.createMany({ data: pendingNotifications });
+      await this.notificationsService.createManyRespectingPrefs(
+        pendingNotifications,
+      );
     }
 
     // Recompute per-student scores, then recompute school summary once per school
@@ -2319,15 +2453,15 @@ export class TeacherExtraController {
       select: { title: true, totalMarks: true },
     });
     if (fullAssignment) {
-      await this.db.notification.create({
-        data: {
+      await this.notificationsService.createManyRespectingPrefs([
+        {
           userId: updated.studentId,
           senderId: user.id,
           title: `Assignment graded: ${fullAssignment.title}`,
           message: `Your assignment "${fullAssignment.title}" has been graded. Score: ${updated.score ?? 0}/${fullAssignment.totalMarks ?? updated.maxScore ?? 0}.`,
           mode: 'grade_posted',
         },
-      });
+      ]);
     }
     return { submission: updated };
   }

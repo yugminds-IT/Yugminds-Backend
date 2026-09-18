@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { DigestService } from './digest.service';
 import { DatabaseService } from '../../database/database.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
 
 describe('DigestService', () => {
@@ -13,9 +14,9 @@ describe('DigestService', () => {
     passwordResetRequest: { count: jest.Mock };
     teacherLeave: { count: jest.Mock };
     contactSubmission: { count: jest.Mock };
-    notification: { createMany: jest.Mock };
     $queryRaw: jest.Mock;
   };
+  let notifications: { createManyRespectingPrefs: jest.Mock };
 
   beforeEach(async () => {
     db = {
@@ -32,12 +33,18 @@ describe('DigestService', () => {
       passwordResetRequest: { count: jest.fn().mockResolvedValue(0) },
       teacherLeave: { count: jest.fn().mockResolvedValue(0) },
       contactSubmission: { count: jest.fn().mockResolvedValue(0) },
-      notification: { createMany: jest.fn().mockResolvedValue({ count: 2 }) },
       $queryRaw: jest.fn().mockResolvedValue([{ count: 0n }]),
+    };
+    notifications = {
+      createManyRespectingPrefs: jest.fn().mockResolvedValue(2),
     };
 
     const module: TestingModule = await Test.createTestingModule({
-      providers: [DigestService, { provide: DatabaseService, useValue: db }],
+      providers: [
+        DigestService,
+        { provide: DatabaseService, useValue: db },
+        { provide: NotificationsService, useValue: notifications },
+      ],
     }).compile();
 
     service = module.get<DigestService>(DigestService);
@@ -51,7 +58,7 @@ describe('DigestService', () => {
       expect(db.user.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: { role: Role.admin, isActive: true } }),
       );
-      expect(db.notification.createMany).toHaveBeenCalledTimes(1);
+      expect(notifications.createManyRespectingPrefs).toHaveBeenCalledTimes(1);
       expect(db.systemSetting.upsert).toHaveBeenCalledWith(
         expect.objectContaining({ where: { key: 'digest:last_sent_at' } }),
       );
@@ -66,7 +73,7 @@ describe('DigestService', () => {
       const result = await service.sendWeeklyDigest();
 
       expect(result).toEqual({ recipients: 0, skipped: true });
-      expect(db.notification.createMany).not.toHaveBeenCalled();
+      expect(notifications.createManyRespectingPrefs).not.toHaveBeenCalled();
       expect(db.systemSetting.upsert).not.toHaveBeenCalled();
     });
 
@@ -79,7 +86,7 @@ describe('DigestService', () => {
       const result = await service.sendWeeklyDigest();
 
       expect(result).toEqual({ recipients: 2 });
-      expect(db.notification.createMany).toHaveBeenCalledTimes(1);
+      expect(notifications.createManyRespectingPrefs).toHaveBeenCalledTimes(1);
     });
 
     it('does not error and skips notification creation when there are no active admins', async () => {
@@ -88,7 +95,7 @@ describe('DigestService', () => {
       const result = await service.sendWeeklyDigest();
 
       expect(result).toEqual({ recipients: 0 });
-      expect(db.notification.createMany).not.toHaveBeenCalled();
+      expect(notifications.createManyRespectingPrefs).not.toHaveBeenCalled();
     });
   });
 });

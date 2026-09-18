@@ -2,6 +2,40 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
+import * as fs from 'fs';
+
+function agentDebugLog(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+) {
+  const payload = {
+    sessionId: '990e57',
+    runId: 'pre-fix',
+    hypothesisId,
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+  };
+  try {
+    fs.appendFileSync(
+      '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
+      JSON.stringify(payload) + '\n',
+    );
+  } catch {
+    /* ignore */
+  }
+  fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Debug-Session-Id': '990e57',
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
 
 @Injectable()
 export class TeacherAttendanceService {
@@ -126,20 +160,27 @@ export class TeacherAttendanceService {
       periodById.set(p.id, { startTime: p.startTime, endTime: p.endTime }),
     );
 
-    const scheduled = schedules.map((s) => {
-      const p = periodById.get(s.periodId);
-      return {
-        period_id: s.periodId,
-        grade: (s as { grade?: string | null }).grade ?? undefined,
-        subject: (s as { subject?: string | null }).subject ?? undefined,
-        start_time:
-          (s as { startTime?: string | null }).startTime ??
-          p?.startTime ??
-          undefined,
-        end_time:
-          (s as { endTime?: string | null }).endTime ?? p?.endTime ?? undefined,
-      };
-    });
+    const scheduled = schedules
+      .map((s) => {
+        const p = periodById.get(s.periodId);
+        return {
+          period_id: s.periodId,
+          grade: (s as { grade?: string | null }).grade ?? undefined,
+          section: (s as { section?: string | null }).section ?? undefined,
+          subject: (s as { subject?: string | null }).subject ?? undefined,
+          start_time:
+            (s as { startTime?: string | null }).startTime ??
+            p?.startTime ??
+            undefined,
+          end_time:
+            (s as { endTime?: string | null }).endTime ?? p?.endTime ?? undefined,
+        };
+      })
+      // periodId is a UUID — orderBy periodId is random vs clock time.
+      // Sort by start_time so Pending/Submitted lists read chronologically.
+      .sort((a, b) =>
+        String(a.start_time ?? '').localeCompare(String(b.start_time ?? '')),
+      );
 
     const uniquePeriodIds = Array.from(
       new Set(scheduled.map((p) => p.period_id).filter(Boolean)),
@@ -155,9 +196,18 @@ export class TeacherAttendanceService {
               reportDate: { gte: dateStart, lte: dateEnd },
               periodId: { in: uniquePeriodIds },
             },
-            select: { periodId: true },
+            select: { periodId: true, status: true },
           })
         : [];
+
+    // #region agent log
+    agentDebugLog('D', 'attendance.service.ts:progress-reports', 'attendance progress report statuses', {
+      totalReports: reports.length,
+      rejectedCount: reports.filter((r) => r.status === 'rejected').length,
+      statuses: reports.map((r) => r.status),
+      uniquePeriodIds: uniquePeriodIds.length,
+    });
+    // #endregion
 
     const reportedPeriodIds = new Set(
       reports.map((r) => r.periodId).filter(Boolean) as string[],

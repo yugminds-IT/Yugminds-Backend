@@ -20,6 +20,7 @@ export class TeacherReportsController {
     return this.service.create(user.id, {
       school_id: body.school_id as string,
       grade: body.grade as string | undefined,
+      section: body.section as string | undefined,
       date: body.date as string,
       period_id: body.period_id as string | undefined,
       start_time: body.start_time as string | undefined,
@@ -27,6 +28,12 @@ export class TeacherReportsController {
       topics_taught: body.topics_taught as string | undefined,
       activities: body.activities as string | undefined,
       notes: body.notes as string | undefined,
+      student_count:
+        typeof body.student_count === 'number'
+          ? body.student_count
+          : body.student_count != null
+            ? Number(body.student_count)
+            : undefined,
     });
   }
 

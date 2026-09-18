@@ -37,6 +37,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
     expect(found).toBeTruthy();
     expect(found.day_of_week).toBe('Monday');
     expect(Number(found.teacher_id)).toBe(fixture.teachers[0].id);
+    expect(found.section).toBe(fixture.section);
   });
 
   describe('full CRUD on a second schedule (different period/day to avoid conflicting with the fixture schedule)', () => {
@@ -61,6 +62,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           room_id: fixture.roomId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Tuesday',
         })
@@ -69,6 +71,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
       expect(scheduleId).toBeTruthy();
       expect(res.body.schedule.subject).toBe('Science');
       expect(res.body.schedule.day_of_week).toBe('Tuesday');
+      expect(res.body.schedule.section).toBe(fixture.section);
     });
 
     it('rejects a conflicting schedule (same teacher/day/period)', async () => {
@@ -79,6 +82,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: periodId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Math',
           day_of_week: 'Tuesday',
         })
@@ -160,6 +164,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
       (s: any) => s.id === fixture.scheduleId,
     );
     expect(found).toBeTruthy();
+    expect(found.section).toBe(fixture.section);
   });
 
   describe('assertTeacherSchedulable — assigned-school/working-day/date-range enforcement', () => {
@@ -191,6 +196,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           teacher_id: 999999999,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Wednesday',
         });
@@ -206,6 +212,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Saturday',
         });
@@ -250,6 +257,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Wednesday',
         });
@@ -271,6 +279,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Wednesday',
         });
@@ -325,6 +334,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
         .send({
           period_id: extraPeriodId,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Saturday',
         });
@@ -340,6 +350,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Saturday',
         });
@@ -360,6 +371,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
         .send({
           period_id: extraPeriodId,
           grade: fixture.grade,
+          section: fixture.section,
           subject: 'Science',
           day_of_week: 'Saturday',
         });

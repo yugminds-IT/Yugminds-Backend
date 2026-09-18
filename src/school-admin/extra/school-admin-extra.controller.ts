@@ -139,6 +139,34 @@ export class SchoolAdminExtraController {
     }
   }
 
+  /**
+   * When the school has configured sections for a grade, schedules for that
+   * grade must pick one of those sections (match StudentSchool.section).
+   * Grades with no configured sections stay section-optional for legacy data.
+   */
+  private async assertValidScheduleSection(
+    schoolId: string,
+    gradeName: string,
+    section: string | null,
+  ): Promise<void> {
+    const grade = await this.db.grade.findFirst({
+      where: { schoolId, name: gradeName },
+      include: { sections: { select: { name: true } } },
+    });
+    if (!grade || grade.sections.length === 0) return;
+    const allowed = new Set(grade.sections.map((s) => s.name));
+    if (!section) {
+      throw new BadRequestException(
+        `Section is required for ${gradeName}. Choose one of: ${[...allowed].join(', ')}.`,
+      );
+    }
+    if (!allowed.has(section)) {
+      throw new BadRequestException(
+        `Section "${section}" is not configured for ${gradeName}.`,
+      );
+    }
+  }
+
   // School & profile: GET school / GET stats handled by dedicated controllers.
   // PUT school / PUT profile remain optional placeholders.
 
@@ -166,13 +194,21 @@ export class SchoolAdminExtraController {
       ...rest,
       full_name: found.profile?.fullName ?? null,
       phone: found.profile?.phone ?? null,
+      system_alerts: found.profile?.systemAlerts ?? true,
+      teacher_leave_requests: found.profile?.teacherLeaveRequests ?? true,
     };
   }
 
   @Patch('profile')
   async patchProfile(
     @CurrentUser() user: { id: number },
-    @Body() body: { full_name?: string; phone?: string },
+    @Body()
+    body: {
+      full_name?: string;
+      phone?: string;
+      system_alerts?: boolean;
+      teacher_leave_requests?: boolean;
+    },
   ) {
     // An empty/whitespace-only value means "no change requested," not "clear
     // the name" — matches AdminProfileService.update's semantics. This used
@@ -187,18 +223,33 @@ export class SchoolAdminExtraController {
       typeof body?.phone === 'string' && body.phone.trim()
         ? body.phone.trim()
         : undefined;
+    const systemAlerts =
+      typeof body?.system_alerts === 'boolean' ? body.system_alerts : undefined;
+    const teacherLeaveRequests =
+      typeof body?.teacher_leave_requests === 'boolean'
+        ? body.teacher_leave_requests
+        : undefined;
 
-    if (fullName !== undefined || phone !== undefined) {
+    if (
+      fullName !== undefined ||
+      phone !== undefined ||
+      systemAlerts !== undefined ||
+      teacherLeaveRequests !== undefined
+    ) {
       await this.db.profile.upsert({
         where: { userId: user.id },
         create: {
           userId: user.id,
           fullName: fullName ?? null,
           phone: phone ?? null,
+          ...(systemAlerts !== undefined && { systemAlerts }),
+          ...(teacherLeaveRequests !== undefined && { teacherLeaveRequests }),
         },
         update: {
           ...(fullName !== undefined && { fullName }),
           ...(phone !== undefined && { phone }),
+          ...(systemAlerts !== undefined && { systemAlerts }),
+          ...(teacherLeaveRequests !== undefined && { teacherLeaveRequests }),
         },
       });
     }
@@ -720,6 +771,22 @@ export class SchoolAdminExtraController {
                     .filter(Boolean),
                 ),
               ],
+              grade_sections_assigned: (() => {
+                const byGrade = new Map<string, string[]>();
+                for (const a of u?.teacherSectionAssignments ?? []) {
+                  const gradeName = a.section?.grade?.name ?? '';
+                  const sectionName = a.section?.name ?? '';
+                  if (!gradeName) continue;
+                  if (!byGrade.has(gradeName)) byGrade.set(gradeName, []);
+                  const list = byGrade.get(gradeName)!;
+                  if (sectionName && !list.includes(sectionName))
+                    list.push(sectionName);
+                }
+                return [...byGrade.entries()].map(([grade, sections]) => ({
+                  grade,
+                  sections,
+                }));
+              })(),
               subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
               working_days_per_week: ts.workingDaysPerWeek ?? 5,
               working_days: Array.isArray(ts.workingDays)
@@ -1607,10 +1674,23 @@ export class SchoolAdminExtraController {
         countProgress > 0 ? sumProgress / countProgress : 0;
       const completionRate =
         enrolledCount > 0 ? (completedCount / enrolledCount) * 100 : 0;
+      const enrolledGrades = [
+        ...new Set(
+          studentsDto
+            .filter((s) => enrolledStudentIds.has(Number(s.student_id)))
+            .map((s) => {
+              const g = (s.grade ?? '').trim();
+              const sec = (s.section ?? '').trim();
+              if (!g) return '';
+              return sec ? `${g}-${sec}` : g;
+            })
+            .filter(Boolean),
+        ),
+      ].sort();
       return {
         course_id: cid,
         course_name: course?.title ?? '',
-        grade: '',
+        grade: enrolledGrades.join(', '),
         total_chapters: chaptersByCourseS.get(cid)?.length ?? 0,
         enrolled_students: enrolledCount,
         completed_students: completedCount,
@@ -1658,7 +1738,12 @@ export class SchoolAdminExtraController {
       where: { schoolId, course: { deletedAt: null } },
       take,
       include: {
-        gradeAccess: { select: { gradeName: true } },
+        gradeAccess: {
+          select: {
+            gradeName: true,
+            sectionAccess: { select: { sectionName: true } },
+          },
+        },
         course: {
           include: {
             chapters: {
@@ -1679,6 +1764,10 @@ export class SchoolAdminExtraController {
       const grades = Array.from(
         new Set(a.gradeAccess.map((g) => g.gradeName).filter(Boolean)),
       ).sort();
+      const grade_access = a.gradeAccess.map((g) => ({
+        grade: g.gradeName,
+        sections: (g.sectionAccess ?? []).map((s) => s.sectionName).filter(Boolean),
+      }));
       return {
         id: a.course.id,
         title: a.course.title,
@@ -1688,6 +1777,7 @@ export class SchoolAdminExtraController {
         num_chapters: a.course._count.chapters,
         school_id: schoolId,
         grades,
+        grade_access,
         chapters: (a.course.chapters ?? []).map((ch) => {
           const c0 = (ch.contents ?? [])[0];
           return {
@@ -1735,11 +1825,14 @@ export class SchoolAdminExtraController {
         isActive: true,
         student: { role: Role.student, isActive: true, deletedAt: null },
       },
-      select: { studentId: true, grade: true },
+      select: { studentId: true, grade: true, section: true },
     });
     const realStudentIds = studentSchools.map((ss) => ss.studentId);
     const gradeByStudentId = new Map(
       studentSchools.map((ss) => [ss.studentId, ss.grade ?? '']),
+    );
+    const sectionByStudentId = new Map(
+      studentSchools.map((ss) => [ss.studentId, ss.section ?? '']),
     );
 
     const enrollments = realStudentIds.length
@@ -1803,6 +1896,17 @@ export class SchoolAdminExtraController {
           string,
           { total: number; completed: number; sum: number; count: number }
         >;
+        byGradeSection: Record<
+          string,
+          {
+            grade: string;
+            section: string;
+            total: number;
+            completed: number;
+            sum: number;
+            count: number;
+          }
+        >;
         completedChaptersSum: number;
       }
     > = {};
@@ -1813,12 +1917,14 @@ export class SchoolAdminExtraController {
         count: 0,
         completedSet: new Set(),
         byGrade: {},
+        byGradeSection: {},
         completedChaptersSum: 0,
       };
     }
     for (const e of enrollments) {
       byCourse[e.courseId]?.studentIds.push(e.studentId);
       const g = String(gradeByStudentId.get(e.studentId) ?? '').trim();
+      const sec = String(sectionByStudentId.get(e.studentId) ?? '').trim();
       if (g) {
         if (!byCourse[e.courseId].byGrade[g])
           byCourse[e.courseId].byGrade[g] = {
@@ -1828,6 +1934,17 @@ export class SchoolAdminExtraController {
             count: 0,
           };
         byCourse[e.courseId].byGrade[g].total += 1;
+        const gsKey = `${g}\0${sec}`;
+        if (!byCourse[e.courseId].byGradeSection[gsKey])
+          byCourse[e.courseId].byGradeSection[gsKey] = {
+            grade: g,
+            section: sec,
+            total: 0,
+            completed: 0,
+            sum: 0,
+            count: 0,
+          };
+        byCourse[e.courseId].byGradeSection[gsKey].total += 1;
       }
     }
 
@@ -1856,10 +1973,18 @@ export class SchoolAdminExtraController {
       if (computed.status === 'completed') bucket.completedSet.add(e.studentId);
       bucket.completedChaptersSum += computed.completedChapters;
       const g = String(gradeByStudentId.get(e.studentId) ?? '').trim();
+      const sec = String(sectionByStudentId.get(e.studentId) ?? '').trim();
       if (g && bucket.byGrade[g]) {
         bucket.byGrade[g].sum += computed.progressPercentage;
         bucket.byGrade[g].count += 1;
         if (computed.status === 'completed') bucket.byGrade[g].completed += 1;
+      }
+      const gsKey = `${g}\0${sec}`;
+      if (g && bucket.byGradeSection[gsKey]) {
+        bucket.byGradeSection[gsKey].sum += computed.progressPercentage;
+        bucket.byGradeSection[gsKey].count += 1;
+        if (computed.status === 'completed')
+          bucket.byGradeSection[gsKey].completed += 1;
       }
     }
 
@@ -1870,11 +1995,20 @@ export class SchoolAdminExtraController {
         count: 0,
         completedSet: new Set<number>(),
         byGrade: {},
+        byGradeSection: {},
         completedChaptersSum: 0,
       };
       const avg = b.count > 0 ? b.sum / b.count : 0;
       const grade_breakdown = Object.entries(b.byGrade).map(([grade, g]) => ({
         grade,
+        total: g.total,
+        completed: g.completed,
+        average_progress:
+          g.count > 0 ? Number((g.sum / g.count).toFixed(2)) : 0,
+      }));
+      const section_breakdown = Object.values(b.byGradeSection).map((g) => ({
+        grade: g.grade,
+        section: g.section || null,
         total: g.total,
         completed: g.completed,
         average_progress:
@@ -1893,6 +2027,7 @@ export class SchoolAdminExtraController {
         total_chapters: totalChapters,
         chapters_completed: Number(avgCompletedChapters.toFixed(2)),
         grade_breakdown,
+        section_breakdown,
       };
     });
     return { progress };
@@ -2116,6 +2251,7 @@ export class SchoolAdminExtraController {
           teacher_id: s.teacherId ? String(s.teacherId) : null,
           subject: (s as { subject?: string | null }).subject ?? '',
           grade: (s as { grade?: string | null }).grade ?? '',
+          section: (s as { section?: string | null }).section ?? null,
           period_id: s.periodId,
           day_of_week: dayName ?? 'Monday',
           start_time: startTime,
@@ -2188,6 +2324,7 @@ export class SchoolAdminExtraController {
         teacher_id: schedule.teacherId ? String(schedule.teacherId) : null,
         subject: (schedule as { subject?: string | null }).subject ?? '',
         grade: (schedule as { grade?: string | null }).grade ?? '',
+        section: (schedule as { section?: string | null }).section ?? null,
         period_id: schedule.periodId,
         day_of_week: dayOfWeek,
         start_time: schedule.startTime ?? period?.startTime ?? '',
@@ -2233,6 +2370,7 @@ export class SchoolAdminExtraController {
       teacher_id?: string | number | null;
       subject?: string;
       grade?: string;
+      section?: string | null;
       day_of_week?: string;
       period_id?: string | null;
       room_id?: string | null;
@@ -2262,9 +2400,11 @@ export class SchoolAdminExtraController {
           : parseInt(String(body.teacher_id), 10);
     const roomId = body?.room_id == null ? null : String(body.room_id);
     const grade = String(body?.grade ?? '').trim();
+    const section = String(body?.section ?? '').trim() || null;
     const subject = String(body?.subject ?? '').trim();
     if (!grade || !subject)
       throw new BadRequestException('grade and subject are required');
+    await this.assertValidScheduleSection(schoolId, grade, section);
     if (teacherId != null && (!Number.isFinite(teacherId) || teacherId <= 0))
       throw new BadRequestException('Invalid teacher_id');
     if (roomId) {
@@ -2304,6 +2444,7 @@ export class SchoolAdminExtraController {
         teacherId,
         roomId,
         grade,
+        section,
         subject,
         classId: body?.class_id ?? null,
         academicYear,
@@ -2321,6 +2462,7 @@ export class SchoolAdminExtraController {
         teacher_id: schedule.teacherId ? String(schedule.teacherId) : null,
         subject: (schedule as { subject?: string | null }).subject ?? '',
         grade: (schedule as { grade?: string | null }).grade ?? '',
+        section: (schedule as { section?: string | null }).section ?? null,
         period_id: schedule.periodId,
         day_of_week: dayRaw,
         room_id: schedule.roomId ?? null,
@@ -2345,6 +2487,7 @@ export class SchoolAdminExtraController {
       teacher_id?: string | number | null;
       subject?: string;
       grade?: string;
+      section?: string | null;
       day_of_week?: string;
       period_id?: string | null;
       room_id?: string | null;
@@ -2397,12 +2540,17 @@ export class SchoolAdminExtraController {
       body?.grade === undefined
         ? ((existing as { grade?: string | null }).grade ?? '')
         : String(body.grade ?? '').trim();
+    const section =
+      body?.section === undefined
+        ? ((existing as { section?: string | null }).section ?? null)
+        : String(body.section ?? '').trim() || null;
     const subject =
       body?.subject === undefined
         ? ((existing as { subject?: string | null }).subject ?? '')
         : String(body.subject ?? '').trim();
     if (!grade || !subject)
       throw new BadRequestException('grade and subject are required');
+    await this.assertValidScheduleSection(schoolId, grade, section);
     if (teacherId != null && (!Number.isFinite(teacherId) || teacherId <= 0))
       throw new BadRequestException('Invalid teacher_id');
     if (roomId) {
@@ -2450,6 +2598,7 @@ export class SchoolAdminExtraController {
         teacherId,
         roomId,
         grade,
+        section,
         subject,
         classId:
           body?.class_id !== undefined
@@ -2484,6 +2633,7 @@ export class SchoolAdminExtraController {
         teacher_id: updated.teacherId ? String(updated.teacherId) : null,
         subject: (updated as { subject?: string | null }).subject ?? '',
         grade: (updated as { grade?: string | null }).grade ?? '',
+        section: (updated as { section?: string | null }).section ?? null,
         period_id: updated.periodId,
         day_of_week:
           dayRaw ??
@@ -2568,7 +2718,7 @@ export class SchoolAdminExtraController {
           `Day ${s.dayOfWeek}`;
         const time =
           s.startTime && s.endTime ? ` (${s.startTime}-${s.endTime})` : '';
-        return `${day}: ${s.subject ?? 'Class'} - ${s.grade ?? 'All'}${time}`;
+        return `${day}: ${s.subject ?? 'Class'} - ${s.grade ?? 'All'}${s.section ? `-${s.section}` : ''}${time}`;
       });
 
       await this.notificationsService.sendOne(user.id, teacherId, {
@@ -2795,6 +2945,7 @@ export class SchoolAdminExtraController {
           school_id: r.schoolId,
           date: r.reportDate.toISOString(),
           grade: r.grade ?? '',
+          section: r.section ?? '',
           period_id: r.periodId,
           status: toReportUiStatus(r.status as string),
           topics_taught: r.topicsTaught ?? '',
@@ -2839,6 +2990,7 @@ export class SchoolAdminExtraController {
         school_id: report.schoolId,
         date: report.reportDate.toISOString(),
         grade: report.grade ?? '',
+        section: report.section ?? '',
         period_id: report.periodId,
         status: toReportUiStatus(report.status as string),
         topics_taught: report.topicsTaught ?? '',

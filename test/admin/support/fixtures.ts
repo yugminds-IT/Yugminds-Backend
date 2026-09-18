@@ -237,6 +237,7 @@ export async function createQaFixture(
         room_id: roomId,
         teacher_id: teachers[0].id,
         grade,
+        section,
         subject: 'General',
         day_of_week: 'Monday',
       })

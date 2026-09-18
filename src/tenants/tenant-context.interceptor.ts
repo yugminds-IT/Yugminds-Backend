@@ -6,7 +6,7 @@ import {
   NestInterceptor,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Observable } from 'rxjs';
+import { Observable, Subscription } from 'rxjs';
 import { tenantContext } from './tenant-context';
 import { CurrentUserPayload } from '../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../database/database.service';
@@ -31,7 +31,7 @@ export class TenantContextInterceptor implements NestInterceptor {
 
     // Global users can authenticate without a tenant; they should bypass tenant enforcement.
     if (isGlobalUser) {
-      return tenantContext.runSuperAdmin(() => next.handle());
+      return this.bindTenantContext({ mode: 'super' }, next);
     }
 
     if (!user.tenantId) {
@@ -67,7 +67,10 @@ export class TenantContextInterceptor implements NestInterceptor {
         if (!isMember) {
           throw new ForbiddenException('Not assigned to this school');
         }
-        return tenantContext.run(requestedSchoolId, () => next.handle());
+        return this.bindTenantContext(
+          { mode: 'tenant', tenantId: requestedSchoolId },
+          next,
+        );
       }
 
       // No school_id given on a read: this is a teacher requesting an
@@ -84,11 +87,48 @@ export class TenantContextInterceptor implements NestInterceptor {
       // require an explicit school_id (enforced in each service) and so
       // never hit this branch.
       if (!requestedSchoolId && req.method === 'GET') {
-        return tenantContext.runSuperAdmin(() => next.handle());
+        return this.bindTenantContext({ mode: 'super' }, next);
       }
     }
 
-    return tenantContext.run(user.tenantId, () => next.handle());
+    return this.bindTenantContext(
+      { mode: 'tenant', tenantId: user.tenantId },
+      next,
+    );
+  }
+
+  /**
+   * Keep AsyncLocalStorage active for the full Observable lifetime.
+   *
+   * Nest subscribes to the interceptor Observable *after* the intercept()
+   * callback returns. Previously we did `tenantContext.run(..., () => next.handle())`,
+   * which created the Observable inside ALS but exited ALS before subscribe —
+   * so Prisma queries in the controller saw no tenant / no super-admin flag.
+   * For multi-school teacher GETs that query `schoolId: { in: [...] }`, the
+   * extension then either threw "tenantId missing" or (when a stale outer
+   * tenant lingered) rewrote the `in` list down to the primary school only —
+   * which made "All Schools" schedules show a single school.
+   */
+  private bindTenantContext(
+    scope: { mode: 'super' } | { mode: 'tenant'; tenantId: string },
+    next: CallHandler,
+  ): Observable<unknown> {
+    return new Observable((subscriber) => {
+      let inner: Subscription | undefined;
+      const start = () => {
+        inner = next.handle().subscribe({
+          next: (value) => subscriber.next(value),
+          error: (err) => subscriber.error(err),
+          complete: () => subscriber.complete(),
+        });
+      };
+      if (scope.mode === 'super') {
+        tenantContext.runSuperAdmin(start);
+      } else {
+        tenantContext.run(scope.tenantId, start);
+      }
+      return () => inner?.unsubscribe();
+    });
   }
 
   /**

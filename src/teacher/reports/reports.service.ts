@@ -9,6 +9,40 @@ import { Role } from '@prisma/client';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
+import * as fs from 'fs';
+
+function agentDebugLog(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+) {
+  const payload = {
+    sessionId: '990e57',
+    runId: 'pre-fix',
+    hypothesisId,
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+  };
+  try {
+    fs.appendFileSync(
+      '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
+      JSON.stringify(payload) + '\n',
+    );
+  } catch {
+    /* ignore */
+  }
+  fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Debug-Session-Id': '990e57',
+    },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
 
 @Injectable()
 export class TeacherReportsService {
@@ -54,6 +88,7 @@ export class TeacherReportsService {
     body: {
       school_id: string;
       grade?: string;
+      section?: string;
       date: string;
       period_id?: string;
       start_time?: string;
@@ -111,7 +146,8 @@ export class TeacherReportsService {
       );
     }
 
-    // Server-side duplicate protection (one report per teacher+school+date+period)
+    // Server-side duplicate protection (one report per teacher+school+date+period).
+    // Rejected reports may be resubmitted — we update that row instead of creating.
     const existing = await this.db.teacherReport.findFirst({
       where: {
         teacherId,
@@ -122,13 +158,39 @@ export class TeacherReportsService {
         },
         periodId: body.period_id,
       },
-      select: { id: true },
+      select: { id: true, status: true },
     });
-    if (existing) {
+    if (existing && existing.status !== 'rejected') {
+      // #region agent log
+      agentDebugLog('A', 'reports.service.ts:duplicate-block', 'blocked duplicate non-rejected', {
+        existingId: existing.id,
+        existingStatus: existing.status,
+        periodId: body.period_id,
+        dateStr,
+        schoolId,
+      });
+      // #endregion
       throw new BadRequestException(
         'A report for this period has already been submitted for this date.',
       );
     }
+    const rejectedReportId =
+      existing?.status === 'rejected' ? existing.id : null;
+
+    // #region agent log
+    agentDebugLog(
+      'B',
+      'reports.service.ts:create-path',
+      rejectedReportId ? 'will update rejected' : 'will create new',
+      {
+        rejectedReportId,
+        existingStatus: existing?.status ?? null,
+        periodId: body.period_id,
+        dateStr,
+        schoolId,
+      },
+    );
+    // #endregion
 
     const computedDuration =
       typeof body.duration_hours === 'number' &&
@@ -145,41 +207,75 @@ export class TeacherReportsService {
     const dateEnd = new Date(dateOnly);
     dateEnd.setUTCHours(23, 59, 59, 999);
 
-    // Report creation + the attendance side-effect it implies must succeed
+    // Prefer client-provided grade/section; fall back to the ClassSchedule
+    // row for this period+day so section is retained even if the client
+    // only sent a legacy grade-only payload.
+    let resolvedGrade = body.grade?.trim() || null;
+    let resolvedSection = body.section?.trim() || null;
+    if (body.period_id && (!resolvedGrade || !resolvedSection)) {
+      const schedule = await this.db.classSchedule.findFirst({
+        where: {
+          teacherId,
+          schoolId,
+          periodId: body.period_id,
+          dayOfWeek,
+          isActive: true,
+        },
+        select: { grade: true, section: true },
+      });
+      if (schedule) {
+        if (!resolvedGrade && schedule.grade) resolvedGrade = schedule.grade;
+        if (!resolvedSection && schedule.section) resolvedSection = schedule.section;
+      }
+    }
+
+    const reportPayload = {
+      grade: resolvedGrade,
+      section: resolvedSection,
+      status: 'submitted' as const,
+      startTime: body.start_time?.trim() || null,
+      endTime: body.end_time?.trim() || null,
+      topicsTaught: body.topics_taught?.trim() || null,
+      activities: body.activities?.trim() || null,
+      studentCount:
+        typeof body.student_count === 'number' &&
+        !Number.isNaN(body.student_count)
+          ? body.student_count
+          : null,
+      durationHours:
+        typeof computedDuration === 'number' &&
+        !Number.isNaN(computedDuration)
+          ? computedDuration
+          : null,
+      notes: body.notes?.trim() || null,
+    };
+
+    // Report creation/update + the attendance side-effect must succeed
     // or fail together — previously these were two independent calls with
     // no transaction, so a failure in the attendance upsert could leave a
     // report committed with no corresponding attendance update.
     const { report, attendanceMarkedPresent } = await this.db.$transaction(
       async (tx) => {
-        const created = await tx.teacherReport.create({
-          data: {
-            teacherId,
-            schoolId,
-            reportDate,
-            grade: body.grade ?? null,
-            periodId: body.period_id,
-            status: 'submitted',
-            startTime: body.start_time?.trim() || null,
-            endTime: body.end_time?.trim() || null,
-            topicsTaught: body.topics_taught?.trim() || null,
-            activities: body.activities?.trim() || null,
-            studentCount:
-              typeof body.student_count === 'number' &&
-              !Number.isNaN(body.student_count)
-                ? body.student_count
-                : null,
-            durationHours:
-              typeof computedDuration === 'number' &&
-              !Number.isNaN(computedDuration)
-                ? computedDuration
-                : null,
-            notes: body.notes?.trim() || null,
-          },
-        });
+        const saved = rejectedReportId
+          ? await tx.teacherReport.update({
+              where: { id: rejectedReportId },
+              data: reportPayload,
+            })
+          : await tx.teacherReport.create({
+              data: {
+                teacherId,
+                schoolId,
+                reportDate,
+                periodId: body.period_id,
+                ...reportPayload,
+              },
+            });
 
         // Mark attendance as Present only when ALL scheduled periods for
         // that day have been reported — this ensures the UI promise
         // ("submit all reports → marked Present") matches backend behavior.
+        // Exclude rejected reports from coverage so a rejected row does not
+        // count toward Present until it is resubmitted.
         const scheduledPeriods = await tx.classSchedule.findMany({
           where: { teacherId, schoolId, dayOfWeek, isActive: true },
           select: { periodId: true },
@@ -197,6 +293,7 @@ export class TeacherReportsService {
                   schoolId,
                   reportDate: { gte: dateOnly, lte: dateEnd },
                   periodId: { in: scheduledPeriodIds },
+                  status: { not: 'rejected' },
                 },
               })) >= scheduledPeriodIds.length;
 
@@ -224,9 +321,19 @@ export class TeacherReportsService {
           }
         }
 
-        return { report: created, attendanceMarkedPresent: marked };
+        return { report: saved, attendanceMarkedPresent: marked };
       },
     );
+
+    // #region agent log
+    agentDebugLog('C', 'reports.service.ts:after-tx', 'report saved attendance result', {
+      reportId: report.id,
+      attendanceMarkedPresent,
+      periodId: body.period_id,
+      dateStr,
+      wasUpdate: !!rejectedReportId,
+    });
+    // #endregion
 
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
@@ -250,6 +357,7 @@ export class TeacherReportsService {
         school_id: report.schoolId,
         date: report.reportDate.toISOString().split('T')[0],
         grade: report.grade,
+        section: report.section,
         period_id: report.periodId,
         start_time: (report as { startTime?: string | null }).startTime ?? null,
         end_time: (report as { endTime?: string | null }).endTime ?? null,
@@ -326,6 +434,7 @@ export class TeacherReportsService {
         school_id: r.schoolId,
         date: r.reportDate.toISOString().split('T')[0],
         grade: r.grade,
+        section: r.section,
         period_id: r.periodId,
         start_time: (r as { startTime?: string | null }).startTime ?? null,
         end_time: (r as { endTime?: string | null }).endTime ?? null,

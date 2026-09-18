@@ -93,6 +93,9 @@ model Profile {
   assignmentReminders Boolean @default(true)
   gradeNotifications Boolean @default(true)
   courseUpdates Boolean @default(true)
+  // Admin / school-admin oriented prefs
+  systemAlerts Boolean @default(true)
+  teacherLeaveRequests Boolean @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   @@index([userId])
@@ -666,6 +669,7 @@ model ClassSchedule {
   roomId    String?
   dayOfWeek Int
   grade     String?
+  section   String?
   subject   String?
   classId   String?
   academicYear String? @default("2024-25")
@@ -678,6 +682,7 @@ model ClassSchedule {
   @@index([schoolId, dayOfWeek, isActive])
   @@index([teacherId])
   @@index([roomId])
+  @@index([schoolId, grade, section])
 }
 
 // ============ School Calendar (Holidays & Breaks) ============
@@ -712,6 +717,7 @@ model TeacherReport {
   schoolId      String
   reportDate    DateTime
   grade         String?
+  section       String?
   periodId      String?
   status        String?     @default("submitted") // submitted | approved | rejected
   startTime     String?

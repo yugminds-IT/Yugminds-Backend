@@ -4,7 +4,9 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 import { tenantContext } from '../../tenants/tenant-context';
+import { Role } from '@prisma/client';
 import {
   resolveWorkingDaysForDate,
   WorkingDaysHistoryEntry,
@@ -12,7 +14,10 @@ import {
 
 @Injectable()
 export class TeacherLeavesService {
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   /**
    * For each day in [start, end], figures out which of the teacher's schools
@@ -176,6 +181,42 @@ export class TeacherLeavesService {
           }),
         ),
       ),
+    );
+
+    // Notify school admins (per affected school) + system admins — honors prefs.
+    const teacher = await this.db.user.findUnique({
+      where: { id: teacherId },
+      select: { profile: { select: { fullName: true } }, email: true },
+    });
+    const teacherLabel =
+      teacher?.profile?.fullName?.trim() || teacher?.email || 'A teacher';
+    const affectedSchoolIds = [...new Set(leaves.map((l) => l.schoolId))];
+    const [schoolAdmins, adminUsers] = await Promise.all([
+      this.db.schoolAdmin.findMany({
+        where: { schoolId: { in: affectedSchoolIds } },
+        select: { userId: true },
+      }),
+      this.db.user.findMany({
+        where: { role: Role.admin, isActive: true },
+        select: { id: true },
+      }),
+    ]);
+    const recipientIds = [
+      ...new Set([
+        ...schoolAdmins.map((s) => s.userId),
+        ...adminUsers.map((a) => a.id),
+      ]),
+    ];
+    const dateLabel = `${start_date} to ${end_date}`;
+    await this.notifications.createManyRespectingPrefs(
+      recipientIds.map((userId) => ({
+        userId,
+        senderId: teacherId,
+        title: `Leave request: ${teacherLabel}`,
+        message: `${teacherLabel} requested leave (${dateLabel})${reason ? `: ${reason}` : '.'}`,
+        mode: 'teacher_leave',
+        allowReplies: false,
+      })),
     );
 
     const toLeaveDto = (leave: (typeof leaves)[number]) => ({

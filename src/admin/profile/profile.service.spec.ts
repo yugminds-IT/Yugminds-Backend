@@ -16,7 +16,11 @@ describe('AdminProfileService', () => {
     password: 'hashed',
     role: 'admin',
     isSuperAdmin: false,
-    profile: { fullName: 'Yugminds Admin' },
+    profile: {
+      fullName: 'Yugminds Admin',
+      systemAlerts: true,
+      teacherLeaveRequests: true,
+    },
   };
 
   beforeEach(async () => {

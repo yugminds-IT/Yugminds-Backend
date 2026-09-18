@@ -10,9 +10,14 @@ describe('TeacherReportsService.create', () => {
   let service: TeacherReportsService;
   let db: {
     teacherSchool: { findFirst: jest.Mock };
-    teacherReport: { findFirst: jest.Mock; create: jest.Mock; count: jest.Mock };
+    teacherReport: {
+      findFirst: jest.Mock;
+      create: jest.Mock;
+      update: jest.Mock;
+      count: jest.Mock;
+    };
     attendance: { upsert: jest.Mock; findUnique: jest.Mock };
-    classSchedule: { findMany: jest.Mock };
+    classSchedule: { findMany: jest.Mock; findFirst: jest.Mock };
     schoolAdmin: { findMany: jest.Mock };
     user: { findMany: jest.Mock };
     $transaction: jest.Mock;
@@ -38,9 +43,23 @@ describe('TeacherReportsService.create', () => {
           schoolId: 'school-a',
           reportDate: new Date(`${pastDate}T12:00:00.000Z`),
           grade: null,
+          section: null,
           periodId: 'period-1',
           status: 'submitted',
           topicsTaught: null,
+          studentCount: null,
+          durationHours: null,
+          notes: null,
+        }),
+        update: jest.fn().mockResolvedValue({
+          id: 'r-rejected',
+          schoolId: 'school-a',
+          reportDate: new Date(`${pastDate}T12:00:00.000Z`),
+          grade: 'Grade 4',
+          section: 'A',
+          periodId: 'period-1',
+          status: 'submitted',
+          topicsTaught: 'Resubmitted topics',
           studentCount: null,
           durationHours: null,
           notes: null,
@@ -51,7 +70,10 @@ describe('TeacherReportsService.create', () => {
         upsert: jest.fn().mockResolvedValue({}),
         findUnique: jest.fn().mockResolvedValue(null),
       },
-      classSchedule: { findMany: jest.fn().mockResolvedValue([]) },
+      classSchedule: {
+        findMany: jest.fn().mockResolvedValue([]),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
       schoolAdmin: { findMany: jest.fn().mockResolvedValue([]) },
       user: { findMany: jest.fn().mockResolvedValue([]) },
       $transaction: jest.fn(async (callback: (tx: unknown) => unknown) => callback(db)),
@@ -112,15 +134,86 @@ describe('TeacherReportsService.create', () => {
   });
 
   it('rejects a duplicate report for the same teacher+school+date+period', async () => {
-    db.teacherReport.findFirst.mockResolvedValue({ id: 'existing-report' });
+    db.teacherReport.findFirst.mockResolvedValue({
+      id: 'existing-report',
+      status: 'submitted',
+    });
     await expect(service.create(1, baseBody)).rejects.toThrow(BadRequestException);
     expect(db.teacherReport.create).not.toHaveBeenCalled();
+    expect(db.teacherReport.update).not.toHaveBeenCalled();
+  });
+
+  it('updates a rejected report instead of creating a duplicate', async () => {
+    db.teacherReport.findFirst.mockResolvedValue({
+      id: 'r-rejected',
+      status: 'rejected',
+    });
+    const result = await service.create(1, {
+      ...baseBody,
+      topics_taught: 'Resubmitted topics',
+    });
+    expect(db.teacherReport.create).not.toHaveBeenCalled();
+    expect(db.teacherReport.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'r-rejected' },
+        data: expect.objectContaining({
+          status: 'submitted',
+          topicsTaught: 'Resubmitted topics',
+        }),
+      }),
+    );
+    expect(result.report.id).toBe('r-rejected');
+    expect(result.report.report_status).toBe('Pending');
+  });
+
+  it('still rejects when an approved report already exists for the period', async () => {
+    db.teacherReport.findFirst.mockResolvedValue({
+      id: 'existing-approved',
+      status: 'approved',
+    });
+    await expect(service.create(1, baseBody)).rejects.toThrow(
+      /already been submitted/i,
+    );
   });
 
   it('creates the report when the teacher is assigned and it is not a holiday', async () => {
     const result = await service.create(1, baseBody);
     expect(db.teacherReport.create).toHaveBeenCalled();
     expect(result.report.school_id).toBe('school-a');
+  });
+
+  it('persists grade+section from ClassSchedule when the client omits them', async () => {
+    db.classSchedule.findFirst.mockResolvedValue({
+      grade: 'Grade 4',
+      section: 'A',
+    });
+    db.teacherReport.create.mockResolvedValue({
+      id: 'r1',
+      schoolId: 'school-a',
+      reportDate: new Date(`${pastDate}T12:00:00.000Z`),
+      grade: 'Grade 4',
+      section: 'A',
+      periodId: 'period-1',
+      status: 'submitted',
+      topicsTaught: null,
+      studentCount: null,
+      durationHours: null,
+      notes: null,
+    });
+
+    const result = await service.create(1, baseBody);
+
+    expect(db.classSchedule.findFirst).toHaveBeenCalled();
+    expect(db.teacherReport.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          grade: 'Grade 4',
+          section: 'A',
+        }),
+      }),
+    );
+    expect(result.report.grade).toBe('Grade 4');
+    expect(result.report.section).toBe('A');
   });
 
   describe('attendance auto-marking', () => {

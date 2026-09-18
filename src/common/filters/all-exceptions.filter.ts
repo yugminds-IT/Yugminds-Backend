@@ -41,9 +41,29 @@ export class AllExceptionsFilter implements ExceptionFilter {
       };
       if (prisma?.code === 'P2002') {
         status = HttpStatus.BAD_REQUEST;
+        const target = prisma.meta?.target ?? [];
+        const targetStr = Array.isArray(target)
+          ? target.join(',').toLowerCase()
+          : String(target ?? '').toLowerCase();
+        let message = 'A record with these values already exists';
+        if (
+          targetStr.includes('email') ||
+          targetStr === 'email' ||
+          (targetStr.includes('user') && targetStr.includes('email'))
+        ) {
+          message = 'Email is already in use';
+        } else if (
+          targetStr.includes('teacherid') &&
+          targetStr.includes('schoolid') &&
+          targetStr.includes('reportdate') &&
+          targetStr.includes('periodid')
+        ) {
+          message =
+            'A report for this period has already been submitted for this date.';
+        }
         body = {
           statusCode: status,
-          message: 'Email is already in use',
+          message,
           error: 'Bad Request',
         };
       } else {

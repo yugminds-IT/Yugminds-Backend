@@ -5,6 +5,7 @@ export interface ListTeacherReportsOptions {
   schoolId?: string;
   teacherId?: string;
   grade?: string;
+  section?: string;
   date?: string;
   from?: string;
   to?: string;
@@ -25,12 +26,13 @@ export class AdminTeacherReportsService {
   ];
 
   async list(opts: ListTeacherReportsOptions) {
-    const { schoolId, teacherId: teacherIdParam, grade, date, from, to, search, limit, status } = opts;
+    const { schoolId, teacherId: teacherIdParam, grade, section, date, from, to, search, limit, status } = opts;
 
     const where: {
       schoolId?: string;
       teacherId?: number;
       grade?: string;
+      section?: string;
       reportDate?: { gte?: Date; lte?: Date };
       status?: string;
     } = {};
@@ -48,6 +50,10 @@ export class AdminTeacherReportsService {
 
     if (grade) {
       where.grade = grade;
+    }
+
+    if (section) {
+      where.section = section;
     }
 
     if (date) {
@@ -145,6 +151,7 @@ export class AdminTeacherReportsService {
           school_id: r.schoolId,
           date: dateOnly,
           grade: r.grade ?? '',
+          section: r.section ?? '',
           topics_taught: r.topicsTaught ?? '',
           activities: r.activities ?? '',
           student_count: r.studentCount ?? 0,
