@@ -8,7 +8,6 @@ describe('TeacherLeavesService', () => {
   let service: TeacherLeavesService;
   let db: {
     teacherSchool: { findFirst: jest.Mock; findMany: jest.Mock };
-    teacherWorkingDaysHistory: { findMany: jest.Mock };
     teacherLeave: { findFirst: jest.Mock; create: jest.Mock; findMany: jest.Mock };
     user: { findUnique: jest.Mock; findMany: jest.Mock };
     schoolAdmin: { findMany: jest.Mock };
@@ -27,9 +26,6 @@ describe('TeacherLeavesService', () => {
         findFirst: jest.fn().mockResolvedValue({ schoolId: 'school-a' }),
         findMany: jest.fn().mockResolvedValue([{ schoolId: 'school-a' }]),
       },
-      // Empty history -> resolveSchoolRangesForLeave falls back to the
-      // teacher-selected school_id/date-range as a single target.
-      teacherWorkingDaysHistory: { findMany: jest.fn().mockResolvedValue([]) },
       teacherLeave: {
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({
@@ -73,8 +69,25 @@ describe('TeacherLeavesService', () => {
 
   it('creates a leave request when the teacher is assigned to the school', async () => {
     const result = await service.create(1, baseBody);
-    expect(db.teacherLeave.create).toHaveBeenCalled();
+    expect(db.teacherLeave.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        teacherId: 1,
+        schoolId: 'school-a',
+        status: 'pending',
+      }),
+    });
     expect(result.leave.school_id).toBe('school-a');
+  });
+
+  it('pins the leave to the selected school_id (does not re-route)', async () => {
+    await service.create(1, { ...baseBody, school_id: 'school-a' });
+    expect(db.teacherLeave.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ schoolId: 'school-a' }),
+    });
+    expect(db.schoolAdmin.findMany).toHaveBeenCalledWith({
+      where: { schoolId: 'school-a' },
+      select: { userId: true },
+    });
   });
 
   it('rejects an overlapping pending/approved leave request', async () => {

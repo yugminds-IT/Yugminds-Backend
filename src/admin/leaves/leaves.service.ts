@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
+import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
 
 @Injectable()
@@ -12,6 +13,7 @@ export class AdminLeavesService {
   constructor(
     private readonly db: DatabaseService,
     private readonly realtimeGateway: RealtimeGateway,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -244,6 +246,37 @@ export class AdminLeavesService {
         },
         data: { status: 'Unreported' },
       });
+    }
+
+    // Notify the teacher when their leave is approved or rejected (in-app).
+    // Skip no-op rewrites of the same status so retries don't spam the inbox.
+    if (leave.status !== normalized) {
+      const school = await this.db.school.findUnique({
+        where: { id: updated.schoolId },
+        select: { name: true },
+      });
+      const startLabel = updated.startDate.toISOString().split('T')[0];
+      const endLabel = updated.endDate.toISOString().split('T')[0];
+      const dateLabel =
+        startLabel === endLabel ? startLabel : `${startLabel} to ${endLabel}`;
+      const schoolLabel = school?.name?.trim() || 'your school';
+      const statusLabel = normalized === 'approved' ? 'approved' : 'rejected';
+      const remarks = updated.adminRemarks?.trim()
+        ? ` Remarks: ${updated.adminRemarks.trim()}`
+        : '';
+      const senderId = actor_user_id
+        ? parseInt(String(actor_user_id), 10)
+        : NaN;
+      await this.notifications.sendOne(
+        Number.isFinite(senderId) && senderId > 0 ? senderId : updated.teacherId,
+        updated.teacherId,
+        {
+          title: `Leave request ${statusLabel}`,
+          message: `Your leave request for ${dateLabel} at ${schoolLabel} has been ${statusLabel}.${remarks}`,
+          type: 'system_alert',
+          allowReplies: false,
+        },
+      );
     }
 
     const [schoolAdmins, adminUsers] = await Promise.all([

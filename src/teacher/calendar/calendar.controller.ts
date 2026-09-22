@@ -67,8 +67,7 @@ export class TeacherCalendarController {
    * tenant-isolation layer in DatabaseService rejects any query whose
    * schoolId filter spans more than the caller's current tenant, so a
    * multi-school teacher's own history must be read unfiltered and grouped
-   * in-memory instead (same pattern as
-   * TeacherLeavesService.resolveSchoolRangesForLeave).
+   * in-memory instead.
    */
   private async resolveMonthlySchedule(
     teacherId: number,

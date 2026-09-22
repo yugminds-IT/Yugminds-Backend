@@ -63,6 +63,17 @@ describe('Admin leave approval -> teacher attendance mutation (cross-role side e
     );
     expect(rows.length).toBeGreaterThan(0);
     expect(rows.every((r) => r.status === 'Leave-Approved')).toBe(true);
+
+    // Teacher must get an in-app notification about the approval.
+    const { rows: notifRows } = await pool.query(
+      `SELECT title, message, mode FROM "Notification"
+       WHERE "userId" = $1 AND title ILIKE '%Leave request approved%'
+       ORDER BY "createdAt" DESC LIMIT 1`,
+      [fixture.teachers[0].id],
+    );
+    expect(notifRows.length).toBe(1);
+    expect(notifRows[0].mode).toBe('system_alert');
+    expect(String(notifRows[0].message)).toMatch(/approved/i);
   });
 
   it(

@@ -2441,8 +2441,11 @@ export class SchoolAdminExtraController {
     if (!grade || !subject)
       throw new BadRequestException('grade and subject are required');
     await this.assertValidScheduleSection(schoolId, grade, section);
-    if (teacherId != null && (!Number.isFinite(teacherId) || teacherId <= 0))
-      throw new BadRequestException('Invalid teacher_id');
+    if (teacherId == null || !Number.isFinite(teacherId) || teacherId <= 0) {
+      throw new BadRequestException(
+        'teacher_id is required — assign a teacher so the class can be pushed to their schedule',
+      );
+    }
     if (roomId) {
       const room = await this.db.room.findFirst({
         where: { id: roomId, schoolId },
@@ -2450,16 +2453,14 @@ export class SchoolAdminExtraController {
       if (!room) throw new BadRequestException('Invalid room_id');
     }
     await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
-    if (teacherId != null) {
-      await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
-    }
+    await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
 
     const academicYear = body?.academic_year ?? currentAcademicYear();
     // Conflict checks: same room or teacher in same day+period+academic year
     // (previously unscoped by year, so the same teacher/day/period in a
     // DIFFERENT academic year falsely collided with an unrelated schedule).
     const conflictFilters = [
-      ...(teacherId != null ? [{ teacherId }] : []),
+      { teacherId },
       ...(roomId ? [{ roomId }] : []),
     ];
     if (conflictFilters.length > 0) {
@@ -2587,8 +2588,11 @@ export class SchoolAdminExtraController {
     if (!grade || !subject)
       throw new BadRequestException('grade and subject are required');
     await this.assertValidScheduleSection(schoolId, grade, section);
-    if (teacherId != null && (!Number.isFinite(teacherId) || teacherId <= 0))
-      throw new BadRequestException('Invalid teacher_id');
+    if (teacherId == null || !Number.isFinite(teacherId) || teacherId <= 0) {
+      throw new BadRequestException(
+        'teacher_id is required — assign a teacher so the class can be pushed to their schedule',
+      );
+    }
     if (roomId) {
       const room = await this.db.room.findFirst({
         where: { id: roomId, schoolId },
@@ -2596,9 +2600,7 @@ export class SchoolAdminExtraController {
       if (!room) throw new BadRequestException('Invalid room_id');
     }
     await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
-    if (teacherId != null) {
-      await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
-    }
+    await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
 
     const updateAcademicYear =
       body?.academic_year !== undefined
@@ -3458,6 +3460,34 @@ export class SchoolAdminExtraController {
         data: { status: 'Unreported' },
       });
     }
+
+    // Notify the teacher when their leave is approved or rejected (in-app).
+    // Skip no-op rewrites of the same status so retries don't spam the inbox.
+    if (
+      (status === 'approved' || status === 'rejected') &&
+      leave.status !== status
+    ) {
+      const school = await this.db.school.findUnique({
+        where: { id: updated.schoolId },
+        select: { name: true },
+      });
+      const startLabel = updated.startDate.toISOString().split('T')[0];
+      const endLabel = updated.endDate.toISOString().split('T')[0];
+      const dateLabel =
+        startLabel === endLabel ? startLabel : `${startLabel} to ${endLabel}`;
+      const schoolLabel = school?.name?.trim() || 'your school';
+      const statusLabel = status === 'approved' ? 'approved' : 'rejected';
+      const remarks = updated.adminRemarks?.trim()
+        ? ` Remarks: ${updated.adminRemarks.trim()}`
+        : '';
+      await this.notificationsService.sendOne(user.id, updated.teacherId, {
+        title: `Leave request ${statusLabel}`,
+        message: `Your leave request for ${dateLabel} at ${schoolLabel} has been ${statusLabel}.${remarks}`,
+        type: 'system_alert',
+        allowReplies: false,
+      });
+    }
+
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
         where: { schoolId },
