@@ -1,0 +1,47 @@
+# ─── Production backend (Coolify) ────────────────────────────────────────────
+# Coolify → Domains: https://api.yugminds.org
+# (Add an "api" A record in Hostinger DNS → 200.97.175.125)
+
+NODE_ENV=production
+PORT=3001
+
+# ─── Database ────────────────────────────────────────────────────────────────
+DATABASE_URL=postgresql://REPLACE_USER:REPLACE_PASSWORD@REPLACE_DB_HOST:5432/yugminds
+# DB_POOL_SIZE=10
+
+# ─── Auth / JWT ──────────────────────────────────────────────────────────────
+# Generate with: openssl rand -hex 64
+JWT_ACCESS_SECRET=REPLACE_WITH_SAME_VALUE_AS_FRONTEND
+JWT_REFRESH_SECRET=REPLACE_WITH_openssl_rand_hex_64
+ACCESS_TOKEN_EXPIRY=15m
+REFRESH_TOKEN_EXPIRY=7d
+
+# ─── Security ────────────────────────────────────────────────────────────────
+# Every browser origin that talks to the backend (no trailing slash)
+ALLOWED_ORIGINS=https://yugminds.org,https://www.yugminds.org,https://robocoders.yugminds.org,https://lms.yugminds.org
+INTERNAL_API_KEY=REPLACE_WITH_openssl_rand_hex_32
+TRUSTED_PROXY_HOPS=1
+
+# ─── RoboCoders Studio licensing ─────────────────────────────────────────────
+# Must match the secret baked into the RoboCoders Studio desktop app
+ROBOCODERS_LICENSE_SECRET=REPLACE_FROM_SECRETS_MANAGER
+
+# ─── Admin seed (first-run bootstrap) ────────────────────────────────────────
+ADMIN_SEED_EMAIL=admin@yugminds.org
+ADMIN_SEED_PASSWORD=REPLACE_WITH_STRONG_PASSWORD
+
+# ─── Redis ───────────────────────────────────────────────────────────────────
+REDIS_URL=redis://default:REPLACE_PASSWORD@REPLACE_REDIS_HOST:6379/0
+
+# ─── Object storage (S3-compatible) ──────────────────────────────────────────
+S3_ENDPOINT=https://REPLACE_S3_HOST
+S3_REGION=us-east-1
+S3_ACCESS_KEY_ID=REPLACE_ACCESS_KEY
+S3_SECRET_ACCESS_KEY=REPLACE_SECRET_KEY
+S3_BUCKET=REPLACE_BUCKET
+S3_PUBLIC_URL=https://REPLACE_S3_HOST/REPLACE_BUCKET
+S3_FORCE_PATH_STYLE=true
+
+# ─── Feature flags ───────────────────────────────────────────────────────────
+# ASSIGNMENT_RETAKE_FEATURE_ENABLED=true
+# JSON_BODY_LIMIT=1mb

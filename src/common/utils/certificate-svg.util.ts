@@ -77,7 +77,7 @@ export function buildCertificateSvg(
 
   <text x="600" y="615" font-family="Inter, Arial" font-size="18" text-anchor="middle" fill="#475569">Issued: ${issued}</text>
   <text x="600" y="648" font-family="Inter, Arial" font-size="15" font-weight="600" text-anchor="middle" fill="#1e40af">Certificate ID: ${shortId}</text>
-  <text x="600" y="675" font-family="Inter, Arial" font-size="12" text-anchor="middle" fill="#64748b">Verify at: yugminds.com/robocoders/lms/verify/${shortId}</text>
+  <text x="600" y="675" font-family="Inter, Arial" font-size="12" text-anchor="middle" fill="#64748b">Verify at: robocoders.yugminds.org/lms/verify/${shortId}</text>
 
   <line x1="820" y1="710" x2="1080" y2="710" stroke="#cbd5e1" stroke-width="2"/>
   <text x="950" y="740" font-family="Inter, Arial" font-size="16" text-anchor="middle" fill="#334155">Yugminds</text>
