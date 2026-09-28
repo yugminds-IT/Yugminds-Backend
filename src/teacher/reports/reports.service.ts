@@ -9,40 +9,6 @@ import { Role } from '@prisma/client';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
-import * as fs from 'fs';
-
-function agentDebugLog(
-  hypothesisId: string,
-  location: string,
-  message: string,
-  data: Record<string, unknown>,
-) {
-  const payload = {
-    sessionId: '990e57',
-    runId: 'pre-fix',
-    hypothesisId,
-    location,
-    message,
-    data,
-    timestamp: Date.now(),
-  };
-  try {
-    fs.appendFileSync(
-      '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
-      JSON.stringify(payload) + '\n',
-    );
-  } catch {
-    /* ignore */
-  }
-  fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Debug-Session-Id': '990e57',
-    },
-    body: JSON.stringify(payload),
-  }).catch(() => {});
-}
 
 @Injectable()
 export class TeacherReportsService {
@@ -141,8 +107,9 @@ export class TeacherReportsService {
       dateOnly,
     );
     if (workStatus.holidaySchoolIds.includes(schoolId)) {
+      const reason = workStatus.holidays?.[schoolId]?.name;
       throw new BadRequestException(
-        'This school has declared a holiday/break on this date — reports cannot be submitted.',
+        `This school is closed on this date${reason ? ` (${reason})` : ''} — reports cannot be submitted.`,
       );
     }
 
@@ -161,15 +128,6 @@ export class TeacherReportsService {
       select: { id: true, status: true },
     });
     if (existing && existing.status !== 'rejected') {
-      // #region agent log
-      agentDebugLog('A', 'reports.service.ts:duplicate-block', 'blocked duplicate non-rejected', {
-        existingId: existing.id,
-        existingStatus: existing.status,
-        periodId: body.period_id,
-        dateStr,
-        schoolId,
-      });
-      // #endregion
       throw new BadRequestException(
         'A report for this period has already been submitted for this date.',
       );
@@ -177,20 +135,6 @@ export class TeacherReportsService {
     const rejectedReportId =
       existing?.status === 'rejected' ? existing.id : null;
 
-    // #region agent log
-    agentDebugLog(
-      'B',
-      'reports.service.ts:create-path',
-      rejectedReportId ? 'will update rejected' : 'will create new',
-      {
-        rejectedReportId,
-        existingStatus: existing?.status ?? null,
-        periodId: body.period_id,
-        dateStr,
-        schoolId,
-      },
-    );
-    // #endregion
 
     const computedDuration =
       typeof body.duration_hours === 'number' &&
@@ -325,15 +269,6 @@ export class TeacherReportsService {
       },
     );
 
-    // #region agent log
-    agentDebugLog('C', 'reports.service.ts:after-tx', 'report saved attendance result', {
-      reportId: report.id,
-      attendanceMarkedPresent,
-      periodId: body.period_id,
-      dateStr,
-      wasUpdate: !!rejectedReportId,
-    });
-    // #endregion
 
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({

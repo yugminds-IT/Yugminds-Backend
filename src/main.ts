@@ -7,6 +7,7 @@ import express from 'express';
 import helmet from 'helmet';
 import compression from 'compression';
 import http from 'http';
+import { getAllowedOrigins } from './common/allowed-origins';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -54,11 +55,8 @@ async function bootstrap() {
   app.use(cookieParser());
 
   // SECURITY: Restrict CORS to allowed origins only
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) =>
-    o.trim(),
-  ) ?? ['http://localhost:3000'];
   app.enableCors({
-    origin: allowedOrigins,
+    origin: getAllowedOrigins(),
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [

@@ -14,6 +14,7 @@ import { Server, Socket } from 'socket.io';
 import { DatabaseService } from '../../database/database.service';
 import { tenantContext } from '../../tenants/tenant-context';
 import { Role } from '@prisma/client';
+import { getAllowedOrigins } from '../allowed-origins';
 
 type JwtPayload = {
   sub: number;
@@ -31,14 +32,10 @@ export type RealtimeNotification = {
   created_at: string;
 };
 
-const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',').map((o) =>
-  o.trim(),
-) ?? ['http://localhost:3000'];
-
 @Injectable()
 @WebSocketGateway({
   namespace: '/realtime',
-  cors: { origin: allowedOrigins, credentials: true },
+  cors: { origin: getAllowedOrigins(), credentials: true },
 })
 export class RealtimeGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -543,54 +540,11 @@ export class RealtimeGateway
   }
 
   async emitDashboardStatsForUser(userId: number): Promise<void> {
-    // #region agent log
-    const fs = await import('fs');
-    const logEmit = (hypothesisId: string, message: string, data: Record<string, unknown>) => {
-      const payload = {
-        sessionId: '990e57',
-        runId: 'post-fix',
-        hypothesisId,
-        location: 'realtime.gateway.ts:emitDashboardStatsForUser',
-        message,
-        data,
-        timestamp: Date.now(),
-      };
-      try {
-        fs.appendFileSync(
-          '/Users/likithkarnekota/Yugminds Website/.cursor/debug-990e57.log',
-          JSON.stringify(payload) + '\n',
-        );
-      } catch {
-        /* ignore */
-      }
-      fetch('http://127.0.0.1:7441/ingest/b3c04580-14c5-4099-bcec-c0dbc729bb7f', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Debug-Session-Id': '990e57',
-        },
-        body: JSON.stringify(payload),
-      }).catch(() => {});
-    };
-    // #endregion
     try {
       this.invalidateStatsCache(userId);
       const payload = await this.buildDashboardStatsForUser(userId);
       this.emitDashboardStats(userId, payload);
-      // #region agent log
-      logEmit('A', 'buildDashboardStats ok', { userId });
-      // #endregion
     } catch (err: unknown) {
-      // #region agent log
-      logEmit('A', 'buildDashboardStats failed for user (swallowed)', {
-        userId,
-        errMessage: err instanceof Error ? err.message : String(err),
-        errStatus:
-          err && typeof err === 'object' && 'status' in err
-            ? (err as { status?: number }).status ?? null
-            : null,
-      });
-      // #endregion
       // Best-effort broadcast — never fail the mutating HTTP request (approve /
       // reject / etc.) with a cross-tenant 401 that force-logs the caller out.
       this.logger.warn(

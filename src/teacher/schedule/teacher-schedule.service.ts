@@ -10,6 +10,8 @@ export interface TeacherWorkStatusForDate {
   holidaySchoolIds: string[];
   /** Schools open today but not part of the teacher's weekly working-days pattern at that school. */
   offScheduleSchoolIds: string[];
+  /** Reason for each entry in holidaySchoolIds, e.g. { name: 'Diwali', type: 'Holiday' }. */
+  holidays: Record<string, { name: string; type: string }>;
 }
 
 /**
@@ -40,6 +42,7 @@ export class TeacherScheduleService {
       workingSchoolIds: [],
       holidaySchoolIds: [],
       offScheduleSchoolIds: [],
+      holidays: {},
     };
     if (schoolIds.length === 0) return result;
 
@@ -60,7 +63,7 @@ export class TeacherScheduleService {
           this.calendar.getCompensatoryDatesForMonth(schoolId, year, month),
         ]);
 
-        const isHoliday = holidayEntries.some(
+        const holidayEntry = holidayEntries.find(
           (e) => e.date === dateStr && (e.type === 'Holiday' || e.type === 'Break'),
         );
         const isCompWork = compDates.includes(dateStr);
@@ -68,8 +71,12 @@ export class TeacherScheduleService {
 
         if (isCompWork) {
           result.workingSchoolIds.push(schoolId);
-        } else if (isHoliday) {
+        } else if (holidayEntry) {
           result.holidaySchoolIds.push(schoolId);
+          result.holidays[schoolId] = {
+            name: holidayEntry.name,
+            type: holidayEntry.type,
+          };
         } else if (isAssignedToday) {
           result.workingSchoolIds.push(schoolId);
         } else {

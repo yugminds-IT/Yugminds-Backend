@@ -245,7 +245,12 @@ export class AdminCalendarService {
       academic_year?: string;
       description?: string;
     },
-  ): Promise<{ calendar: CalendarEntryDto[]; batch_id: string | null; schools_count: number }> {
+  ): Promise<{
+    calendar: CalendarEntryDto[];
+    batch_id: string | null;
+    schools_count: number;
+    reports_closed: number;
+  }> {
     if (!body.date) throw new BadRequestException('date is required');
     if (!body.name?.trim()) {
       throw new BadRequestException('A reason for the holiday/entry is required');
@@ -269,16 +274,24 @@ export class AdminCalendarService {
     };
 
     const weekday = date.getUTCDay();
-    const activeWeekdaysBySchool = await this.getActiveWeekdaysBySchool(date);
-    // A school is eligible for this date only if at least one teacher there
-    // is actually assigned to work this weekday. A school with no
-    // TeacherSchool rows yet has nothing to check against and is NOT
-    // eligible for any day until a teacher is assigned — marking a holiday
-    // before that is a no-op anyway (the attendance math already excludes
-    // every weekday for a school with no working-day data).
+    const [activeWeekdaysBySchool, scheduledThatWeekday] = await Promise.all([
+      this.getActiveWeekdaysBySchool(date),
+      this.db.classSchedule.findMany({
+        where: { isActive: true, dayOfWeek: weekday },
+        select: { schoolId: true },
+        distinct: ['schoolId'],
+      }),
+    ]);
+    const hasClassesThatWeekday = new Set(
+      scheduledThatWeekday.map((s) => s.schoolId),
+    );
+    // A school is eligible if a teacher's working-days pattern covers this
+    // weekday OR the timetable has classes that weekday — teachers can file
+    // reports for any timetabled class, so skipping such a school would leave
+    // it open for reports on a declared holiday.
     const isSchoolEligible = (schoolId: string) => {
       const days = activeWeekdaysBySchool[schoolId];
-      return !!days && days.includes(weekday);
+      return (!!days && days.includes(weekday)) || hasClassesThatWeekday.has(schoolId);
     };
 
     if (body.apply_to_all_schools) {
@@ -301,10 +314,12 @@ export class AdminCalendarService {
           }),
         ),
       );
+      const reportsClosed = await this.closePendingReportsForEntries(created);
       return {
         calendar: created.map((e) => this.toDto(e)),
         batch_id: batchId,
         schools_count: created.length,
+        reports_closed: reportsClosed,
       };
     }
 
@@ -323,7 +338,51 @@ export class AdminCalendarService {
       data: { ...baseData, schoolId: body.school_id },
       include: { school: { select: { name: true } } },
     });
-    return { calendar: [this.toDto(entry)], batch_id: null, schools_count: 1 };
+    const reportsClosed = await this.closePendingReportsForEntries([entry]);
+    return {
+      calendar: [this.toDto(entry)],
+      batch_id: null,
+      schools_count: 1,
+      reports_closed: reportsClosed,
+    };
+  }
+
+  /**
+   * When a Holiday/Break covers dates that already have pending (not yet
+   * reviewed) teacher reports — typically "Mark today as holiday" declared
+   * mid-day — reject them so they can't be approved as if the school had
+   * been open. Approved reports are left alone as historical record.
+   */
+  private async closePendingReportsForEntries(
+    entries: Array<{
+      schoolId: string;
+      date: Date;
+      endDate: Date | null;
+      type: string;
+      name: string;
+    }>,
+  ): Promise<number> {
+    let closed = 0;
+    for (const e of entries) {
+      if (e.type !== 'Holiday' && e.type !== 'Break') continue;
+      const start = new Date(e.date);
+      start.setUTCHours(0, 0, 0, 0);
+      const end = new Date(e.endDate ?? e.date);
+      end.setUTCHours(23, 59, 59, 999);
+      const res = await this.db.teacherReport.updateMany({
+        where: {
+          schoolId: e.schoolId,
+          reportDate: { gte: start, lte: end },
+          status: { in: ['submitted', 'reviewed'] },
+        },
+        data: {
+          status: 'rejected',
+          adminNotes: `Auto-closed: school declared ${e.type.toLowerCase()} (${e.name}) on this date.`,
+        },
+      });
+      closed += res.count;
+    }
+    return closed;
   }
 
   /** Convenience wrapper for the "Mark today as a holiday" quick action. */
@@ -383,6 +442,9 @@ export class AdminCalendarService {
       },
       include: { school: { select: { name: true } } },
     });
+    if (updated.isActive) {
+      await this.closePendingReportsForEntries([updated]);
+    }
     return { entry: this.toDto(updated) };
   }
 
@@ -412,7 +474,7 @@ export class AdminCalendarService {
     schoolId: string,
     year: number,
     month: number,
-  ): Promise<{ date: string; type: string }[]> {
+  ): Promise<{ date: string; type: string; name: string }[]> {
     const start = new Date(Date.UTC(year, month - 1, 1));
     const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
 
@@ -429,13 +491,17 @@ export class AdminCalendarService {
       },
     });
 
-    const dates: { date: string; type: string }[] = [];
+    const dates: { date: string; type: string; name: string }[] = [];
     for (const entry of entries) {
       const rangeEnd = entry.endDate ?? entry.date;
       const cur = new Date(entry.date);
       while (cur <= rangeEnd && cur <= end) {
         if (cur >= start) {
-          dates.push({ date: cur.toISOString().split('T')[0], type: entry.type });
+          dates.push({
+            date: cur.toISOString().split('T')[0],
+            type: entry.type,
+            name: entry.name,
+          });
         }
         cur.setUTCDate(cur.getUTCDate() + 1);
       }

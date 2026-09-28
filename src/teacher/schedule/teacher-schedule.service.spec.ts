@@ -36,6 +36,7 @@ describe('TeacherScheduleService', () => {
       workingSchoolIds: [],
       holidaySchoolIds: [],
       offScheduleSchoolIds: [],
+      holidays: {},
     });
   });
 
@@ -65,11 +66,12 @@ describe('TeacherScheduleService', () => {
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4, 5] },
     ]);
     calendar.getHolidayDatesForMonth.mockResolvedValue([
-      { date: '2026-07-20', type: 'Holiday' },
+      { date: '2026-07-20', type: 'Holiday', name: 'Diwali' },
     ]);
     const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-20'));
     expect(result.holidaySchoolIds).toEqual(['school-a']);
     expect(result.workingSchoolIds).toEqual([]);
+    expect(result.holidays['school-a']).toEqual({ name: 'Diwali', type: 'Holiday' });
   });
 
   it('treats a declared compensatory-work day as working even outside the weekly pattern', async () => {

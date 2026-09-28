@@ -1,6 +1,11 @@
-import { ForbiddenException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
+import { getTodayIstDateStr } from '../../common/utils/date.util';
 
 @Injectable()
 export class TeacherDashboardService {
@@ -14,6 +19,37 @@ export class TeacherDashboardService {
     if (isNaN(d.getTime())) return null;
     d.setUTCHours(0, 0, 0, 0);
     return d;
+  }
+
+  async getDayStatus(teacherId: number, date?: string) {
+    const dateStr = date?.trim() || getTodayIstDateStr();
+    const day = this.toDateOnly(dateStr);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !day) {
+      throw new BadRequestException('date must be YYYY-MM-DD');
+    }
+    const schoolIds = (
+      await this.db.teacherSchool.findMany({
+        where: { teacherId },
+        select: { schoolId: true },
+      })
+    ).map((s) => s.schoolId);
+    const status = await this.teacherSchedule.getWorkStatusForDate(
+      teacherId,
+      schoolIds,
+      day,
+    );
+    return {
+      date: dateStr,
+      schools: schoolIds.map((id) => ({
+        school_id: id,
+        status: status.holidaySchoolIds.includes(id)
+          ? 'holiday'
+          : status.workingSchoolIds.includes(id)
+            ? 'working'
+            : 'off',
+        holiday: status.holidays[id] ?? null,
+      })),
+    };
   }
 
   async get(teacherId: number, query: { school_id?: string; date?: string }) {
@@ -187,6 +223,7 @@ export class TeacherDashboardService {
         date: dateStr,
         working_school_ids_today: workStatus.workingSchoolIds,
         holiday_school_ids_today: workStatus.holidaySchoolIds,
+        holidays_today: workStatus.holidays,
         off_schedule_school_ids_today: workStatus.offScheduleSchoolIds,
       },
     };
