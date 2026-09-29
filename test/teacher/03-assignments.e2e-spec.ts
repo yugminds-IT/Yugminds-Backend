@@ -515,6 +515,44 @@ describe('Teacher assignments (CRUD, grading, retakes, analytics-adjacent)', () 
     expect(otherBlocked.status).toBe(400);
   });
 
+  it('a grant on a default assignment is one extra attempt and does not open retakes for the class', async () => {
+    const assignmentId = await createAssignment({
+      title: 'Assignment Retake Single Grant',
+      questions: [
+        {
+          question_type: 'MCQ',
+          question_text: '4 + 4 = ?',
+          options: ['7', '8', '9'],
+          correct_answer: '1',
+          marks: 10,
+        },
+      ],
+    });
+    const qId = (await fetchQuestions(assignmentId))[0].id;
+    const student = fixture.students[2];
+    const other = fixture.students[0];
+    const submit = (token: string, answer: string) =>
+      request(app.getHttpServer())
+        .post(`/student/assignments/${assignmentId}/submit`)
+        .set(...authHeader(token))
+        .send({ answers: { [qId]: answer } });
+
+    expect((await submit(student.token, '0')).status).toBe(201);
+    expect((await submit(other.token, '0')).status).toBe(201);
+
+    await request(app.getHttpServer())
+      .post(`/teacher/assignments/${assignmentId}/retake-grants`)
+      .set(...teacherAuth)
+      .send({ studentIds: [student.id] })
+      .expect(201);
+
+    expect((await submit(student.token, '1')).status).toBe(201);
+    // The grant was used up — no unlimited retakes.
+    expect((await submit(student.token, '1')).status).toBe(400);
+    // Granting one student must not open retakes for everyone else.
+    expect((await submit(other.token, '1')).status).toBe(400);
+  });
+
   // ---- Retake open-all / close ----
 
   it('retake-open-all grants retakes to every submitted student; retake-close revokes them', async () => {

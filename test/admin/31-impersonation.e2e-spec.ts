@@ -37,7 +37,7 @@ describe('Admin impersonation', () => {
     expect(decoded.role).toBe('teacher');
     expect(decoded.tenantId).toBe(fixture.schoolId);
     expect(decoded.impersonatorId).toBe(fixture.admin.id);
-    expect(decoded.exp - decoded.iat).toBe(15 * 60);
+    expect((decoded.exp as number) - (decoded.iat as number)).toBe(15 * 60);
 
     await request(app.getHttpServer())
       .get('/teacher/dashboard')

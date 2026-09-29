@@ -1800,7 +1800,7 @@ export class TeacherExtraController {
         schoolId: true,
         courseId: true,
         chapterId: true,
-        retakeAccessScope: true,
+        title: true,
       },
     });
     if (
@@ -1837,32 +1837,13 @@ export class TeacherExtraController {
         }),
       ),
     );
-    if (isActive) {
-      // Granting an individual retake previously did nothing unless retake
-      // was separately enabled on the assignment — the "can this student
-      // retake" check requires retakeEnabled regardless of an active grant.
-      // Force it on here, and narrow the scope to "selected" unless the
-      // teacher had already deliberately opened it to the whole class, so
-      // this individual grant doesn't accidentally open retakes for everyone.
-      await this.db.assignment.update({
-        where: { id: assignmentId },
-        data: {
-          retakeEnabled: true,
-          retakeAccessScope:
-            assignment.retakeAccessScope === 'all' ? 'all' : 'selected',
-        },
-      });
-    }
-    const fullAssignment = await this.db.assignment.findUnique({
-      where: { id: assignmentId },
-      select: { title: true, maxRetakeAttempts: true },
-    });
+    if (!isActive) return { success: true, granted_count: 0 };
     await this.notificationsService.createManyRespectingPrefs(
       studentIds.map((studentId) => ({
         userId: studentId,
         senderId: user.id,
-        title: `Retake granted: ${fullAssignment?.title ?? 'Assignment'}`,
-        message: `Your teacher has allowed a retake for "${fullAssignment?.title ?? 'an assignment'}". Attempts remaining: ${fullAssignment?.maxRetakeAttempts ?? 'Unlimited'}.`,
+        title: `Retake granted: ${assignment.title}`,
+        message: `Your teacher has given you 1 extra attempt for "${assignment.title}".`,
         mode: 'assignment_due',
       })),
     );
@@ -2127,7 +2108,7 @@ export class TeacherExtraController {
   ) {
     const request = await this.db.retakeRequest.findUnique({
       where: { id: requestId },
-      include: { assignment: { select: { title: true, retakeAccessScope: true } } },
+      include: { assignment: { select: { title: true } } },
     });
     if (!request) throw new NotFoundException('Retake request not found');
     if (!request.targetTeacherIds.includes(user.id)) {
@@ -2161,17 +2142,6 @@ export class TeacherExtraController {
           isActive: true,
           grantedAt: new Date(),
           grantCount: { increment: 1 },
-        },
-      });
-      // Same fix as grantRetake(): retakeEnabled must be on for the grant to
-      // actually take effect, and narrow scope so only the requester (plus
-      // whoever else was already granted) can retake — not the whole class.
-      await this.db.assignment.update({
-        where: { id: request.assignmentId },
-        data: {
-          retakeEnabled: true,
-          retakeAccessScope:
-            request.assignment.retakeAccessScope === 'all' ? 'all' : 'selected',
         },
       });
     }

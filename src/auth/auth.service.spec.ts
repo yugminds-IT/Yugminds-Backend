@@ -25,7 +25,7 @@ describe('AuthService', () => {
     verifyAsync: jest.fn(),
   };
   const mockConfigService = {
-    get: jest.fn((key: string) =>
+    get: jest.fn((key: string): string | undefined =>
       key === 'JWT_ACCESS_SECRET' ? 'test-secret' : undefined,
     ),
   };

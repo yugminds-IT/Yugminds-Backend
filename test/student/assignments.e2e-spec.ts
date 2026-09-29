@@ -126,6 +126,9 @@ describe('Student assignments — retake scoring rule consistency', () => {
         (a: { id: string }) => a.id === assignmentId,
       );
       expect(row.submission.grade).toBe(100);
+      // Window open with attempts left (2 of 4 used) → list flags the retake.
+      expect(row.retake_available).toBe(true);
+      expect(row.retake_granted).toBe(false);
     },
   );
 
@@ -246,6 +249,55 @@ describe('Student assignments — retake scoring rule consistency', () => {
       );
       expect(row).toBeDefined();
       expect(row.submission.grade).toBe(100);
+    },
+  );
+
+  it(
+    'fill-blank with wrong choices: student gets a mixed word bank (never the raw ' +
+      'wrong-choice list) and picking the correct word scores full marks',
+    async () => {
+      const assignmentId = await createDailyAssignment({
+        title: 'QA Fill Blank Word Bank',
+        questions: [
+          {
+            question_type: 'FillBlank',
+            question_text: 'The ___ block displays a speech bubble',
+            options: ['Move', 'Think', 'Hide'],
+            correct_answer: 'Say',
+            marks: 10,
+          },
+        ],
+      });
+
+      const before = await request(app.getHttpServer())
+        .get(`/student/assignments/${assignmentId}`)
+        .set(...studentAuth)
+        .expect(200);
+      const q = before.body.assignment.questions[0];
+      const listBefore = await request(app.getHttpServer())
+        .get('/student/assignments?type=DAILY')
+        .set(...studentAuth)
+        .expect(200);
+      expect(
+        listBefore.body.assignments.find(
+          (a: { id: string }) => a.id === assignmentId,
+        ).retake_available,
+      ).toBe(false);
+      expect(q.options).toBeUndefined();
+      expect(q.correct_answer).toBeUndefined();
+      expect([...q.word_bank].sort()).toEqual(['Hide', 'Move', 'Say', 'Think']);
+
+      await request(app.getHttpServer())
+        .post(`/student/assignments/${assignmentId}/submit`)
+        .set(...studentAuth)
+        .send({ answers: { [q.id]: ['Say'] } })
+        .expect(201);
+
+      const after = await request(app.getHttpServer())
+        .get(`/student/assignments/${assignmentId}`)
+        .set(...studentAuth)
+        .expect(200);
+      expect(after.body.submission.score).toBe(10);
     },
   );
 });

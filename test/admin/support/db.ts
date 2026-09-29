@@ -51,7 +51,7 @@ async function queryWithRetry<T>(
 export async function getBootstrapAdmin(): Promise<AdminRow> {
   const seedEmail = process.env.ADMIN_SEED_EMAIL;
   if (!seedEmail) throw new Error('ADMIN_SEED_EMAIL not set');
-  const { rows } = await queryWithRetry(() =>
+  const { rows } = await queryWithRetry<{ rows: AdminRow[] }>(() =>
     pool.query(
       `SELECT id, email, role, "isSuperAdmin", "tenantId", "tokenVersion"
          FROM "User" WHERE email = $1 LIMIT 1`,
@@ -67,7 +67,7 @@ export async function getBootstrapAdmin(): Promise<AdminRow> {
 }
 
 export async function getUserById(id: number): Promise<AdminRow> {
-  const { rows } = await queryWithRetry(() =>
+  const { rows } = await queryWithRetry<{ rows: AdminRow[] }>(() =>
     pool.query(
       `SELECT id, email, role, "isSuperAdmin", "tenantId", "tokenVersion"
          FROM "User" WHERE id = $1 LIMIT 1`,

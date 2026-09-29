@@ -25,6 +25,11 @@ import { StudentRankingService } from '../../common/assignment/student-ranking.s
 import { FileInterceptor } from '@nestjs/platform-express';
 import { AssignmentsHierarchyQueryDto } from './dto/assignments-hierarchy-query.dto';
 import { SimpleProgressDto } from './dto/simple-progress.dto';
+import { buildWordBank } from './word-bank';
+import {
+  canRetakeAssignment,
+  RetakeSettings,
+} from '../../common/assignment/retake-eligibility';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 import { StorageService } from '../../common/storage/storage.service';
@@ -49,7 +54,10 @@ export class StudentExtraController {
 
   // ─── Notifications ────────────────────────────────────────────────────────
 
-  private async getStudentSchoolId(studentId: number, schoolIdHint?: string): Promise<string> {
+  private async getStudentSchoolId(
+    studentId: number,
+    schoolIdHint?: string,
+  ): Promise<string> {
     if (schoolIdHint) {
       const m = await this.db.studentSchool.findFirst({
         where: { studentId, schoolId: schoolIdHint, isActive: true },
@@ -84,9 +92,13 @@ export class StudentExtraController {
   ) {
     const title = (body.title ?? '').trim();
     const message = (body.message ?? '').trim();
-    if (!title || !message) throw new BadRequestException('Title and message are required');
+    if (!title || !message)
+      throw new BadRequestException('Title and message are required');
 
-    const schoolId = await this.getStudentSchoolId(user.id, body.school_id?.trim());
+    const schoolId = await this.getStudentSchoolId(
+      user.id,
+      body.school_id?.trim(),
+    );
 
     const recipientType = body.recipientType ?? 'role';
     const recipients = Array.isArray(body.recipients) ? body.recipients : [];
@@ -95,7 +107,9 @@ export class StudentExtraController {
     if (recipientType === 'role') {
       // Students can only message teachers (not other students, for safety)
       if (!recipients.includes('role:teacher') && recipients.length > 0) {
-        throw new BadRequestException('Students can only send notifications to teachers');
+        throw new BadRequestException(
+          'Students can only send notifications to teachers',
+        );
       }
       const teachers = await this.db.teacherSchool.findMany({
         where: { schoolId },
@@ -113,11 +127,14 @@ export class StudentExtraController {
         select: { teacherId: true },
       });
       if (teacherRows.length === 0)
-        throw new BadRequestException('Students can only send notifications to teachers in their school');
+        throw new BadRequestException(
+          'Students can only send notifications to teachers in their school',
+        );
       teacherRows.forEach((t) => targetUserIds.add(t.teacherId));
     }
 
-    if (targetUserIds.size === 0) throw new BadRequestException('No valid recipients');
+    if (targetUserIds.size === 0)
+      throw new BadRequestException('No valid recipients');
 
     const { sent } = await this.notificationsService.sendBroadcast(
       user.id,
@@ -135,7 +152,10 @@ export class StudentExtraController {
     @CurrentUser() user: { id: number },
     @Query('school_id') schoolId?: string,
   ) {
-    const resolvedSchoolId = await this.getStudentSchoolId(user.id, schoolId).catch(() => null);
+    const resolvedSchoolId = await this.getStudentSchoolId(
+      user.id,
+      schoolId,
+    ).catch(() => null);
     if (!resolvedSchoolId) return { roles: [], users: [] };
     const schoolId2 = resolvedSchoolId;
 
@@ -144,17 +164,21 @@ export class StudentExtraController {
       this.db.teacherSchool.findMany({ where: { schoolId: schoolId2 } }),
     ]);
 
-    const teacherIds = Array.from(new Set(teacherSchools.map((t) => t.teacherId)));
-    const teachers = teacherIds.length > 0
-      ? await this.db.user.findMany({
-          where: { id: { in: teacherIds } },
-          include: { profile: true },
-        })
-      : [];
+    const teacherIds = Array.from(
+      new Set(teacherSchools.map((t) => t.teacherId)),
+    );
+    const teachers =
+      teacherIds.length > 0
+        ? await this.db.user.findMany({
+            where: { id: { in: teacherIds } },
+            include: { profile: true },
+          })
+        : [];
 
-    const roles = teacherCount > 0
-      ? [{ id: 'role:teacher', name: 'All Teachers', count: teacherCount }]
-      : [];
+    const roles =
+      teacherCount > 0
+        ? [{ id: 'role:teacher', name: 'All Teachers', count: teacherCount }]
+        : [];
 
     const users = teachers.map((t) => ({
       id: String(t.id),
@@ -222,12 +246,18 @@ export class StudentExtraController {
   ) {
     const cert = await this.db.studentCertificate.findUnique({
       where: { id },
-      select: { studentId: true, certificateKey: true, certificateUrl: true, id: true },
+      select: {
+        studentId: true,
+        certificateKey: true,
+        certificateUrl: true,
+        id: true,
+      },
     });
     if (!cert || cert.studentId !== user.id) {
       throw new NotFoundException('Certificate not found');
     }
-    const key = cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
+    const key =
+      cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
     if (!key) throw new BadRequestException('Certificate file is unavailable');
 
     const { body, contentType } = await this.storage.getObject(key);
@@ -459,63 +489,63 @@ export class StudentExtraController {
     const courses = enrollments
       .filter((e) => courseById.has(e.courseId))
       .map((e) => {
-      const course = courseById.get(e.courseId);
-      const courseChapters = chaptersByCourse.get(e.courseId) ?? [];
-      const totalChapters = courseChapters.length;
+        const course = courseById.get(e.courseId);
+        const courseChapters = chaptersByCourse.get(e.courseId) ?? [];
+        const totalChapters = courseChapters.length;
 
-      const courseProgress = progressByCourse.get(e.courseId) ?? [];
+        const courseProgress = progressByCourse.get(e.courseId) ?? [];
 
-      // Get all content items for these chapters
-      const courseChapterIds = courseChapters.map((ch) => ch.id);
-      const courseContents = contents.filter((c) =>
-        courseChapterIds.includes(c.chapterId),
-      );
-      const totalContentItems = courseContents.length;
+        // Get all content items for these chapters
+        const courseChapterIds = courseChapters.map((ch) => ch.id);
+        const courseContents = contents.filter((c) =>
+          courseChapterIds.includes(c.chapterId),
+        );
+        const totalContentItems = courseContents.length;
 
-      const computed = computeCourseProgress(
-        courseChapters,
-        courseContents,
-        courseProgress as unknown as Array<{
-          contentId: string | null;
-          chapterId: string | null;
-          progress: number;
-          completedAt: Date | null;
-          updatedAt: Date;
-        }>,
-      );
-      const { completedChapters, status } = computed;
-      const last = computed.lastAccessed;
-      const finalProgressPercentage = computed.progressPercentage;
+        const computed = computeCourseProgress(
+          courseChapters,
+          courseContents,
+          courseProgress as unknown as Array<{
+            contentId: string | null;
+            chapterId: string | null;
+            progress: number;
+            completedAt: Date | null;
+            updatedAt: Date;
+          }>,
+        );
+        const { completedChapters, status } = computed;
+        const last = computed.lastAccessed;
+        const finalProgressPercentage = computed.progressPercentage;
 
-      return {
-        id: e.courseId,
-        title: course?.title ?? '',
-        name: course?.title ?? '',
-        description: course?.description ?? null,
-        thumbnail_url: course?.thumbnailUrl ?? null,
-        enrolled_at: e.enrolledAt.toISOString(),
-        grade,
-        subject: '',
-        total_chapters: totalChapters,
-        completed_chapters: completedChapters,
-        progress_percentage: finalProgressPercentage,
-        last_accessed: (last ?? e.enrolledAt).toISOString(),
-        total_assignments: assignmentsByCourse.get(e.courseId) ?? 0,
-        completed_assignments:
-          completedAssignmentsByCourse.get(e.courseId) ?? 0,
-        // Derived metadata for a richer "My Courses" catalog (no schema change):
-        // total lessons, estimated duration (sum of content durations), last updated.
-        total_lessons: totalContentItems,
-        estimated_minutes: computed.estimatedMinutes,
-        last_updated: (course?.updatedAt ?? e.enrolledAt).toISOString(),
-        average_grade: (() => {
-          const agg = gradeAggByCourse.get(e.courseId);
-          if (!agg || agg.count === 0) return null;
-          return Number((agg.sumPct / agg.count).toFixed(2));
-        })(),
-        status,
-      };
-    });
+        return {
+          id: e.courseId,
+          title: course?.title ?? '',
+          name: course?.title ?? '',
+          description: course?.description ?? null,
+          thumbnail_url: course?.thumbnailUrl ?? null,
+          enrolled_at: e.enrolledAt.toISOString(),
+          grade,
+          subject: '',
+          total_chapters: totalChapters,
+          completed_chapters: completedChapters,
+          progress_percentage: finalProgressPercentage,
+          last_accessed: (last ?? e.enrolledAt).toISOString(),
+          total_assignments: assignmentsByCourse.get(e.courseId) ?? 0,
+          completed_assignments:
+            completedAssignmentsByCourse.get(e.courseId) ?? 0,
+          // Derived metadata for a richer "My Courses" catalog (no schema change):
+          // total lessons, estimated duration (sum of content durations), last updated.
+          total_lessons: totalContentItems,
+          estimated_minutes: computed.estimatedMinutes,
+          last_updated: (course?.updatedAt ?? e.enrolledAt).toISOString(),
+          average_grade: (() => {
+            const agg = gradeAggByCourse.get(e.courseId);
+            if (!agg || agg.count === 0) return null;
+            return Number((agg.sumPct / agg.count).toFixed(2));
+          })(),
+          status,
+        };
+      });
     return { courses };
   }
 
@@ -720,8 +750,7 @@ export class StudentExtraController {
     const completedContentIds = new Set(
       progress
         .filter(
-          (p) =>
-            (p as any).contentId && (p.progress >= 99 || p.completedAt),
+          (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
         )
         .map((p) => (p as any).contentId as string),
     );
@@ -850,8 +879,7 @@ export class StudentExtraController {
     const completedContentIds = new Set(
       progress
         .filter(
-          (p) =>
-            (p as any).contentId && (p.progress >= 99 || p.completedAt),
+          (p) => (p as any).contentId && (p.progress >= 99 || p.completedAt),
         )
         .map((p) => (p as any).contentId as string),
     );
@@ -954,7 +982,9 @@ export class StudentExtraController {
           (dailyAssignmentById.get(assignmentId) as any)?.retakeScoringRule ??
             'latest',
         ).toLowerCase();
-        const graded = subs.filter((s) => s.status === 'graded' && s.score != null);
+        const graded = subs.filter(
+          (s) => s.status === 'graded' && s.score != null,
+        );
         const chosen =
           graded.length === 0
             ? subs[subs.length - 1]
@@ -965,10 +995,15 @@ export class StudentExtraController {
               : graded[graded.length - 1];
         latestSubByAssignment.set(assignmentId, chosen);
       }
+      const grantedIds = await this.activeRetakeGrantIds(
+        user.id,
+        dailyAssignments.map((a) => a.id),
+      );
       const now = new Date();
       return {
         assignments: dailyAssignments.map((a) => {
           const sub = latestSubByAssignment.get(a.id) ?? null;
+          const attemptsCount = submissionsByAssignment.get(a.id)?.length ?? 0;
           const due = (a as any).dueDate as Date | null;
           const maxMarks =
             (a.questions ?? []).reduce(
@@ -992,6 +1027,7 @@ export class StudentExtraController {
               ? StudentExtraController.daysUntil(due, now)
               : 0,
             status: sub?.status ?? 'not_started',
+            ...this.retakeListFields(a, attemptsCount, grantedIds.has(a.id)),
             submission: sub
               ? {
                   id: sub.id,
@@ -1102,7 +1138,9 @@ export class StudentExtraController {
       const rule = String(
         assignmentById.get(assignmentId)?.retakeScoringRule ?? 'latest',
       ).toLowerCase();
-      const graded = subs.filter((s) => s.status === 'graded' && s.score != null);
+      const graded = subs.filter(
+        (s) => s.status === 'graded' && s.score != null,
+      );
       const chosen =
         graded.length === 0
           ? subs[subs.length - 1]
@@ -1113,6 +1151,10 @@ export class StudentExtraController {
             : graded[graded.length - 1];
       submissionByAssignmentId.set(assignmentId, chosen);
     }
+    const grantedIds = await this.activeRetakeGrantIds(
+      user.id,
+      assignments.map((a) => a.id),
+    );
     return {
       assignments: assignments.map((a) => {
         const assignmentCourseId = a.chapter?.courseId ?? '';
@@ -1120,74 +1162,106 @@ export class StudentExtraController {
           ? unlockStatesByCourse.get(assignmentCourseId)?.get(a.chapterId)
           : undefined;
         return {
-        id: a.id,
-        chapter_id: a.chapterId,
-        course_id: a.chapter?.courseId ?? '',
-        is_locked: chapterState ? !chapterState.isUnlocked : false,
-        unlocks_in_days: chapterState?.unlocksInDays ?? null,
-        lock_reason: chapterState?.lockReason ?? null,
-        title: a.title,
-        description: a.description,
-        course_title: (() => {
-          const cid =
-            a.chapter?.courseId ??
-            (a.chapterId ? courseIdByChapterId.get(a.chapterId) : undefined) ??
-            '';
-          const c = courseById.get(cid);
-          return c?.title ?? '';
-        })(),
-        assignment_type: (() => {
-          const qTypes = new Set(
-            (a.questions ?? []).map((q) =>
-              String(q.questionType ?? '').toLowerCase(),
-            ),
-          );
-          if (qTypes.has('mcq')) return 'mcq';
-          if (qTypes.has('fillblank')) return 'quiz';
-          return 'essay';
-        })(),
-        due_date: (a as { dueDate?: Date | null }).dueDate
-          ? (a as { dueDate?: Date }).dueDate!.toISOString()
-          : null,
-        max_marks: (a.questions ?? []).reduce(
-          (sum, q) => sum + (typeof q.marks === 'number' ? q.marks : 1),
-          0,
-        ),
-        status: submissionByAssignmentId.get(a.id)?.status ?? 'not_started',
-        is_overdue: (() => {
-          const due = (a as { dueDate?: Date | null }).dueDate;
-          if (!due) return false;
-          return (
-            due.getTime() < Date.now() &&
-            (submissionByAssignmentId.get(a.id)?.status ?? 'not_started') ===
-              'not_started'
-          );
-        })(),
-        days_until_due: (() => {
-          const due = (a as { dueDate?: Date | null }).dueDate;
-          if (!due) return 0;
-          return StudentExtraController.daysUntil(due, new Date());
-        })(),
-        submission: (() => {
-          const s = submissionByAssignmentId.get(a.id);
-          if (!s) return null;
-          const pct =
-            typeof s.score === 'number' &&
-            typeof s.maxScore === 'number' &&
-            s.maxScore > 0
-              ? Math.round((s.score / s.maxScore) * 100)
-              : null;
-          return {
-            id: s.id,
-            grade: pct,
-            feedback: '',
-            submitted_at: s.submittedAt.toISOString(),
-            graded_at: s.gradedAt?.toISOString() ?? null,
-            status: s.status,
-          };
-        })(),
+          id: a.id,
+          chapter_id: a.chapterId,
+          course_id: a.chapter?.courseId ?? '',
+          is_locked: chapterState ? !chapterState.isUnlocked : false,
+          unlocks_in_days: chapterState?.unlocksInDays ?? null,
+          lock_reason: chapterState?.lockReason ?? null,
+          title: a.title,
+          description: a.description,
+          course_title: (() => {
+            const cid =
+              a.chapter?.courseId ??
+              (a.chapterId
+                ? courseIdByChapterId.get(a.chapterId)
+                : undefined) ??
+              '';
+            const c = courseById.get(cid);
+            return c?.title ?? '';
+          })(),
+          assignment_type: (() => {
+            const qTypes = new Set(
+              (a.questions ?? []).map((q) =>
+                String(q.questionType ?? '').toLowerCase(),
+              ),
+            );
+            if (qTypes.has('mcq')) return 'mcq';
+            if (qTypes.has('fillblank')) return 'quiz';
+            return 'essay';
+          })(),
+          due_date: (a as { dueDate?: Date | null }).dueDate
+            ? (a as { dueDate?: Date }).dueDate!.toISOString()
+            : null,
+          max_marks: (a.questions ?? []).reduce(
+            (sum, q) => sum + (typeof q.marks === 'number' ? q.marks : 1),
+            0,
+          ),
+          status: submissionByAssignmentId.get(a.id)?.status ?? 'not_started',
+          ...this.retakeListFields(
+            a,
+            submissionsByAssignmentId.get(a.id)?.length ?? 0,
+            grantedIds.has(a.id),
+          ),
+          is_overdue: (() => {
+            const due = (a as { dueDate?: Date | null }).dueDate;
+            if (!due) return false;
+            return (
+              due.getTime() < Date.now() &&
+              (submissionByAssignmentId.get(a.id)?.status ?? 'not_started') ===
+                'not_started'
+            );
+          })(),
+          days_until_due: (() => {
+            const due = (a as { dueDate?: Date | null }).dueDate;
+            if (!due) return 0;
+            return StudentExtraController.daysUntil(due, new Date());
+          })(),
+          submission: (() => {
+            const s = submissionByAssignmentId.get(a.id);
+            if (!s) return null;
+            const pct =
+              typeof s.score === 'number' &&
+              typeof s.maxScore === 'number' &&
+              s.maxScore > 0
+                ? Math.round((s.score / s.maxScore) * 100)
+                : null;
+            return {
+              id: s.id,
+              grade: pct,
+              feedback: '',
+              submitted_at: s.submittedAt.toISOString(),
+              graded_at: s.gradedAt?.toISOString() ?? null,
+              status: s.status,
+            };
+          })(),
         };
       }),
+    };
+  }
+
+  private async activeRetakeGrantIds(
+    studentId: number,
+    assignmentIds: string[],
+  ): Promise<Set<string>> {
+    if (assignmentIds.length === 0) return new Set();
+    const grants = await this.db.retakeGrant.findMany({
+      where: { studentId, assignmentId: { in: assignmentIds }, isActive: true },
+      select: { assignmentId: true },
+    });
+    return new Set(grants.map((g) => g.assignmentId));
+  }
+
+  /** `retake_available`: the student has attempted and may start another attempt now. */
+  private retakeListFields(
+    a: RetakeSettings,
+    attemptsCount: number,
+    grantActive: boolean,
+  ) {
+    return {
+      retake_available:
+        attemptsCount > 0 && canRetakeAssignment(a, attemptsCount, grantActive),
+      retake_granted: grantActive,
     };
   }
 
@@ -1422,20 +1496,29 @@ export class StudentExtraController {
         retake_scoring_rule: assignment.retakeScoringRule ?? 'latest',
         retake_window_open: assignment.retakeWindowOpen ?? false,
         retake_access_scope: assignment.retakeAccessScope ?? 'all',
-        questions: assignment.questions.map((q) => ({
-          id: q.id,
-          question_type: q.questionType,
-          question_text: q.questionText,
-          options: Array.isArray(q.options)
-            ? (q.options as string[])
-            : undefined,
-          marks: q.marks,
-          // Only show correct answer if graded
-          correct_answer:
-            latestAttempt && latestAttempt.status === 'graded'
-              ? q.correctAnswer
+        questions: assignment.questions.map((q) => {
+          // Fill-blank `options` are the wrong choices only — never send them
+          // raw, or students could tell the correct words apart.
+          const isFillBlank = /^fill[-_]?blank$/i.test(q.questionType ?? '');
+          return {
+            id: q.id,
+            question_type: q.questionType,
+            question_text: q.questionText,
+            options:
+              !isFillBlank && Array.isArray(q.options)
+                ? (q.options as string[])
+                : undefined,
+            word_bank: isFillBlank
+              ? (buildWordBank(q.id, q.correctAnswer, q.options) ?? undefined)
               : undefined,
-        })),
+            marks: q.marks,
+            // Only show correct answer if graded
+            correct_answer:
+              latestAttempt && latestAttempt.status === 'graded'
+                ? q.correctAnswer
+                : undefined,
+          };
+        }),
       },
       submission: latestAttempt
         ? {
@@ -1480,18 +1563,13 @@ export class StudentExtraController {
         grant_count: retakeGrant?.grantCount ?? 0,
         granted_at: retakeGrant?.grantedAt?.toISOString() ?? null,
         scoring_rule: assignment.retakeScoringRule ?? 'latest',
-        // Mirror exactly the canRetake logic used in the submit handler so that
-        // the frontend's "Retake" button appears iff the submit will be accepted.
         allowed:
           attempts.length === 0 ||
-          (!!assignment.retakeEnabled &&
-            (assignment.maxRetakeAttempts == null ||
-              attempts.length < (assignment.maxRetakeAttempts ?? 0) + 1) &&
-            ((assignment.retakeAccessScope ?? 'all') === 'all' ||
-              !!retakeGrant?.isActive) &&
-            (assignment.maxRetakeAttempts === null ||
-              !!assignment.retakeWindowOpen ||
-              !!retakeGrant?.isActive)),
+          canRetakeAssignment(
+            assignment,
+            attempts.length,
+            !!retakeGrant?.isActive,
+          ),
       },
       retake_request: latestRetakeRequest
         ? {
@@ -1547,19 +1625,13 @@ export class StudentExtraController {
       where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
       select: { isActive: true },
     });
-    // Same formula as getAssignment()/submitAssignment() — no point
-    // requesting when a retake is already allowed.
-    const alreadyAllowed =
-      !!assignment.retakeEnabled &&
-      (assignment.maxRetakeAttempts == null ||
-        attemptsCount < (assignment.maxRetakeAttempts ?? 0) + 1) &&
-      ((assignment.retakeAccessScope ?? 'all') === 'all' ||
-        !!retakeGrant?.isActive) &&
-      (assignment.maxRetakeAttempts === null ||
-        !!assignment.retakeWindowOpen ||
-        !!retakeGrant?.isActive);
-    if (alreadyAllowed) {
-      throw new BadRequestException('A retake is already available for this assignment');
+    // No point requesting when a retake is already allowed.
+    if (
+      canRetakeAssignment(assignment, attemptsCount, !!retakeGrant?.isActive)
+    ) {
+      throw new BadRequestException(
+        'A retake is already available for this assignment',
+      );
     }
 
     const existingPending = await this.db.retakeRequest.findFirst({
@@ -1572,15 +1644,13 @@ export class StudentExtraController {
       );
     }
 
-    const { schoolId, teacherIds: targetTeacherIds } = await this.retakeTeacherResolver.resolve(
-      user.id,
-      {
+    const { schoolId, teacherIds: targetTeacherIds } =
+      await this.retakeTeacherResolver.resolve(user.id, {
         teacherId: assignment.teacherId,
         schoolId: assignment.schoolId,
         chapterId: assignment.chapterId,
         courseId: assignment.courseId,
-      },
-    );
+      });
 
     const created = await this.db.retakeRequest.create({
       data: {
@@ -1691,28 +1761,15 @@ export class StudentExtraController {
     const retakeFeatureEnabled =
       process.env.ASSIGNMENT_RETAKE_FEATURE_ENABLED !== 'false';
     const hasAttempted = existingAttempts.length > 0;
-    const hasRetakeCapacity =
-      assignment.maxRetakeAttempts == null ||
-      existingAttempts.length < assignment.maxRetakeAttempts + 1;
     const activeRetakeGrant = await this.db.retakeGrant.findUnique({
       where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
       select: { isActive: true },
     });
-    const retakeAllowedByScope =
-      (assignment.retakeAccessScope ?? 'all') === 'all' ||
-      !!activeRetakeGrant?.isActive;
-    // Window is not required when attempts are unlimited — an open window is only
-    // needed to grant a time-limited second chance on fixed-attempt assignments.
-    const unlimitedAttempts = assignment.maxRetakeAttempts === null;
-    const retakeAllowedByWindow =
-      unlimitedAttempts ||
-      !!assignment.retakeWindowOpen ||
-      !!activeRetakeGrant?.isActive;
-    const canRetake =
-      !!assignment.retakeEnabled &&
-      hasRetakeCapacity &&
-      retakeAllowedByScope &&
-      retakeAllowedByWindow;
+    const canRetake = canRetakeAssignment(
+      assignment,
+      existingAttempts.length,
+      !!activeRetakeGrant?.isActive,
+    );
     if (retakeFeatureEnabled && hasAttempted && !canRetake) {
       throw new BadRequestException(
         'Retake is not available for this assignment',
@@ -1807,7 +1864,9 @@ export class StudentExtraController {
         // a numeric-looking option (e.g. options ["1","2","3","4"] with "1"
         // marked correct) gets misread as index 1 ("2") instead of index 0
         // ("1"), silently grading the actually-correct answer as wrong.
-        const textMatchIndex = options.findIndex((o) => norm(o) === norm(expected));
+        const textMatchIndex = options.findIndex(
+          (o) => norm(o) === norm(expected),
+        );
         let expectedIndex: number;
         if (textMatchIndex !== -1) {
           expectedIndex = textMatchIndex;
@@ -1828,7 +1887,9 @@ export class StudentExtraController {
         } else {
           // Legacy: student answer stored as raw option text instead of index.
           const expectedText =
-            expectedIndex !== -1 ? norm(options[expectedIndex]) : norm(expected);
+            expectedIndex !== -1
+              ? norm(options[expectedIndex])
+              : norm(expected);
           isCorrect = norm(given) === expectedText;
         }
       } else {
@@ -1889,10 +1950,7 @@ export class StudentExtraController {
       }
     }
 
-    if (
-      activeRetakeGrant?.isActive &&
-      assignment.retakeAccessScope === 'selected'
-    ) {
+    if (activeRetakeGrant?.isActive && hasAttempted) {
       await this.db.retakeGrant.update({
         where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
         data: { isActive: false },
