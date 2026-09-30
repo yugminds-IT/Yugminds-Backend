@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, UseGuards } from '@nestjs/common';
 import { SkipThrottle } from '@nestjs/throttler';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { RolesGuard } from '../../auth/roles/roles.guard';
@@ -21,5 +21,13 @@ export class SchoolAdminStatsController {
   @Get('leaderboard')
   getLeaderboard(@CurrentUser() user: { id: number }) {
     return this.service.getLeaderboard(user);
+  }
+
+  @Get('leaderboard/assignments/:assignmentId/marks')
+  getAssignmentMarks(
+    @CurrentUser() user: { id: number },
+    @Param('assignmentId') assignmentId: string,
+  ) {
+    return this.service.getAssignmentMarks(user, assignmentId);
   }
 }

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 
@@ -53,11 +53,11 @@ export class SchoolAdminStatsService {
       this.db.teacherReport.count({ where: { schoolId, status: 'submitted' } }),
       // TeacherLeave.teacherId has no enforced FK — exclude rows orphaned by
       // a hard-deleted teacher (see AdminDashboardService.getStats()).
-      this.db
-        .$queryRaw<
-          Array<{ count: bigint }>
-        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`
-        .then((rows) => Number(rows[0]?.count ?? 0)),
+      this.db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`.then(
+        (rows) => Number(rows[0]?.count ?? 0),
+      ),
       this.db.attendance.groupBy({
         by: ['status'],
         where: { schoolId, date: { gte: since } },
@@ -85,6 +85,166 @@ export class SchoolAdminStatsService {
       pendingReports,
       pendingLeaves,
       averageAttendance,
+    };
+  }
+
+  /** Published daily assignments of this school + course assignments from courses it can access. */
+  private async schoolAssignments(schoolId: string) {
+    const select = {
+      id: true,
+      assignmentType: true,
+      totalMarks: true,
+      retakeScoringRule: true,
+      title: true,
+      subject: true,
+      isPublished: true,
+      gradeId: true,
+      createdAt: true,
+    } as const;
+    const [schoolAssignments, courseAccess] = await Promise.all([
+      this.db.assignment.findMany({
+        where: { schoolId, isPublished: true },
+        select,
+      }),
+      this.db.courseAccess.findMany({
+        where: { schoolId },
+        select: { courseId: true },
+      }),
+    ]);
+
+    const accessibleCourseIds = [
+      ...new Set(courseAccess.map((c) => c.courseId)),
+    ];
+    const courseAssignmentsFromLibrary = accessibleCourseIds.length
+      ? await this.db.assignment.findMany({
+          where: {
+            assignmentType: 'COURSE',
+            isPublished: true,
+            OR: [
+              { courseId: { in: accessibleCourseIds } },
+              { chapter: { courseId: { in: accessibleCourseIds } } },
+            ],
+          },
+          select,
+        })
+      : [];
+
+    const byId = new Map(schoolAssignments.map((a) => [a.id, a]));
+    for (const a of courseAssignmentsFromLibrary) {
+      if (!byId.has(a.id)) byId.set(a.id, a);
+    }
+    return [...byId.values()];
+  }
+
+  /**
+   * Per-student marks for one assignment, limited to this school's students.
+   * The score shown follows the assignment's retake scoring rule, same as the
+   * teacher's Submissions tab and the leaderboard.
+   */
+  async getAssignmentMarks(user: { id: number }, assignmentId: string) {
+    const sa = await this.db.schoolAdmin.findFirst({
+      where: { userId: user.id },
+      select: { schoolId: true },
+    });
+    const schoolId = sa?.schoolId;
+    if (!schoolId) throw new NotFoundException('Assignment not found');
+
+    const assignment = (await this.schoolAssignments(schoolId)).find(
+      (a) => a.id === assignmentId,
+    );
+    if (!assignment) throw new NotFoundException('Assignment not found');
+
+    const enrollments = await this.db.studentSchool.findMany({
+      where: { schoolId, isActive: true },
+      select: {
+        studentId: true,
+        grade: true,
+        section: true,
+        student: {
+          select: { email: true, profile: { select: { fullName: true } } },
+        },
+      },
+    });
+    const enrollmentById = new Map(enrollments.map((e) => [e.studentId, e]));
+
+    const submissions = await this.db.assignmentSubmission.findMany({
+      where: {
+        assignmentId,
+        studentId: { in: enrollments.map((e) => e.studentId) },
+      },
+      select: {
+        studentId: true,
+        attemptNumber: true,
+        status: true,
+        score: true,
+        maxScore: true,
+        submittedAt: true,
+      },
+      orderBy: [{ studentId: 'asc' }, { attemptNumber: 'asc' }],
+    });
+
+    const rule = String(assignment.retakeScoringRule ?? 'latest').toLowerCase();
+    type Sub = (typeof submissions)[number];
+    const byStudent = new Map<
+      number,
+      { attempts: number; latest: Sub; counted: Sub | null }
+    >();
+    for (const s of submissions) {
+      const row = byStudent.get(s.studentId) ?? {
+        attempts: 0,
+        latest: s,
+        counted: null,
+      };
+      row.attempts++;
+      row.latest = s;
+      if (s.status === 'graded' && s.score != null) {
+        if (
+          rule !== 'highest' ||
+          !row.counted ||
+          (row.counted.score ?? -1) < s.score
+        ) {
+          row.counted = s;
+        }
+      }
+      byStudent.set(s.studentId, row);
+    }
+
+    const students = [...byStudent.entries()]
+      .map(([studentId, row]) => {
+        const e = enrollmentById.get(studentId);
+        const counted = row.counted;
+        const max = counted?.maxScore ?? assignment.totalMarks ?? null;
+        return {
+          student_id: studentId,
+          student_name:
+            e?.student.profile?.fullName ??
+            e?.student.email ??
+            `Student ${studentId}`,
+          grade: e?.grade ?? null,
+          section: e?.section ?? null,
+          attempts: row.attempts,
+          score: counted?.score ?? null,
+          max_score: max,
+          percent:
+            counted?.score != null && max
+              ? Math.round((counted.score / max) * 100)
+              : null,
+          status: counted ? 'graded' : 'pending',
+          submitted_at: row.latest.submittedAt.toISOString(),
+        };
+      })
+      .sort((a, b) => a.student_name.localeCompare(b.student_name));
+
+    return {
+      assignment: {
+        id: assignment.id,
+        title: assignment.title,
+        assignment_type: assignment.assignmentType ?? 'COURSE',
+        subject: assignment.subject,
+        total_marks: assignment.totalMarks,
+        scoring_rule: rule,
+      },
+      students,
     };
   }
 
@@ -120,61 +280,7 @@ export class SchoolAdminStatsService {
 
     const studentIds = enrollments.map((e) => e.studentId);
 
-    // Get all school-scoped assignments (daily, published only) + course assignments accessible by school
-    const [schoolAssignments, courseAccess] = await Promise.all([
-      this.db.assignment.findMany({
-        where: { schoolId, isPublished: true },
-        select: {
-          id: true,
-          assignmentType: true,
-          totalMarks: true,
-          retakeScoringRule: true,
-          title: true,
-          subject: true,
-          isPublished: true,
-          gradeId: true,
-          createdAt: true,
-        },
-      }),
-      this.db.courseAccess.findMany({
-        where: { schoolId },
-        select: { courseId: true },
-      }),
-    ]);
-
-    const accessibleCourseIds = [
-      ...new Set(courseAccess.map((c) => c.courseId)),
-    ];
-    const courseAssignmentsFromLibrary = accessibleCourseIds.length
-      ? await this.db.assignment.findMany({
-          where: {
-            assignmentType: 'COURSE',
-            isPublished: true,
-            OR: [
-              { courseId: { in: accessibleCourseIds } },
-              { chapter: { courseId: { in: accessibleCourseIds } } },
-            ],
-          },
-          select: {
-            id: true,
-            assignmentType: true,
-            totalMarks: true,
-            retakeScoringRule: true,
-            title: true,
-            subject: true,
-            isPublished: true,
-            gradeId: true,
-            createdAt: true,
-          },
-        })
-      : [];
-
-    // Merge, deduplicate
-    const allAssignmentsMap = new Map(schoolAssignments.map((a) => [a.id, a]));
-    for (const a of courseAssignmentsFromLibrary) {
-      if (!allAssignmentsMap.has(a.id)) allAssignmentsMap.set(a.id, a);
-    }
-    const allAssignments = [...allAssignmentsMap.values()];
+    const allAssignments = await this.schoolAssignments(schoolId);
 
     const publishedCount = allAssignments.filter((a) => a.isPublished).length;
     const courseAssignmentIds = allAssignments
@@ -384,11 +490,24 @@ export class SchoolAdminStatsService {
       .filter((a) => a.isPublished)
       .map((a) => {
         const subs = bestSubmissions.filter((s) => s.assignmentId === a.id);
-        const submittedCount = new Set(subs.map((s) => s.studentId)).size;
+        const submittedCount = new Set(
+          allSubmissions
+            .filter((s) => s.assignmentId === a.id)
+            .map((s) => s.studentId),
+        ).size;
         const scores = subs.map((s) => Number(s.score ?? 0));
-        const avg = scores.length
+        // Percent per student, so assignments with different totals average correctly.
+        const percents = subs
+          .map((s) => {
+            const max = Number(s.maxScore ?? a.totalMarks ?? 0);
+            return max > 0 ? (Number(s.score ?? 0) / max) * 100 : null;
+          })
+          .filter((p): p is number => p != null);
+        const avg = percents.length
           ? Number(
-              (scores.reduce((x, y) => x + y, 0) / scores.length).toFixed(2),
+              (percents.reduce((x, y) => x + y, 0) / percents.length).toFixed(
+                2,
+              ),
             )
           : 0;
         const high = scores.length ? Math.max(...scores) : 0;
@@ -399,7 +518,9 @@ export class SchoolAdminStatsService {
           title: a.title,
           assignment_type: (a as any).assignmentType ?? 'COURSE',
           subject: a.subject,
+          total_marks: a.totalMarks,
           total_submissions: submittedCount,
+          graded_count: subs.length,
           avg_score: avg,
           highest_score: high,
           lowest_score: low,
