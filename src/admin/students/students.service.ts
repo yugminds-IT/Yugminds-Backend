@@ -7,6 +7,7 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength, deriveFriendlyPassword } from '../../common/utils/password.util';
+import { applyEmailDomain, normalizeEmailDomain } from '../../common/utils/email-domain.util';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
@@ -302,13 +303,22 @@ export class AdminStudentsService {
    * admin isn't tenant-scoped. `dryRun` validates every row (including
    * password strength for any row-supplied password) without writing
    * anything, so a large import can be checked end-to-end before committing.
+   * `emailDomain`, when given, is enforced on every row: bare local parts get
+   * it appended and addresses on any other domain are rejected.
    */
   async bulkImport(
     schoolId: string | undefined,
     rows: Array<Record<string, unknown>>,
     dryRun: boolean,
+    emailDomain?: string,
   ) {
     if (!schoolId) throw new BadRequestException('school_id is required');
+    let domain: string | null;
+    try {
+      domain = normalizeEmailDomain(emailDomain);
+    } catch (e: unknown) {
+      throw new BadRequestException(e instanceof Error ? e.message : 'Invalid email domain');
+    }
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new BadRequestException('No students provided');
     }
@@ -335,12 +345,21 @@ export class AdminStudentsService {
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i] ?? {};
-      const email = String(r.email ?? '').trim().toLowerCase();
+      let email = String(r.email ?? '').trim().toLowerCase();
       const suppliedPassword = String(r.password ?? '').trim();
 
       if (!email) {
         results.push({ index: i, email: null, success: false, error: 'Email is required' });
         continue;
+      }
+
+      if (domain) {
+        const applied = applyEmailDomain(email, domain);
+        if ('error' in applied) {
+          results.push({ index: i, email, success: false, error: applied.error });
+          continue;
+        }
+        email = applied.email;
       }
 
       if (seenEmails.has(email)) {

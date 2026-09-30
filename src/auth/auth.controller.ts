@@ -232,6 +232,14 @@ export class AuthController {
     return { success: true, tokens: { accessToken: tokens.accessToken } };
   }
 
+  @Post('keep-password')
+  async keepPassword(
+    @CurrentUser() user: { id: number },
+  ): Promise<{ success: boolean }> {
+    await this.authService.keepCurrentPassword(user.id);
+    return { success: true };
+  }
+
   @Post('logout')
   async logout(
     @CurrentUser() user: { id: number },

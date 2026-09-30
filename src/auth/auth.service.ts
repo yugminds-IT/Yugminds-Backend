@@ -302,7 +302,8 @@ export class AuthService {
 
     // Maintenance mode (admin System Controls): block non-admin sign-ins.
     if (user.role !== 'admin' && !user.isSuperAdmin) {
-      const { active, message } = await this.systemControls.isMaintenanceActive();
+      const { active, message } =
+        await this.systemControls.isMaintenanceActive();
       if (active) {
         throw new UnauthorizedException(message);
       }
@@ -610,6 +611,28 @@ export class AuthService {
     const tokens = await this.generateTokens(updated);
     await this.storeRefreshToken(userId, tokens.refreshToken!);
     return tokens;
+  }
+
+  /**
+   * Lets a student dismiss the first-login "change your password" prompt and
+   * keep the password they were issued. `initialPassword` is kept so admins
+   * can still look it up if the student forgets it.
+   */
+  async keepCurrentPassword(userId: number): Promise<void> {
+    if (!userId) throw new UnauthorizedException('Authentication required');
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('User not found');
+    if (user.role !== 'student') {
+      throw new ForbiddenException(
+        'Only students can keep their temporary password',
+      );
+    }
+    if (!user.mustChangePassword) return;
+    await this.db.user.update({
+      where: { id: userId },
+      data: { mustChangePassword: false },
+    });
+    await this.authCache.invalidate(userId);
   }
 
   /**

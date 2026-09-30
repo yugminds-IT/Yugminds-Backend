@@ -76,12 +76,14 @@ export class AdminStudentsController {
       school_id?: string;
       students?: Array<Record<string, unknown>>;
       dry_run?: boolean;
+      email_domain?: string;
     },
   ) {
     return this.service.bulkImport(
       body.school_id,
       body.students ?? [],
       Boolean(body.dry_run),
+      body.email_domain,
     );
   }
 

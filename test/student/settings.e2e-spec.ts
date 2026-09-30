@@ -175,14 +175,20 @@ describe('Student profile / settings', () => {
       const firstChange = await request(app.getHttpServer())
         .post('/auth/update-password')
         .set(...authHeader(student.token))
-        .send({ current_password: student.password, new_password: 'QaFirstChange123!' })
+        .send({
+          current_password: student.password,
+          new_password: 'QaFirstChange123!',
+        })
         .expect(201);
       const tokenAfterFirstChange: string = firstChange.body.tokens.accessToken;
 
       await request(app.getHttpServer())
         .post('/auth/update-password')
         .set(...authHeader(tokenAfterFirstChange))
-        .send({ current_password: 'definitely-wrong', new_password: 'QaNewPass123!' })
+        .send({
+          current_password: 'definitely-wrong',
+          new_password: 'QaNewPass123!',
+        })
         .expect(401);
 
       // The password from the legitimate first change still works.
@@ -192,6 +198,31 @@ describe('Student profile / settings', () => {
         .expect(201);
     },
   );
+
+  it('POST /auth/keep-password lets a student keep the issued password; teachers cannot', async () => {
+    const student = fixture.students[0];
+    const before = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: student.email, password: student.password })
+      .expect(201);
+    expect(before.body.user.mustChangePassword).toBe(true);
+
+    await request(app.getHttpServer())
+      .post('/auth/keep-password')
+      .set(...authHeader(student.token))
+      .expect(201);
+
+    const after = await request(app.getHttpServer())
+      .post('/auth/login')
+      .send({ email: student.email, password: student.password })
+      .expect(201);
+    expect(after.body.user.mustChangePassword).toBe(false);
+
+    await request(app.getHttpServer())
+      .post('/auth/keep-password')
+      .set(...authHeader(fixture.teachers[0].token))
+      .expect(403);
+  });
 
   it('rejects unauthenticated requests', async () => {
     await request(app.getHttpServer()).get('/profile').expect(401);
