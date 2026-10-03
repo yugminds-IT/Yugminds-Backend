@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { overallScore } from './overall-score';
 
 @Injectable()
 export class RankingService {
@@ -153,7 +154,7 @@ export class RankingService {
    * Course scores are read from the already-computed StudentScore rows (set by
    * recomputeStudentScores) to avoid double-scanning submissions. Daily scores
    * are aggregated fresh from graded submissions for DAILY-type assignments.
-   * Formula: overall = courseScore * 0.6 + dailyScore * 0.4
+   * Formula: overallScore() — course 60% + daily 40%.
    */
   async recomputeStudentScoreSummary(schoolId: string): Promise<void> {
     const schoolStudents = await this.db.studentSchool.findMany({
@@ -270,13 +271,16 @@ export class RankingService {
       const d = dailyByStudent.get(sid);
       const courseScore = c && c.max > 0 ? (c.total / c.max) * 100 : 0;
       const dailyScore = d && d.max > 0 ? (d.total / d.max) * 100 : 0;
-      const overall = courseScore * 0.6 + dailyScore * 0.4;
+      const overall = overallScore(
+        c && c.max > 0 ? courseScore : null,
+        d && d.max > 0 ? dailyScore : null,
+      );
       return {
         studentId: sid,
         courseScore: Number(courseScore.toFixed(2)),
         dailyScore: Number(dailyScore.toFixed(2)),
-        overallScore: Number(overall.toFixed(2)),
-        badge: this.computeBadge(Number(overall.toFixed(2))),
+        overallScore: overall,
+        badge: this.computeBadge(overall),
       };
     });
 

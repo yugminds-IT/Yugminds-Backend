@@ -30,6 +30,7 @@ import {
   canRetakeAssignment,
   RetakeSettings,
 } from '../../common/assignment/retake-eligibility';
+import { overallScore as computeOverallScore } from '../../common/assignment/overall-score';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 import { StorageService } from '../../common/storage/storage.service';
@@ -979,8 +980,7 @@ export class StudentExtraController {
       >();
       for (const [assignmentId, subs] of submissionsByAssignment) {
         const rule = String(
-          (dailyAssignmentById.get(assignmentId) as any)?.retakeScoringRule ??
-            'latest',
+          dailyAssignmentById.get(assignmentId)?.retakeScoringRule ?? 'latest',
         ).toLowerCase();
         const graded = subs.filter(
           (s) => s.status === 'graded' && s.score != null,
@@ -1004,14 +1004,14 @@ export class StudentExtraController {
         assignments: dailyAssignments.map((a) => {
           const sub = latestSubByAssignment.get(a.id) ?? null;
           const attemptsCount = submissionsByAssignment.get(a.id)?.length ?? 0;
-          const due = (a as any).dueDate as Date | null;
+          const due = a.dueDate as Date | null;
           const maxMarks =
             (a.questions ?? []).reduce(
               (sum: number, q: any) =>
                 sum + (typeof q.marks === 'number' ? q.marks : 1),
               0,
             ) ||
-            (a as any).totalMarks ||
+            a.totalMarks ||
             0;
           return {
             id: a.id,
@@ -1019,7 +1019,7 @@ export class StudentExtraController {
             description: a.description,
             assignment_type: 'DAILY',
             subject: a.subject,
-            grade_name: (a as any).grade?.name ?? studentSchool?.grade ?? null,
+            grade_name: a.grade?.name ?? studentSchool?.grade ?? null,
             due_date: due ? due.toISOString() : null,
             max_marks: maxMarks,
             is_overdue: due ? due < now && !sub : false,
@@ -2501,8 +2501,9 @@ export class StudentExtraController {
       courseMax > 0 ? Number(((courseScore / courseMax) * 100).toFixed(2)) : 0;
     const dailyPercent =
       dailyMax > 0 ? Number(((dailyScore / dailyMax) * 100).toFixed(2)) : 0;
-    const overallScore = Number(
-      (coursePercent * 0.6 + dailyPercent * 0.4).toFixed(2),
+    const overallScore = computeOverallScore(
+      courseMax > 0 ? coursePercent : null,
+      dailyMax > 0 ? dailyPercent : null,
     );
 
     // ── 6. Score history (deduplicated best per assignment, configurable limit) ─

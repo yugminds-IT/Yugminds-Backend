@@ -134,7 +134,14 @@ describe('school-admin stats / assignment-analytics / leaderboard', () => {
     const row = board.body.assignment_table.find(
       (r: { assignment_id: string }) => r.assignment_id === assignmentId,
     );
-    expect(row).toMatchObject({ total_submissions: 2, avg_score: 50 });
+    // Not targeted at any grade, so the audience is all 3 fixture students.
+    expect(row).toMatchObject({
+      total_submissions: 2,
+      targeted_students: 3,
+      completion_rate: 66.67,
+      avg_score: 50,
+      avg_marks: 10,
+    });
 
     await request(app.getHttpServer())
       .get(

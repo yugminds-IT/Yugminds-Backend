@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import type Redis from 'ioredis';
 import { REDIS_CLIENT } from '../redis/redis.constants';
+import { overallScore } from './overall-score';
 
 /**
  * Canonical, system-wide student ranking.
@@ -17,7 +18,7 @@ import { REDIS_CLIENT } from '../redis/redis.constants';
  *    assignment's `retakeScoringRule` ("highest" vs "latest").
  *  - A student's score is GLOBAL — derived from ALL their graded submissions,
  *    not scoped to any one school. Ranks differ only by comparison group.
- *  - overall = course% * 0.6 + daily% * 0.4
+ *  - overall = course% * 0.6 + daily% * 0.4 (see overallScore())
  *  - Every active enrollment is included (a student with no graded work ranks
  *    last rather than disappearing).
  */
@@ -226,7 +227,10 @@ export class StudentRankingService {
       };
       const cp = sc.cMax > 0 ? (sc.cTotal / sc.cMax) * 100 : 0;
       const dp = sc.dMax > 0 ? (sc.dTotal / sc.dMax) * 100 : 0;
-      const overall = Number((cp * 0.6 + dp * 0.4).toFixed(2));
+      const overall = overallScore(
+        sc.cMax > 0 ? cp : null,
+        sc.dMax > 0 ? dp : null,
+      );
       return {
         studentId: e.studentId,
         schoolId: e.schoolId,

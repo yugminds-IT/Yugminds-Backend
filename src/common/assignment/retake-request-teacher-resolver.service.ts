@@ -41,10 +41,15 @@ export class RetakeRequestTeacherResolver {
     },
   ): Promise<RetakeRequestRoutingResult> {
     if (assignment.teacherId) {
-      return { schoolId: assignment.schoolId, teacherIds: [assignment.teacherId] };
+      return {
+        schoolId: assignment.schoolId,
+        teacherIds: [assignment.teacherId],
+      };
     }
 
-    const schoolId = assignment.schoolId ?? (await this.resolveSchoolForCourse(studentId, assignment));
+    const schoolId =
+      assignment.schoolId ??
+      (await this.resolveSchoolForCourse(studentId, assignment));
     if (!schoolId) return { schoolId: null, teacherIds: [] };
 
     const teacherIds = await tenantContext.run(schoolId, async () => {
@@ -118,7 +123,9 @@ export class RetakeRequestTeacherResolver {
         }),
       ]);
       const accessSchoolIds = new Set(accessRows.map((a) => a.schoolId));
-      const match = studentSchools.find((ss) => accessSchoolIds.has(ss.schoolId));
+      const match = studentSchools.find((ss) =>
+        accessSchoolIds.has(ss.schoolId),
+      );
       return match?.schoolId ?? null;
     });
   }

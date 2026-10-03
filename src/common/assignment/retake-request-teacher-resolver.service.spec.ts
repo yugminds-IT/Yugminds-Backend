@@ -28,7 +28,9 @@ describe('RetakeRequestTeacherResolver', () => {
         { provide: DatabaseService, useValue: db },
       ],
     }).compile();
-    resolver = module.get<RetakeRequestTeacherResolver>(RetakeRequestTeacherResolver);
+    resolver = module.get<RetakeRequestTeacherResolver>(
+      RetakeRequestTeacherResolver,
+    );
   });
 
   it('returns the assignment teacher directly when one is set, skipping section resolution', async () => {
@@ -41,7 +43,10 @@ describe('RetakeRequestTeacherResolver', () => {
   });
 
   it('resolves the section-mapped teacher(s) when the assignment already has a schoolId', async () => {
-    db.studentSchool.findFirst.mockResolvedValue({ grade: 'Grade 4', section: 'A' });
+    db.studentSchool.findFirst.mockResolvedValue({
+      grade: 'Grade 4',
+      section: 'A',
+    });
     db.section.findFirst.mockResolvedValue({ id: 'section-1' });
     db.teacherSectionAssignment.findMany.mockResolvedValue([
       { teacherId: 7 },
@@ -49,7 +54,10 @@ describe('RetakeRequestTeacherResolver', () => {
       { teacherId: 7 }, // duplicate, should be deduped
     ]);
 
-    const result = await resolver.resolve(1, { teacherId: null, schoolId: 'school-a' });
+    const result = await resolver.resolve(1, {
+      teacherId: null,
+      schoolId: 'school-a',
+    });
 
     expect(result).toEqual({ schoolId: 'school-a', teacherIds: [7, 8] });
     expect(db.section.findFirst).toHaveBeenCalledWith(
@@ -66,7 +74,10 @@ describe('RetakeRequestTeacherResolver', () => {
       { schoolId: 'school-a' },
     ]);
     db.studentSchool.findMany.mockResolvedValue([{ schoolId: 'school-a' }]);
-    db.studentSchool.findFirst.mockResolvedValue({ grade: 'Grade 4', section: 'A' });
+    db.studentSchool.findFirst.mockResolvedValue({
+      grade: 'Grade 4',
+      section: 'A',
+    });
     db.section.findFirst.mockResolvedValue({ id: 'section-1' });
     db.teacherSectionAssignment.findMany.mockResolvedValue([{ teacherId: 9 }]);
 
@@ -83,7 +94,7 @@ describe('RetakeRequestTeacherResolver', () => {
     expect(result).toEqual({ schoolId: 'school-a', teacherIds: [9] });
   });
 
-  it('returns no school/teachers when the course has no access matching any of the student\'s schools', async () => {
+  it("returns no school/teachers when the course has no access matching any of the student's schools", async () => {
     db.courseAccess.findMany.mockResolvedValue([{ schoolId: 'school-x' }]);
     db.studentSchool.findMany.mockResolvedValue([{ schoolId: 'school-a' }]);
 
@@ -97,11 +108,20 @@ describe('RetakeRequestTeacherResolver', () => {
   });
 
   it('falls back to any teacher at the school when no section mapping exists', async () => {
-    db.studentSchool.findFirst.mockResolvedValue({ grade: 'Grade 4', section: 'A' });
+    db.studentSchool.findFirst.mockResolvedValue({
+      grade: 'Grade 4',
+      section: 'A',
+    });
     db.section.findFirst.mockResolvedValue(null); // no matching Section row
-    db.teacherSchool.findMany.mockResolvedValue([{ teacherId: 11 }, { teacherId: 12 }]);
+    db.teacherSchool.findMany.mockResolvedValue([
+      { teacherId: 11 },
+      { teacherId: 12 },
+    ]);
 
-    const result = await resolver.resolve(1, { teacherId: null, schoolId: 'school-a' });
+    const result = await resolver.resolve(1, {
+      teacherId: null,
+      schoolId: 'school-a',
+    });
 
     expect(result).toEqual({ schoolId: 'school-a', teacherIds: [11, 12] });
   });
@@ -110,14 +130,20 @@ describe('RetakeRequestTeacherResolver', () => {
     db.studentSchool.findFirst.mockResolvedValue(null);
     db.teacherSchool.findMany.mockResolvedValue([{ teacherId: 99 }]);
 
-    const result = await resolver.resolve(1, { teacherId: null, schoolId: 'school-a' });
+    const result = await resolver.resolve(1, {
+      teacherId: null,
+      schoolId: 'school-a',
+    });
 
     expect(result).toEqual({ schoolId: 'school-a', teacherIds: [99] });
     expect(db.section.findFirst).not.toHaveBeenCalled();
   });
 
   it('returns nothing when the assignment has no teacher, no schoolId and no course/chapter to resolve from', async () => {
-    const result = await resolver.resolve(1, { teacherId: null, schoolId: null });
+    const result = await resolver.resolve(1, {
+      teacherId: null,
+      schoolId: null,
+    });
     expect(result).toEqual({ schoolId: null, teacherIds: [] });
   });
 });

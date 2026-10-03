@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
+import { overallScore } from '../../common/assignment/overall-score';
 
 @Injectable()
 export class SchoolAdminStatsService {
@@ -100,6 +101,11 @@ export class SchoolAdminStatsService {
       isPublished: true,
       gradeId: true,
       createdAt: true,
+      publishScope: true,
+      publishedGradeIds: true,
+      publishedSectionIds: true,
+      courseId: true,
+      chapter: { select: { courseId: true } },
     } as const;
     const [schoolAssignments, courseAccess] = await Promise.all([
       this.db.assignment.findMany({
@@ -134,6 +140,92 @@ export class SchoolAdminStatsService {
       if (!byId.has(a.id)) byId.set(a.id, a);
     }
     return [...byId.values()];
+  }
+
+  /**
+   * Returns a function giving how many of this school's students an
+   * assignment was published to: its sections, else its grades, else (course
+   * assignments) the grades the course is shared with, else the whole school.
+   */
+  private async audienceCounter(
+    schoolId: string,
+    assignments: Awaited<
+      ReturnType<SchoolAdminStatsService['schoolAssignments']>
+    >,
+    enrollments: Array<{ grade: string | null; section: string | null }>,
+  ) {
+    const gradeIds = new Set<string>();
+    const sectionIds = new Set<string>();
+    for (const a of assignments) {
+      a.publishedGradeIds.forEach((id) => gradeIds.add(id));
+      if (a.gradeId) gradeIds.add(a.gradeId);
+      a.publishedSectionIds.forEach((id) => sectionIds.add(id));
+    }
+    const [grades, sections, courseAccess] = await Promise.all([
+      this.db.grade.findMany({
+        where: { id: { in: [...gradeIds] } },
+        select: { id: true, name: true },
+      }),
+      this.db.section.findMany({
+        where: { id: { in: [...sectionIds] } },
+        select: { id: true, name: true, grade: { select: { name: true } } },
+      }),
+      this.db.courseAccess.findMany({
+        where: { schoolId },
+        select: {
+          courseId: true,
+          gradeAccess: { select: { gradeName: true } },
+        },
+      }),
+    ]);
+    const gradeName = new Map(grades.map((g) => [g.id, g.name]));
+    const sectionClass = new Map(
+      sections.map((s) => [s.id, `${s.grade.name}::${s.name}`]),
+    );
+    const courseGrades = new Map(
+      courseAccess.map((c) => [
+        c.courseId,
+        c.gradeAccess.map((g) => g.gradeName),
+      ]),
+    );
+    const byGrade = new Map<string, number>();
+    const byClass = new Map<string, number>();
+    for (const e of enrollments) {
+      const g = e.grade ?? '';
+      byGrade.set(g, (byGrade.get(g) ?? 0) + 1);
+      const c = `${g}::${e.section ?? ''}`;
+      byClass.set(c, (byClass.get(c) ?? 0) + 1);
+    }
+    const sumOf = (keys: Iterable<string>, counts: Map<string, number>) =>
+      [...new Set(keys)].reduce((n, k) => n + (counts.get(k) ?? 0), 0);
+
+    return (a: (typeof assignments)[number]): number => {
+      if (a.publishScope === 'section' && a.publishedSectionIds.length) {
+        return sumOf(
+          a.publishedSectionIds
+            .map((id) => sectionClass.get(id))
+            .filter((c): c is string => !!c),
+          byClass,
+        );
+      }
+      const ids = a.publishedGradeIds.length
+        ? a.publishedGradeIds
+        : a.gradeId
+          ? [a.gradeId]
+          : [];
+      if (ids.length) {
+        return sumOf(
+          ids.map((id) => gradeName.get(id)).filter((n): n is string => !!n),
+          byGrade,
+        );
+      }
+      const courseId = a.courseId ?? a.chapter?.courseId;
+      const shared = courseId ? courseGrades.get(courseId) : undefined;
+      if (a.assignmentType === 'COURSE' && shared?.length) {
+        return sumOf(shared, byGrade);
+      }
+      return enrollments.length;
+    };
   }
 
   /**
@@ -403,11 +495,9 @@ export class SchoolAdminStatsService {
           g.dailyMax > 0
             ? Number(((g.dailyTotal / g.dailyMax) * 100).toFixed(2))
             : 0,
-        avg_overall: Number(
-          (
-            (g.courseMax > 0 ? (g.courseTotal / g.courseMax) * 100 * 0.6 : 0) +
-            (g.dailyMax > 0 ? (g.dailyTotal / g.dailyMax) * 100 * 0.4 : 0)
-          ).toFixed(2),
+        avg_overall: overallScore(
+          g.courseMax > 0 ? (g.courseTotal / g.courseMax) * 100 : null,
+          g.dailyMax > 0 ? (g.dailyTotal / g.dailyMax) * 100 : null,
         ),
       }))
       .sort((a, b) => b.avg_overall - a.avg_overall);
@@ -459,11 +549,9 @@ export class SchoolAdminStatsService {
           g.dailyMax > 0
             ? Number(((g.dailyTotal / g.dailyMax) * 100).toFixed(2))
             : 0,
-        avg_overall: Number(
-          (
-            (g.courseMax > 0 ? (g.courseTotal / g.courseMax) * 100 * 0.6 : 0) +
-            (g.dailyMax > 0 ? (g.dailyTotal / g.dailyMax) * 100 * 0.4 : 0)
-          ).toFixed(2),
+        avg_overall: overallScore(
+          g.courseMax > 0 ? (g.courseTotal / g.courseMax) * 100 : null,
+          g.dailyMax > 0 ? (g.dailyTotal / g.dailyMax) * 100 : null,
         ),
       }))
       .sort((a, b) => b.avg_overall - a.avg_overall);
@@ -484,6 +572,12 @@ export class SchoolAdminStatsService {
         avg_score: s.max > 0 ? Number(((s.total / s.max) * 100).toFixed(2)) : 0,
       }))
       .sort((a, b) => b.avg_score - a.avg_score);
+
+    const targetedCount = await this.audienceCounter(
+      schoolId,
+      allAssignments,
+      enrollments,
+    );
 
     // Assignment table
     const assignment_table = allAssignments
@@ -512,7 +606,7 @@ export class SchoolAdminStatsService {
           : 0;
         const high = scores.length ? Math.max(...scores) : 0;
         const low = scores.length ? Math.min(...scores) : 0;
-        const targetedStudents = totalStudents;
+        const targetedStudents = targetedCount(a);
         return {
           assignment_id: a.id,
           title: a.title,
@@ -522,19 +616,33 @@ export class SchoolAdminStatsService {
           total_submissions: submittedCount,
           graded_count: subs.length,
           avg_score: avg,
+          avg_marks: scores.length
+            ? Number(
+                (scores.reduce((x, y) => x + y, 0) / scores.length).toFixed(2),
+              )
+            : null,
           highest_score: high,
           lowest_score: low,
+          targeted_students: targetedStudents,
+          // Capped: a student who submitted and later moved class still counts as submitted.
           completion_rate:
             targetedStudents > 0
-              ? Number(((submittedCount / targetedStudents) * 100).toFixed(2))
+              ? Math.min(
+                  100,
+                  Number(
+                    ((submittedCount / targetedStudents) * 100).toFixed(2),
+                  ),
+                )
               : 0,
         };
       });
 
-    const overallAvg = ranked.length
+    // Only students with graded work — the rest aren't scoring 0%, they have no score.
+    const scored = ranked.filter((r) => r.graded_assignments_count > 0);
+    const overallAvg = scored.length
       ? Number(
           (
-            ranked.reduce((s, r) => s + r.overall_score, 0) / ranked.length
+            scored.reduce((s, r) => s + r.overall_score, 0) / scored.length
           ).toFixed(2),
         )
       : 0;
