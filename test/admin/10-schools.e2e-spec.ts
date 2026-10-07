@@ -537,7 +537,7 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         const blocked = await request(app.getHttpServer())
           .post('/auth/login')
           .send({ email: teacher.email, password: teacher.password });
-        expect(blocked.status).toBe(401);
+        expect(blocked.status).toBe(403);
         expect(blocked.body?.message).toMatch(/deactivated/i);
 
         // The platform admin is exempt — deactivating a school must not lock

@@ -301,11 +301,13 @@ export class AuthService {
     }
 
     // Maintenance mode (admin System Controls): block non-admin sign-ins.
+    // 403, not 401: the login page masks every 401 as "Invalid email or
+    // password", which would hide the admin's maintenance message.
     if (user.role !== 'admin' && !user.isSuperAdmin) {
       const { active, message } =
         await this.systemControls.isMaintenanceActive();
       if (active) {
-        throw new UnauthorizedException(message);
+        throw new ForbiddenException(message);
       }
     }
 
@@ -319,7 +321,7 @@ export class AuthService {
         select: { isActive: true },
       });
       if (school && school.isActive === false) {
-        throw new UnauthorizedException(
+        throw new ForbiddenException(
           'This school has been deactivated. Please contact your administrator.',
         );
       }

@@ -87,6 +87,19 @@ export class AdminStudentsController {
     );
   }
 
+  @Post('delete-by-class')
+  deleteByClass(
+    @Body()
+    body: {
+      school_id?: string;
+      whole_school?: boolean;
+      classes?: Array<{ grade?: string | null; section?: string | null }>;
+      dry_run?: boolean;
+    },
+  ) {
+    return this.service.deleteByClass(body);
+  }
+
   @Post('sync-enrollments')
   syncEnrollments(@Query('school_id') schoolId?: string) {
     return this.service.syncEnrollments(schoolId);

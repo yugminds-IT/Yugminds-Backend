@@ -73,7 +73,7 @@ describe('Admin system-controls: maintenance mode (extreme care, always restored
       const blocked = await request(app.getHttpServer())
         .post('/auth/login')
         .send({ email: fixture.teachers[0].email, password: fixture.teachers[0].password });
-      expect(blocked.status).toBe(401);
+      expect(blocked.status).toBe(403);
       expect(blocked.body?.message).toMatch(/QA maintenance window/);
 
       // Admin is exempt from maintenance mode.

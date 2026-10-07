@@ -6,8 +6,14 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { validatePasswordStrength, deriveFriendlyPassword } from '../../common/utils/password.util';
-import { applyEmailDomain, normalizeEmailDomain } from '../../common/utils/email-domain.util';
+import {
+  validatePasswordStrength,
+  deriveFriendlyPassword,
+} from '../../common/utils/password.util';
+import {
+  applyEmailDomain,
+  normalizeEmailDomain,
+} from '../../common/utils/email-domain.util';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
@@ -70,7 +76,8 @@ export class AdminStudentsService {
       parent_phone: profile?.parentPhone ?? null,
       tenantId: u.tenantId ?? null,
       createdAt: u.createdAt,
-      initial_password: (u as { initialPassword?: string | null }).initialPassword ?? null,
+      initial_password:
+        (u as { initialPassword?: string | null }).initialPassword ?? null,
       student_schools: (u.studentSchools ?? []).map((ss) => ({
         school_id: ss.schoolId,
         school_name: ss.school?.name ?? null,
@@ -317,7 +324,9 @@ export class AdminStudentsService {
     try {
       domain = normalizeEmailDomain(emailDomain);
     } catch (e: unknown) {
-      throw new BadRequestException(e instanceof Error ? e.message : 'Invalid email domain');
+      throw new BadRequestException(
+        e instanceof Error ? e.message : 'Invalid email domain',
+      );
     }
     if (!Array.isArray(rows) || rows.length === 0) {
       throw new BadRequestException('No students provided');
@@ -327,7 +336,6 @@ export class AdminStudentsService {
         'Bulk import limit is 500 students per request',
       );
     }
-
 
     const results: Array<{
       index: number;
@@ -345,32 +353,54 @@ export class AdminStudentsService {
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i] ?? {};
-      let email = String(r.email ?? '').trim().toLowerCase();
+      let email = String(r.email ?? '')
+        .trim()
+        .toLowerCase();
       const suppliedPassword = String(r.password ?? '').trim();
 
       if (!email) {
-        results.push({ index: i, email: null, success: false, error: 'Email is required' });
+        results.push({
+          index: i,
+          email: null,
+          success: false,
+          error: 'Email is required',
+        });
         continue;
       }
 
       if (domain) {
         const applied = applyEmailDomain(email, domain);
         if ('error' in applied) {
-          results.push({ index: i, email, success: false, error: applied.error });
+          results.push({
+            index: i,
+            email,
+            success: false,
+            error: applied.error,
+          });
           continue;
         }
         email = applied.email;
       }
 
       if (seenEmails.has(email)) {
-        results.push({ index: i, email, success: false, error: 'Duplicate email within this import' });
+        results.push({
+          index: i,
+          email,
+          success: false,
+          error: 'Duplicate email within this import',
+        });
         continue;
       }
       seenEmails.add(email);
 
       const exists = await this.db.user.findUnique({ where: { email } });
       if (exists) {
-        results.push({ index: i, email, success: false, error: 'Email already exists' });
+        results.push({
+          index: i,
+          email,
+          success: false,
+          error: 'Email already exists',
+        });
         continue;
       }
 
@@ -380,7 +410,9 @@ export class AdminStudentsService {
           validatePasswordStrength(suppliedPassword);
           effectivePassword = suppliedPassword;
         } else {
-          effectivePassword = this.genPassword(r.full_name as string | undefined);
+          effectivePassword = this.genPassword(
+            r.full_name as string | undefined,
+          );
         }
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : 'Invalid password';
@@ -467,7 +499,9 @@ export class AdminStudentsService {
       total: results.length,
       success: results.filter((r) => r.success).length,
       failed: results.filter((r) => !r.success).length,
-      generated_passwords: results.filter((r) => r.success && r.generated_password).length,
+      generated_passwords: results.filter(
+        (r) => r.success && r.generated_password,
+      ).length,
       dry_run: dryRun,
     };
 
@@ -740,6 +774,102 @@ export class AdminStudentsService {
           'action must be one of: move, enroll, delete, reset_password',
         );
     }
+  }
+
+  /**
+   * Deletes a school's students by class. `whole_school` targets every
+   * student in the school; otherwise `classes` picks grade/section pairs
+   * (section null = students with no section). Students also enrolled in
+   * another school only lose this school's enrollment — their account stays.
+   * `dry_run` returns the school's class breakdown and the selection's
+   * impact without changing anything.
+   */
+  async deleteByClass(body: {
+    school_id?: string;
+    whole_school?: boolean;
+    classes?: Array<{ grade?: string | null; section?: string | null }>;
+    dry_run?: boolean;
+  }) {
+    if (!body.school_id) throw new BadRequestException('school_id is required');
+    const school = await this.db.school.findUnique({
+      where: { id: body.school_id },
+      select: { id: true, name: true },
+    });
+    if (!school) throw new NotFoundException('School not found');
+
+    const norm = (v?: string | null) => (v ?? '').trim();
+    const key = (g?: string | null, s?: string | null) =>
+      `${norm(g)}::${norm(s)}`;
+    const wanted = new Set(
+      (body.classes ?? []).map((c) => key(c.grade, c.section)),
+    );
+    if (!body.dry_run && !body.whole_school && wanted.size === 0) {
+      throw new BadRequestException(
+        'Select whole_school or at least one class',
+      );
+    }
+
+    const rows = await this.db.studentSchool.findMany({
+      where: { schoolId: school.id, student: { role: Role.student } },
+      select: {
+        studentId: true,
+        grade: true,
+        section: true,
+        student: { select: { _count: { select: { studentSchools: true } } } },
+      },
+    });
+
+    const breakdown = new Map<
+      string,
+      {
+        grade: string | null;
+        section: string | null;
+        count: number;
+        other_school_count: number;
+      }
+    >();
+    const toDelete: number[] = [];
+    const toUnenroll: number[] = [];
+    for (const r of rows) {
+      const k = key(r.grade, r.section);
+      const inOtherSchool = r.student._count.studentSchools > 1;
+      const entry = breakdown.get(k) ?? {
+        grade: norm(r.grade) || null,
+        section: norm(r.section) || null,
+        count: 0,
+        other_school_count: 0,
+      };
+      entry.count++;
+      if (inOtherSchool) entry.other_school_count++;
+      breakdown.set(k, entry);
+      if (body.whole_school || wanted.has(k)) {
+        (inOtherSchool ? toUnenroll : toDelete).push(r.studentId);
+      }
+    }
+
+    const summary = {
+      school: { id: school.id, name: school.name },
+      classes: [...breakdown.values()],
+      selected_students: toDelete.length + toUnenroll.length,
+      will_delete: toDelete.length,
+      will_unenroll: toUnenroll.length,
+    };
+    if (body.dry_run) return summary;
+
+    await this.authCache.invalidate(toDelete);
+    const [unenrolled, deleted] = await this.db.$transaction([
+      this.db.studentSchool.deleteMany({
+        where: { schoolId: school.id, studentId: { in: toUnenroll } },
+      }),
+      this.db.user.deleteMany({
+        where: { id: { in: toDelete }, role: Role.student },
+      }),
+    ]);
+    return {
+      success: true,
+      deleted: deleted.count,
+      unenrolled: unenrolled.count,
+    };
   }
 
   /**
