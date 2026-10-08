@@ -8,6 +8,7 @@ import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
+import { assertQuestionMarksFitTotal } from '../../common/assignment/question-marks';
 
 /** Per-school → per-grade → sections targeting the publish UI reads back. */
 type AccessTarget = {
@@ -81,6 +82,7 @@ type AssignmentDto = {
   chapter_id: string;
   title: string;
   description?: string | null;
+  max_score?: number;
   questions?: AssignmentQuestionDto[];
 };
 
@@ -114,6 +116,8 @@ type AssignmentPayload = {
   chapter_id: string;
   title?: string;
   description?: string;
+  max_score?: number;
+  total_marks?: number;
   questions?: QuestionPayload[];
 };
 type AccessPayload = {
@@ -178,7 +182,10 @@ export class AdminCoursesService {
           if (existing.length === 0 || sections.length === 0) {
             gradeMap.set(gradeName, []);
           } else {
-            gradeMap.set(gradeName, Array.from(new Set([...existing, ...sections])));
+            gradeMap.set(
+              gradeName,
+              Array.from(new Set([...existing, ...sections])),
+            );
           }
         } else {
           gradeMap.set(gradeName, sections);
@@ -206,13 +213,17 @@ export class AdminCoursesService {
     body: Record<string, unknown>,
   ): Map<string, Map<string, string[]>> | null {
     if (Array.isArray(body.access)) {
-      return AdminCoursesService.normalizeAccess(body.access as AccessPayload[]);
+      return AdminCoursesService.normalizeAccess(
+        body.access as AccessPayload[],
+      );
     }
     if (Array.isArray(body.school_ids)) {
       const schoolIds = (body.school_ids as string[])
         .map((s) => String(s ?? '').trim())
         .filter(Boolean);
-      const grades = (Array.isArray(body.grades) ? (body.grades as string[]) : [])
+      const grades = (
+        Array.isArray(body.grades) ? (body.grades as string[]) : []
+      )
         .map((g) => String(g ?? '').trim())
         .filter(Boolean);
       const map = new Map<string, Map<string, string[]>>();
@@ -442,6 +453,8 @@ export class AdminCoursesService {
         chapter_id: ch.id,
         title: a.title,
         description: a.description,
+        max_score:
+          a.totalMarks != null && a.totalMarks > 0 ? a.totalMarks : 100,
         questions: (a.questions || []).map((q) => ({
           id: q.id,
           assignment_id: a.id,
@@ -578,7 +591,11 @@ export class AdminCoursesService {
       await this.db.chapter.deleteMany({ where: { id: { in: toDelete } } });
     }
 
-    await this.upsertContentsForChapters(chapterIdMap, keptServerIds, chapterContentsPayload);
+    await this.upsertContentsForChapters(
+      chapterIdMap,
+      keptServerIds,
+      chapterContentsPayload,
+    );
     await this.upsertAssignmentsForChapters(
       chapterIdMap,
       keptServerIds,
@@ -684,6 +701,12 @@ export class AdminCoursesService {
           `Chapter ID "${ass.chapter_id}" not found`,
         );
 
+      const questions = Array.isArray(ass.questions) ? ass.questions : [];
+      const totalMarks = Number(ass.max_score ?? ass.total_marks);
+      const resolvedTotal =
+        Number.isFinite(totalMarks) && totalMarks > 0 ? totalMarks : null;
+      assertQuestionMarksFitTotal(resolvedTotal, questions);
+
       let assignmentId: string;
       if (isValidUuid(ass.id) && existingAssignmentIds.has(ass.id)) {
         await this.db.assignment.update({
@@ -692,6 +715,7 @@ export class AdminCoursesService {
             chapterId,
             title: (ass.title as string) || 'Assignment',
             description: ass.description ?? null,
+            totalMarks: resolvedTotal,
           },
         });
         assignmentId = ass.id;
@@ -701,12 +725,14 @@ export class AdminCoursesService {
           title: string;
           description: string | null;
           sortOrder: number;
+          totalMarks: number | null;
           id?: string;
         } = {
           chapterId,
           title: (ass.title as string) || 'Assignment',
           description: ass.description ?? null,
           sortOrder: 0,
+          totalMarks: resolvedTotal,
         };
         if (isValidUuid(ass.id)) data.id = ass.id;
         const created = await this.db.assignment.create({ data });
@@ -714,10 +740,7 @@ export class AdminCoursesService {
       }
       keptAssignmentIds.push(assignmentId);
 
-      await this.upsertQuestionsForAssignment(
-        assignmentId,
-        Array.isArray(ass.questions) ? ass.questions : [],
-      );
+      await this.upsertQuestionsForAssignment(assignmentId, questions);
     }
 
     const toDeleteAssignmentIds = [...existingAssignmentIds].filter(
@@ -818,7 +841,9 @@ export class AdminCoursesService {
       });
     } catch (err: unknown) {
       if ((err as { code?: string })?.code === 'P2002') {
-        throw new BadRequestException(`A course named "${name}" already exists`);
+        throw new BadRequestException(
+          `A course named "${name}" already exists`,
+        );
       }
       throw err;
     }
@@ -1004,7 +1029,10 @@ export class AdminCoursesService {
     // Notify admins + affected school admins.
     const schoolIds = Array.from(accessMap.keys());
     const [adminUsers, schoolAdmins] = await Promise.all([
-      this.db.user.findMany({ where: { role: Role.admin }, select: { id: true } }),
+      this.db.user.findMany({
+        where: { role: Role.admin },
+        select: { id: true },
+      }),
       schoolIds.length > 0
         ? this.db.schoolAdmin.findMany({
             where: { schoolId: { in: schoolIds } },
@@ -1067,7 +1095,10 @@ export class AdminCoursesService {
     let copyNum = 1;
     while (
       await this.db.course.findFirst({
-        where: { title: { equals: copyName, mode: 'insensitive' }, deletedAt: null },
+        where: {
+          title: { equals: copyName, mode: 'insensitive' },
+          deletedAt: null,
+        },
       })
     ) {
       copyNum++;
@@ -1096,6 +1127,7 @@ export class AdminCoursesService {
       chapter_id: chapterIdMapping.get(a.chapter_id) ?? a.chapter_id,
       title: a.title,
       description: a.description ?? undefined,
+      max_score: a.max_score,
       questions: (a.questions || []).map((q) => ({
         question_type: q.question_type,
         question_text: q.question_text,
@@ -1286,15 +1318,15 @@ export class AdminCoursesService {
       grades: snap.grades,
     });
     if (accessMap) {
-      const accessPayload: AccessPayload[] = Array.from(accessMap.entries()).map(
-        ([school_id, gradeMap]) => ({
-          school_id,
-          grades: Array.from(gradeMap.entries()).map(([grade, sections]) => ({
-            grade,
-            sections,
-          })),
-        }),
-      );
+      const accessPayload: AccessPayload[] = Array.from(
+        accessMap.entries(),
+      ).map(([school_id, gradeMap]) => ({
+        school_id,
+        grades: Array.from(gradeMap.entries()).map(([grade, sections]) => ({
+          grade,
+          sections,
+        })),
+      }));
       await this.setAccess(courseId, { access: accessPayload });
     } else {
       await this.setAccess(courseId, { access: [] });

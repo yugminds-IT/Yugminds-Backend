@@ -24,6 +24,7 @@ import { NotificationIdParamDto } from './dto/notification-id-param.dto';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { tenantContext } from '../../tenants/tenant-context';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import { assertQuestionMarksFitTotal } from '../../common/assignment/question-marks';
 
 // Section.name and StudentSchool.section aren't guaranteed to share a
 // format across the app's data (e.g. "Section A" vs bare "A") — strip an
@@ -206,7 +207,9 @@ export class TeacherExtraController {
     // Await INSIDE the context callback: Prisma promises are lazy, so a query
     // awaited outside `tenantContext.run` would execute in the caller's context
     // instead of the school we just switched to.
-    return schoolId ? tenantContext.run(schoolId, async () => await fn()) : fn();
+    return schoolId
+      ? tenantContext.run(schoolId, async () => await fn())
+      : fn();
   }
 
   // Schools: implemented in TeacherSchoolsController (GET /teacher/schools)
@@ -231,20 +234,30 @@ export class TeacherExtraController {
       const assigned = await this.db.teacherSchool.findFirst({
         where: { teacherId: user.id, schoolId },
       });
-      if (!assigned) throw new ForbiddenException('Not assigned to this school');
+      if (!assigned)
+        throw new ForbiddenException('Not assigned to this school');
     }
     // Defaults to 'received' — a bare "Notifications" fetch with no mode
     // used to default to 'all', which silently mixed sent notifications
     // into what the page's "View Sent" tab labeled as sent-only.
-    const m = (mode ?? 'received').trim().toLowerCase() as 'received' | 'sent' | 'all';
-    const s = (status ?? 'all').trim().toLowerCase() as 'all' | 'read' | 'unread';
-    const { items, total } = await this.notificationsService.listWithProfiles(user.id, {
-      mode: m,
-      limit: take,
-      offset: skip,
-      search,
-      status: s,
-    });
+    const m = (mode ?? 'received').trim().toLowerCase() as
+      | 'received'
+      | 'sent'
+      | 'all';
+    const s = (status ?? 'all').trim().toLowerCase() as
+      | 'all'
+      | 'read'
+      | 'unread';
+    const { items, total } = await this.notificationsService.listWithProfiles(
+      user.id,
+      {
+        mode: m,
+        limit: take,
+        offset: skip,
+        search,
+        status: s,
+      },
+    );
     return { notifications: items, total };
   }
 
@@ -264,7 +277,8 @@ export class TeacherExtraController {
   ) {
     const title = (body.title ?? '').trim();
     const message = (body.message ?? '').trim();
-    if (!title || !message) throw new BadRequestException('Title and message are required');
+    if (!title || !message)
+      throw new BadRequestException('Title and message are required');
     const schoolId = (body.school_id ?? '').trim();
     if (!schoolId) throw new BadRequestException('school_id is required');
     const assigned = await this.db.teacherSchool.findFirst({
@@ -274,14 +288,18 @@ export class TeacherExtraController {
 
     const recipientType = body.recipientType ?? 'role';
     const recipients = Array.isArray(body.recipients) ? body.recipients : [];
-    if (recipients.length === 0) throw new BadRequestException('At least one recipient is required');
+    if (recipients.length === 0)
+      throw new BadRequestException('At least one recipient is required');
 
     const targetUserIds = new Set<number>();
     if (recipientType === 'role') {
       const queries = recipients.map((r) => {
         if (r === 'role:student')
           return this.db.studentSchool
-            .findMany({ where: { schoolId, isActive: true }, select: { studentId: true } })
+            .findMany({
+              where: { schoolId, isActive: true },
+              select: { studentId: true },
+            })
             .then((rows) => rows.map((s) => s.studentId));
         if (r === 'role:teacher')
           return this.db.teacherSchool
@@ -289,7 +307,9 @@ export class TeacherExtraController {
             .then((rows) => rows.map((t) => t.teacherId));
         return Promise.resolve([] as number[]);
       });
-      (await Promise.all(queries)).flat().forEach((id) => targetUserIds.add(id));
+      (await Promise.all(queries))
+        .flat()
+        .forEach((id) => targetUserIds.add(id));
       targetUserIds.delete(user.id);
     } else {
       const ids = recipients
@@ -297,8 +317,14 @@ export class TeacherExtraController {
         .filter((n) => Number.isFinite(n) && n > 0);
       if (ids.length === 0) throw new BadRequestException('Invalid recipients');
       const [studentRows, teacherRows] = await Promise.all([
-        this.db.studentSchool.findMany({ where: { schoolId, studentId: { in: ids } }, select: { studentId: true } }),
-        this.db.teacherSchool.findMany({ where: { schoolId, teacherId: { in: ids } }, select: { teacherId: true } }),
+        this.db.studentSchool.findMany({
+          where: { schoolId, studentId: { in: ids } },
+          select: { studentId: true },
+        }),
+        this.db.teacherSchool.findMany({
+          where: { schoolId, teacherId: { in: ids } },
+          select: { teacherId: true },
+        }),
       ]);
       studentRows.forEach((s) => targetUserIds.add(s.studentId));
       teacherRows.forEach((t) => targetUserIds.add(t.teacherId));
@@ -333,36 +359,57 @@ export class TeacherExtraController {
     // requester) that always failed with "No valid recipients for this
     // school" once selected, and selecting only yourself in Individual mode
     // silently "succeeded" while sending to nobody.
-    const [teacherCount, studentCount, teacherUsers, studentUsers] = await Promise.all([
-      this.db.teacherSchool.count({
-        where: { schoolId, teacherId: { not: user.id } },
-      }),
-      this.db.studentSchool.count({ where: { schoolId } }),
-      this.db.teacherSchool.findMany({
-        where: { schoolId, teacherId: { not: user.id } },
-      }),
-      this.db.studentSchool.findMany({
-        where: { schoolId },
-        include: { student: { include: { profile: true } } },
-      }),
-    ]);
+    const [teacherCount, studentCount, teacherUsers, studentUsers] =
+      await Promise.all([
+        this.db.teacherSchool.count({
+          where: { schoolId, teacherId: { not: user.id } },
+        }),
+        this.db.studentSchool.count({ where: { schoolId } }),
+        this.db.teacherSchool.findMany({
+          where: { schoolId, teacherId: { not: user.id } },
+        }),
+        this.db.studentSchool.findMany({
+          where: { schoolId },
+          include: { student: { include: { profile: true } } },
+        }),
+      ]);
 
     const roles = [
-      teacherCount > 0 ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount } : null,
-      studentCount > 0 ? { id: 'role:student', name: 'All Students', count: studentCount } : null,
-    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
+      teacherCount > 0
+        ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount }
+        : null,
+      studentCount > 0
+        ? { id: 'role:student', name: 'All Students', count: studentCount }
+        : null,
+    ].filter(
+      (r): r is { id: string; name: string; count: number } => r !== null,
+    );
 
-    const teacherIds = Array.from(new Set(teacherUsers.map((t) => t.teacherId)));
-    const teachers = teacherIds.length > 0
-      ? await this.db.user.findMany({ where: { id: { in: teacherIds } }, include: { profile: true } })
-      : [];
+    const teacherIds = Array.from(
+      new Set(teacherUsers.map((t) => t.teacherId)),
+    );
+    const teachers =
+      teacherIds.length > 0
+        ? await this.db.user.findMany({
+            where: { id: { in: teacherIds } },
+            include: { profile: true },
+          })
+        : [];
     const teacherById = new Map(teachers.map((t) => [t.id, t]));
 
     const users = [
       ...teacherUsers
         .map((ts) => {
           const t = teacherById.get(ts.teacherId);
-          return t ? { id: String(t.id), name: t.profile?.fullName ?? t.email, email: t.email, role: 'teacher', isActive: true } : null;
+          return t
+            ? {
+                id: String(t.id),
+                name: t.profile?.fullName ?? t.email,
+                email: t.email,
+                role: 'teacher',
+                isActive: true,
+              }
+            : null;
         })
         .filter((u): u is NonNullable<typeof u> => u !== null),
       ...studentUsers.map((ss) => ({
@@ -382,7 +429,11 @@ export class TeacherExtraController {
     @Param() params: NotificationIdParamDto,
   ) {
     const n = await this.db.notification.findFirst({
-      where: { id: params.id, deletedAt: null, OR: [{ userId: user.id }, { senderId: user.id }] },
+      where: {
+        id: params.id,
+        deletedAt: null,
+        OR: [{ userId: user.id }, { senderId: user.id }],
+      },
     });
     if (!n) throw new BadRequestException('Notification not found');
     return {
@@ -1174,13 +1225,10 @@ export class TeacherExtraController {
             // Mon-first weekday order (matches teacher UI day filter).
             const monFirst = [1, 2, 3, 4, 5, 6, 0];
             const dayNum = (name?: string) =>
-              name
-                ? (TeacherExtraController.DAY_OF_WEEK_MAP[name] ?? 99)
-                : 99;
+              name ? (TeacherExtraController.DAY_OF_WEEK_MAP[name] ?? 99) : 99;
             const dayA = monFirst.indexOf(dayNum(a.day_of_week));
             const dayB = monFirst.indexOf(dayNum(b.day_of_week));
-            const dayDiff =
-              (dayA < 0 ? 99 : dayA) - (dayB < 0 ? 99 : dayB);
+            const dayDiff = (dayA < 0 ? 99 : dayA) - (dayB < 0 ? 99 : dayB);
             if (dayDiff !== 0) return dayDiff;
             const tA =
               a.start_time ??
@@ -1406,6 +1454,14 @@ export class TeacherExtraController {
       ? (body.publishedSectionIds as unknown[]).map(String)
       : [];
 
+    const incomingQuestions = Array.isArray(body.questions)
+      ? (body.questions as Array<Record<string, unknown>>)
+      : [];
+    assertQuestionMarksFitTotal(
+      body.totalMarks != null ? Number(body.totalMarks) : null,
+      incomingQuestions,
+    );
+
     const assignment = await this.db.assignment.create({
       data: {
         chapterId: chapterId ?? null,
@@ -1442,9 +1498,7 @@ export class TeacherExtraController {
       await this.notifyTargetedStudents(assignment.id, schoolId, assignment);
     }
 
-    const questions = Array.isArray(body.questions)
-      ? (body.questions as Array<Record<string, unknown>>)
-      : [];
+    const questions = incomingQuestions;
     if (questions.length) {
       await Promise.all(
         questions.map((q, index) =>
@@ -1550,6 +1604,7 @@ export class TeacherExtraController {
         publishScope: true,
         publishedGradeIds: true,
         publishedSectionIds: true,
+        totalMarks: true,
       },
     });
     if (
@@ -1557,6 +1612,19 @@ export class TeacherExtraController {
       !(await this.canTeacherAccessAssignment(user.id, current))
     ) {
       throw new NotFoundException('Assignment not found');
+    }
+
+    if (Array.isArray(body.questions) || body.totalMarks != null) {
+      const questionRows = Array.isArray(body.questions)
+        ? (body.questions as Array<Record<string, unknown>>)
+        : await this.db.assignmentQuestion.findMany({
+            where: { assignmentId },
+            select: { marks: true },
+          });
+      assertQuestionMarksFitTotal(
+        body.totalMarks != null ? Number(body.totalMarks) : current.totalMarks,
+        questionRows,
+      );
     }
 
     const wasPublished = current.isPublished;
@@ -1887,8 +1955,7 @@ export class TeacherExtraController {
       data: {
         retakeEnabled: true,
         retakeWindowOpen: true,
-        retakeAccessScope:
-          body.sectionId || body.gradeId ? 'selected' : 'all',
+        retakeAccessScope: body.sectionId || body.gradeId ? 'selected' : 'all',
       },
     });
 
@@ -2055,7 +2122,13 @@ export class TeacherExtraController {
             chapter: { select: { course: { select: { title: true } } } },
           },
         },
-        student: { select: { id: true, email: true, profile: { select: { fullName: true } } } },
+        student: {
+          select: {
+            id: true,
+            email: true,
+            profile: { select: { fullName: true } },
+          },
+        },
       },
     });
 
@@ -2070,7 +2143,12 @@ export class TeacherExtraController {
                 schoolId: r.schoolId as string,
               })),
           },
-          select: { studentId: true, schoolId: true, grade: true, section: true },
+          select: {
+            studentId: true,
+            schoolId: true,
+            grade: true,
+            section: true,
+          },
         })
       ).map((ss) => [`${ss.studentId}:${ss.schoolId}`, ss]),
     );
@@ -2085,7 +2163,9 @@ export class TeacherExtraController {
           assignment_id: r.assignmentId,
           assignment_title: r.assignment.title,
           course_title:
-            r.assignment.course?.title ?? r.assignment.chapter?.course?.title ?? null,
+            r.assignment.course?.title ??
+            r.assignment.chapter?.course?.title ??
+            null,
           student_id: r.studentId,
           student_name: r.student.profile?.fullName ?? r.student.email,
           grade: enrollment?.grade ?? null,
