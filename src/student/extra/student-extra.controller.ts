@@ -1044,7 +1044,7 @@ export class StudentExtraController {
             is_overdue: due ? due < now && !sub : false,
             days_until_due: due
               ? StudentExtraController.daysUntil(due, now)
-              : 0,
+              : null,
             status: sub?.status ?? 'not_started',
             ...this.retakeListFields(a, attemptsCount, grantedIds.has(a.id)),
             submission: sub
@@ -1098,10 +1098,15 @@ export class StudentExtraController {
     const assignments = await this.db.assignment.findMany({
       where: { chapterId: { in: chapterIds } },
       include: {
-        chapter: { select: { courseId: true, title: true } },
+        chapter: { select: { courseId: true, title: true, sortOrder: true } },
         questions: true,
       },
-      orderBy: { sortOrder: 'asc' },
+      // sortOrder is per-chapter, so course + chapter order must come first.
+      orderBy: [
+        { chapter: { course: { title: 'asc' } } },
+        { chapter: { sortOrder: 'asc' } },
+        { sortOrder: 'asc' },
+      ],
     });
     const submissionRows = await this.db.assignmentSubmission.findMany({
       where: {
@@ -1182,6 +1187,8 @@ export class StudentExtraController {
         return {
           id: a.id,
           chapter_id: a.chapterId,
+          chapter_title: a.chapter?.title ?? null,
+          chapter_order: a.chapter?.sortOrder ?? null,
           course_id: a.chapter?.courseId ?? '',
           is_locked: chapterState ? !chapterState.isUnlocked : false,
           unlocks_in_days: chapterState?.unlocksInDays ?? null,
@@ -1230,9 +1237,10 @@ export class StudentExtraController {
                 'not_started'
             );
           })(),
+          // null = no deadline; 0 would read as "due today" to every client.
           days_until_due: (() => {
             const due = (a as { dueDate?: Date | null }).dueDate;
-            if (!due) return 0;
+            if (!due) return null;
             return StudentExtraController.daysUntil(due, new Date());
           })(),
           submission: (() => {
