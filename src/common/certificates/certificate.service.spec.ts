@@ -15,6 +15,7 @@ describe('CertificateService', () => {
   let db: {
     studentCertificate: {
       findUnique: jest.Mock;
+      findUniqueOrThrow: jest.Mock;
       findMany: jest.Mock;
       create: jest.Mock;
       update: jest.Mock;
@@ -27,29 +28,54 @@ describe('CertificateService', () => {
     profile: { findUnique: jest.Mock };
     systemSetting: { findUnique: jest.Mock };
   };
-  let storage: { objectExists: jest.Mock; buildKey: jest.Mock; uploadBuffer: jest.Mock };
+  let storage: {
+    objectExists: jest.Mock;
+    buildKey: jest.Mock;
+    uploadBuffer: jest.Mock;
+    deleteObject: jest.Mock;
+  };
   let notifications: { sendOne: jest.Mock };
 
   beforeEach(async () => {
     db = {
       studentCertificate: {
         findUnique: jest.fn().mockResolvedValue(null),
+        findUniqueOrThrow: jest.fn().mockResolvedValue({
+          id: 'abcd1234-0000-0000-0000-000000000000',
+          studentId: 1,
+          issuedAt: new Date('2026-10-09'),
+          certificateKey: null,
+          course: { title: 'Course' },
+          student: {
+            email: 's@example.com',
+            profile: { fullName: 'Student Name' },
+          },
+        }),
         findMany: jest.fn().mockResolvedValue([]),
-        create: jest.fn().mockResolvedValue({ id: 'abcd1234-0000-0000-0000-000000000000' }),
+        create: jest
+          .fn()
+          .mockResolvedValue({ id: 'abcd1234-0000-0000-0000-000000000000' }),
         update: jest.fn().mockResolvedValue({}),
       },
-      studentCourse: { findUnique: jest.fn().mockResolvedValue({ studentId: 1 }) },
+      studentCourse: {
+        findUnique: jest.fn().mockResolvedValue({ studentId: 1 }),
+      },
       chapter: { findMany: jest.fn().mockResolvedValue([]) },
       chapterContent: { findMany: jest.fn().mockResolvedValue([]) },
       courseProgress: { findMany: jest.fn().mockResolvedValue([]) },
       course: { findUnique: jest.fn().mockResolvedValue({ title: 'Course' }) },
-      profile: { findUnique: jest.fn().mockResolvedValue({ fullName: 'Student Name' }) },
+      profile: {
+        findUnique: jest.fn().mockResolvedValue({ fullName: 'Student Name' }),
+      },
       systemSetting: { findUnique: jest.fn().mockResolvedValue(null) },
     };
     storage = {
       objectExists: jest.fn().mockResolvedValue(true),
       buildKey: jest.fn().mockReturnValue('certificates/1/key.jpg'),
-      uploadBuffer: jest.fn().mockResolvedValue('https://cdn.example.com/certificates/1/key.jpg'),
+      uploadBuffer: jest
+        .fn()
+        .mockResolvedValue('https://cdn.example.com/certificates/1/key.jpg'),
+      deleteObject: jest.fn().mockResolvedValue(undefined),
     };
     notifications = { sendOne: jest.fn().mockResolvedValue(undefined) };
 
@@ -75,7 +101,9 @@ describe('CertificateService', () => {
 
     it('returns not_eligible when progress is below 80%', async () => {
       db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
-      db.chapterContent.findMany.mockResolvedValue([{ id: 'c1', chapterId: 'ch1' }]);
+      db.chapterContent.findMany.mockResolvedValue([
+        { id: 'c1', chapterId: 'ch1' },
+      ]);
       db.courseProgress.findMany.mockResolvedValue([]);
       const result = await service.issueIfEligible(1, 'course-1');
       expect(result).toEqual({ issued: false, reason: 'not_eligible' });
@@ -83,7 +111,10 @@ describe('CertificateService', () => {
     });
 
     it('is idempotent — returns the existing certificate without re-issuing', async () => {
-      db.studentCertificate.findUnique.mockResolvedValue({ id: 'existing-id' });
+      db.studentCertificate.findUnique.mockResolvedValue({
+        id: 'existing-id',
+        certificateUrl: 'https://cdn.example.com/existing.jpg',
+      });
       const result = await service.issueIfEligible(1, 'course-1');
       expect(result).toEqual({
         issued: true,
@@ -94,11 +125,34 @@ describe('CertificateService', () => {
       expect(storage.uploadBuffer).not.toHaveBeenCalled();
     });
 
+    it('finishes rendering a certificate left stuck on "pending" by a failed attempt', async () => {
+      db.studentCertificate.findUnique.mockResolvedValue({
+        id: 'existing-id',
+        certificateUrl: 'pending',
+      });
+      const result = await service.issueIfEligible(1, 'course-1');
+      expect(result).toEqual({
+        issued: true,
+        certificateId: 'existing-id',
+        alreadyExisted: true,
+      });
+      expect(db.studentCertificate.create).not.toHaveBeenCalled();
+      expect(storage.uploadBuffer).toHaveBeenCalled();
+    });
+
     it('issues a certificate and notifies the student when eligible', async () => {
       db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
-      db.chapterContent.findMany.mockResolvedValue([{ id: 'c1', chapterId: 'ch1' }]);
+      db.chapterContent.findMany.mockResolvedValue([
+        { id: 'c1', chapterId: 'ch1' },
+      ]);
       db.courseProgress.findMany.mockResolvedValue([
-        { contentId: 'c1', chapterId: 'ch1', progress: 100, completedAt: new Date(), updatedAt: new Date() },
+        {
+          contentId: 'c1',
+          chapterId: 'ch1',
+          progress: 100,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        },
       ]);
 
       const result = await service.issueIfEligible(1, 'course-1', 2);
@@ -106,7 +160,12 @@ describe('CertificateService', () => {
       expect(result.issued).toBe(true);
       expect(db.studentCertificate.create).toHaveBeenCalledWith(
         expect.objectContaining({
-          data: expect.objectContaining({ studentId: 1, courseId: 'course-1', issuedBy: 2, status: 'active' }),
+          data: expect.objectContaining({
+            studentId: 1,
+            courseId: 'course-1',
+            issuedBy: 2,
+            status: 'active',
+          }),
         }),
       );
       expect(storage.uploadBuffer).toHaveBeenCalled();
@@ -126,9 +185,17 @@ describe('CertificateService', () => {
 
     it('does not let a notification failure roll back an already-issued certificate', async () => {
       db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
-      db.chapterContent.findMany.mockResolvedValue([{ id: 'c1', chapterId: 'ch1' }]);
+      db.chapterContent.findMany.mockResolvedValue([
+        { id: 'c1', chapterId: 'ch1' },
+      ]);
       db.courseProgress.findMany.mockResolvedValue([
-        { contentId: 'c1', chapterId: 'ch1', progress: 100, completedAt: new Date(), updatedAt: new Date() },
+        {
+          contentId: 'c1',
+          chapterId: 'ch1',
+          progress: 100,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        },
       ]);
       notifications.sendOne.mockRejectedValue(new Error('notif down'));
 
@@ -140,7 +207,11 @@ describe('CertificateService', () => {
   describe('verifyObjectsExist', () => {
     it('marks certificates as broken when the object no longer exists in storage', async () => {
       db.studentCertificate.findMany.mockResolvedValue([
-        { id: 'c1', certificateKey: 'certificates/1/c1.jpg', certificateUrl: 'https://x/c1.jpg' },
+        {
+          id: 'c1',
+          certificateKey: 'certificates/1/c1.jpg',
+          certificateUrl: 'https://x/c1.jpg',
+        },
       ]);
       storage.objectExists.mockResolvedValue(false);
 

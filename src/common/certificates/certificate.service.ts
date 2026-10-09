@@ -74,9 +74,13 @@ export class CertificateService {
   ): Promise<CertificateIssueResult> {
     const existing = await this.db.studentCertificate.findUnique({
       where: { studentId_courseId: { studentId, courseId } },
-      select: { id: true },
+      select: { id: true, certificateUrl: true },
     });
     if (existing) {
+      // A previous attempt created the row but failed to draw/upload the image —
+      // finish it now instead of leaving the student stuck on "pending" forever.
+      if (existing.certificateUrl.startsWith('pending'))
+        await this.render(existing.id);
       return { issued: true, certificateId: existing.id, alreadyExisted: true };
     }
 
@@ -86,43 +90,30 @@ export class CertificateService {
     });
     if (!enrolled) return { issued: false, reason: 'not_enrolled' };
 
-    const progressPercent = await this.computeProgressPercent(studentId, courseId);
+    const progressPercent = await this.computeProgressPercent(
+      studentId,
+      courseId,
+    );
     if (progressPercent < 80) return { issued: false, reason: 'not_eligible' };
 
-    const [course, profile, templateSetting] = await Promise.all([
-      this.db.course.findUnique({ where: { id: courseId }, select: { title: true } }),
-      this.db.profile.findUnique({ where: { userId: studentId }, select: { fullName: true } }),
-      this.db.systemSetting.findUnique({ where: { key: 'certificate:template' } }),
-    ]);
-
-    const studentName = profile?.fullName || 'Student';
+    const course = await this.db.course.findUnique({
+      where: { id: courseId },
+      select: { title: true },
+    });
     const courseTitle = course?.title ?? 'Course';
-    const issuedAtStr = new Date().toISOString().split('T')[0];
-    const certificateName = `${courseTitle} Certificate`;
 
     const created = await this.db.studentCertificate.create({
       data: {
         studentId,
         courseId,
-        certificateName,
+        certificateName: `${courseTitle} Certificate`,
         certificateUrl: 'pending',
         issuedBy: actorId ?? null,
         status: 'active',
       },
     });
 
-    const svg = buildCertificateSvg(
-      { studentName, courseTitle, issuedAt: issuedAtStr, certificateId: created.id },
-      templateSetting?.value ?? null,
-    );
-    const jpegBuffer = await svgToJpegBuffer(svg);
-    const certKey = this.storage.buildKey(`certificates/${studentId}`, `${created.id}.jpg`);
-    const certUrl = await this.storage.uploadBuffer(certKey, jpegBuffer, 'image/jpeg');
-
-    await this.db.studentCertificate.update({
-      where: { id: created.id },
-      data: { certificateUrl: certUrl, certificateKey: certKey },
-    });
+    await this.render(created.id);
 
     await this.notifications
       .sendOne(actorId ?? studentId, studentId, {
@@ -135,6 +126,81 @@ export class CertificateService {
       });
 
     return { issued: true, certificateId: created.id, alreadyExisted: false };
+  }
+
+  /**
+   * Draws the certificate image from current data (student name, course
+   * title, template) and uploads it, replacing any previous image.
+   */
+  async render(certificateId: string): Promise<{ certificateUrl: string }> {
+    const cert = await this.db.studentCertificate.findUniqueOrThrow({
+      where: { id: certificateId },
+      include: {
+        course: { select: { title: true } },
+        student: {
+          select: { email: true, profile: { select: { fullName: true } } },
+        },
+      },
+    });
+    const templateSetting = await this.db.systemSetting.findUnique({
+      where: { key: 'certificate:template' },
+    });
+
+    const svg = buildCertificateSvg(
+      {
+        studentName:
+          cert.student?.profile?.fullName || cert.student?.email || 'Student',
+        courseTitle: cert.course?.title ?? 'Course',
+        issuedAt: cert.issuedAt.toISOString().split('T')[0],
+        certificateId: cert.id,
+      },
+      templateSetting?.value ?? null,
+    );
+    const jpegBuffer = await svgToJpegBuffer(svg);
+    const certKey = this.storage.buildKey(
+      `certificates/${cert.studentId}`,
+      `${cert.id}-${Date.now()}.jpg`,
+    );
+    const certificateUrl = await this.storage.uploadBuffer(
+      certKey,
+      jpegBuffer,
+      'image/jpeg',
+    );
+
+    await this.db.studentCertificate.update({
+      where: { id: cert.id },
+      data: { certificateUrl, certificateKey: certKey, status: 'active' },
+    });
+    if (cert.certificateKey && cert.certificateKey !== certKey) {
+      await this.storage.deleteObject(cert.certificateKey).catch(() => {});
+    }
+    return { certificateUrl };
+  }
+
+  /** Redraws every non-revoked certificate (e.g. after a template or font fix). */
+  async renderAll(): Promise<{
+    total: number;
+    regenerated: number;
+    failed: number;
+  }> {
+    const certs = await this.db.studentCertificate.findMany({
+      where: { status: { not: 'revoked' } },
+      select: { id: true },
+    });
+    let regenerated = 0;
+    for (const c of certs) {
+      try {
+        await this.render(c.id);
+        regenerated++;
+      } catch {
+        // keep going; failures are reported in the count
+      }
+    }
+    return {
+      total: certs.length,
+      regenerated,
+      failed: certs.length - regenerated,
+    };
   }
 
   /**
@@ -156,7 +222,10 @@ export class CertificateService {
         const exists = c.certificateKey
           ? await this.storage.objectExists(c.certificateKey)
           : !c.certificateUrl.startsWith('pending');
-        return { id: c.id, status: (exists ? 'active' : 'broken') as 'active' | 'broken' };
+        return {
+          id: c.id,
+          status: (exists ? 'active' : 'broken') as 'active' | 'broken',
+        };
       }),
     );
 

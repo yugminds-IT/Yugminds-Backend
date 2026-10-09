@@ -16,6 +16,9 @@ RUN npm run build
 FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Certificates are rendered SVG -> JPEG by sharp, which draws text with system
+# fonts. Alpine ships none, so without these every letter becomes a box.
+RUN apk add --no-cache fontconfig ttf-dejavu font-liberation && fc-cache -f
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist

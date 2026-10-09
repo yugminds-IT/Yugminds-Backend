@@ -1972,6 +1972,11 @@ export class AdminExtraController {
     return res.send(body);
   }
 
+  @Post('certificates/regenerate-all')
+  async regenerateAllCertificates() {
+    return { success: true, ...(await this.certificateService.renderAll()) };
+  }
+
   @Post('certificates/:id/regenerate')
   async regenerateCertificate(
     @Param('id') id: string,
@@ -1979,51 +1984,15 @@ export class AdminExtraController {
   ) {
     const cert = await this.db.studentCertificate.findUnique({
       where: { id },
-      include: {
-        course: true,
-        student: { include: { profile: true } },
-      },
+      include: { course: { select: { title: true } } },
     });
     if (!cert) throw new BadRequestException('Certificate not found');
 
-    const templateSetting = await this.db.systemSetting.findUnique({
-      where: { key: 'certificate:template' },
-    });
-
-    const issuedAt = cert.issuedAt.toISOString().split('T')[0];
-    const svg = StudentExtraController.buildCertificateSvg(
-      {
-        studentName:
-          cert.student?.profile?.fullName || cert.student?.email || 'Student',
-        courseTitle: cert.course?.title ?? '',
-        issuedAt,
-        certificateId: cert.id,
-      },
-      templateSetting?.value ?? null,
-    );
-    const jpegBuffer = await StudentExtraController.svgToJpegBuffer(svg);
-    const oldCertKey = cert.certificateKey;
-    const certKey = this.storage.buildKey(
-      `certificates/${cert.studentId}`,
-      `${cert.id}-regen-${Date.now()}.jpg`,
-    );
-    const certUrl = await this.storage.uploadBuffer(
-      certKey,
-      jpegBuffer,
-      'image/jpeg',
-    );
+    await this.certificateService.render(id);
     const updated = await this.db.studentCertificate.update({
       where: { id },
-      data: {
-        certificateUrl: certUrl,
-        certificateKey: certKey,
-        issuedBy: admin.id,
-        status: 'active',
-      },
+      data: { issuedBy: admin.id },
     });
-    if (oldCertKey) {
-      await this.storage.deleteObject(oldCertKey).catch(() => {});
-    }
     await this.notificationsService
       .sendOne(admin.id, cert.studentId, {
         title: `Certificate updated: ${cert.course?.title ?? 'your course'}`,

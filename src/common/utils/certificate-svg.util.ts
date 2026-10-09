@@ -43,6 +43,10 @@ export function buildCertificateSvg(
   const issued = escapeXml(params.issuedAt);
   const shortId = escapeXml(shortCertId(params.certificateId));
 
+  // Text is rasterised by sharp/librsvg using the server's installed fonts
+  // (see Dockerfile) — keep generic sans-serif/serif fallbacks in every
+  // font-family or a missing font renders every glyph as an empty box.
+
   // If a custom template is provided, replace placeholders and return it
   if (templateSvg) {
     return templateSvg
@@ -63,23 +67,23 @@ export function buildCertificateSvg(
   <rect x="0" y="0" width="1200" height="850" fill="#f8fafc"/>
   <rect x="40" y="40" width="1120" height="770" rx="28" fill="white" stroke="#e2e8f0" stroke-width="4"/>
   <rect x="40" y="40" width="1120" height="140" rx="28" fill="url(#g)"/>
-  <text x="600" y="125" font-family="Inter, Arial" font-size="44" font-weight="700" text-anchor="middle" fill="white">Certificate of Achievement</text>
+  <text x="600" y="125" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="44" font-weight="700" text-anchor="middle" fill="white">Certificate of Achievement</text>
 
-  <text x="600" y="260" font-family="Inter, Arial" font-size="22" text-anchor="middle" fill="#334155">This certifies that</text>
-  <text x="600" y="340" font-family="Georgia, 'Times New Roman'" font-size="56" font-weight="700" text-anchor="middle" fill="#0f172a">${student}</text>
-  <text x="600" y="410" font-family="Inter, Arial" font-size="20" text-anchor="middle" fill="#475569">has successfully completed</text>
-  <text x="600" y="470" font-family="Inter, Arial" font-size="34" font-weight="700" text-anchor="middle" fill="#111827">${course}</text>
+  <text x="600" y="260" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="22" text-anchor="middle" fill="#334155">This certifies that</text>
+  <text x="600" y="340" font-family="Georgia, 'Times New Roman', 'Liberation Serif', 'DejaVu Serif', serif" font-size="56" font-weight="700" text-anchor="middle" fill="#0f172a">${student}</text>
+  <text x="600" y="410" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="20" text-anchor="middle" fill="#475569">has successfully completed</text>
+  <text x="600" y="470" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="34" font-weight="700" text-anchor="middle" fill="#111827">${course}</text>
 
   <g>
     <circle cx="150" cy="670" r="54" fill="#fef3c7" stroke="#f59e0b" stroke-width="6"/>
     <path d="M150 630 L162 656 L190 659 L168 677 L175 705 L150 690 L125 705 L132 677 L110 659 L138 656 Z" fill="#f59e0b"/>
   </g>
 
-  <text x="600" y="615" font-family="Inter, Arial" font-size="18" text-anchor="middle" fill="#475569">Issued: ${issued}</text>
-  <text x="600" y="648" font-family="Inter, Arial" font-size="15" font-weight="600" text-anchor="middle" fill="#1e40af">Certificate ID: ${shortId}</text>
-  <text x="600" y="675" font-family="Inter, Arial" font-size="12" text-anchor="middle" fill="#64748b">Verify at: robocoders.yugminds.org/lms/verify/${shortId}</text>
+  <text x="600" y="615" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="18" text-anchor="middle" fill="#475569">Issued: ${issued}</text>
+  <text x="600" y="648" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="15" font-weight="600" text-anchor="middle" fill="#1e40af">Certificate ID: ${shortId}</text>
+  <text x="600" y="675" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="12" text-anchor="middle" fill="#64748b">Verify at: robocoders.yugminds.org/lms/verify/${shortId}</text>
 
   <line x1="820" y1="710" x2="1080" y2="710" stroke="#cbd5e1" stroke-width="2"/>
-  <text x="950" y="740" font-family="Inter, Arial" font-size="16" text-anchor="middle" fill="#334155">Yugminds</text>
+  <text x="950" y="740" font-family="Inter, Arial, 'Liberation Sans', 'DejaVu Sans', sans-serif" font-size="16" text-anchor="middle" fill="#334155">Yugminds</text>
 </svg>`;
 }
