@@ -747,7 +747,7 @@ export class TeacherExtraController {
     // school-admin/admin student-progress endpoints).
     const activeCourseIds = (
       await this.db.course.findMany({
-        where: { deletedAt: null },
+        where: { deletedAt: null, isPublished: true },
         select: { id: true },
       })
     ).map((c) => c.id);
@@ -1278,7 +1278,10 @@ export class TeacherExtraController {
     if (typeFilter === 'COURSE') {
       // Course assignments: find those linked to courses accessible by teacher's schools
       const courseAccess = await this.db.courseAccess.findMany({
-        where: { schoolId: { in: allowedSchoolIds } },
+        where: {
+          schoolId: { in: allowedSchoolIds },
+          course: { isPublished: true, deletedAt: null },
+        },
         select: { courseId: true },
       });
       const accessibleCourseIds = [
@@ -1415,7 +1418,7 @@ export class TeacherExtraController {
       : null;
     if (assignmentType === 'COURSE') {
       const schoolCourses = await this.db.courseAccess.findMany({
-        where: { schoolId },
+        where: { schoolId, course: { isPublished: true, deletedAt: null } },
         select: { courseId: true },
         orderBy: { createdAt: 'asc' },
       });
@@ -2709,7 +2712,10 @@ export class TeacherExtraController {
     // Also include published assignments explicitly created by this teacher or
     // scoped to teacher's schools (covers assignments with zero submissions yet).
     const courseAccess = await this.db.courseAccess.findMany({
-      where: { schoolId: { in: schoolIds } },
+      where: {
+        schoolId: { in: schoolIds },
+        course: { isPublished: true, deletedAt: null },
+      },
       select: { courseId: true },
     });
     const visibleCourseIds = [...new Set(courseAccess.map((c) => c.courseId))];

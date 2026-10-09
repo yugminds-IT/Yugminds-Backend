@@ -37,6 +37,10 @@ import { StorageService } from '../../common/storage/storage.service';
 import { RetakeRequestTeacherResolver } from '../../common/assignment/retake-request-teacher-resolver.service';
 import * as certificateSvgUtil from '../../common/utils/certificate-svg.util';
 import { CertificateService } from '../../common/certificates/certificate.service';
+import { EnrollmentService } from '../../common/enrollment/enrollment.service';
+
+// Enrollment rows outlive unpublish/trash; students only reach live courses.
+const LIVE_COURSE = { isPublished: true, deletedAt: null };
 
 @Controller('student')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -51,7 +55,27 @@ export class StudentExtraController {
     private readonly storage: StorageService,
     private readonly retakeTeacherResolver: RetakeRequestTeacherResolver,
     private readonly certificateService: CertificateService,
+    private readonly enrollmentService: EnrollmentService,
   ) {}
+
+  /** The student's enrollment, or null if absent or the course is unpublished/trashed. */
+  private async findLiveEnrollment(studentId: number, courseId: string) {
+    const [enrolled, live] = await Promise.all([
+      this.db.studentCourse.findUnique({
+        where: { studentId_courseId: { studentId, courseId } },
+      }),
+      this.db.course.count({ where: { id: courseId, ...LIVE_COURSE } }),
+    ]);
+    return live > 0 ? enrolled : null;
+  }
+
+  private async liveCourseIds(): Promise<string[]> {
+    const rows = await this.db.course.findMany({
+      where: LIVE_COURSE,
+      select: { id: true },
+    });
+    return rows.map((r) => r.id);
+  }
 
   // ─── Notifications ────────────────────────────────────────────────────────
 
@@ -335,8 +359,9 @@ export class StudentExtraController {
 
   @Get('courses')
   async listCourses(@CurrentUser() user: { id: number }) {
+    await this.enrollmentService.syncStudentEnrollments(user.id);
     const enrollments = await this.db.studentCourse.findMany({
-      where: { studentId: user.id },
+      where: { studentId: user.id, courseId: { in: await this.liveCourseIds() } },
     });
     if (enrollments.length === 0) {
       return { courses: [] };
@@ -345,7 +370,11 @@ export class StudentExtraController {
     const [courseList, chapters, contents, progress, studentSchool] =
       await Promise.all([
         this.db.course.findMany({
-          where: { id: { in: courseIds }, deletedAt: null },
+          where: {
+            id: { in: courseIds },
+            deletedAt: null,
+            isPublished: true,
+          },
         }),
         this.db.chapter.findMany({
           where: { courseId: { in: courseIds } },
@@ -577,9 +606,7 @@ export class StudentExtraController {
     >
   > {
     const [enrolled, course, chapters] = await Promise.all([
-      this.db.studentCourse.findUnique({
-        where: { studentId_courseId: { studentId, courseId } },
-      }),
+      this.findLiveEnrollment(studentId, courseId),
       this.db.course.findUnique({
         where: { id: courseId },
         select: { chapterUnlockIntervalDays: true },
@@ -697,11 +724,7 @@ export class StudentExtraController {
     @CurrentUser() user: { id: number },
     @Param('courseId') courseId: string,
   ) {
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: {
-        studentId_courseId: { studentId: user.id, courseId },
-      },
-    });
+    const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
@@ -825,11 +848,7 @@ export class StudentExtraController {
     @Param('courseId') courseId: string,
     @Param('chapterId') chapterId: string,
   ) {
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: {
-        studentId_courseId: { studentId: user.id, courseId },
-      },
-    });
+    const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
@@ -1047,18 +1066,17 @@ export class StudentExtraController {
     }
 
     const enrolled = courseId
-      ? await this.db.studentCourse.findUnique({
-          where: {
-            studentId_courseId: { studentId: user.id, courseId },
-          },
-        })
+      ? await this.findLiveEnrollment(user.id, courseId)
       : null;
     const courseIds =
       courseId && enrolled
         ? [courseId]
         : (
             await this.db.studentCourse.findMany({
-              where: { studentId: user.id },
+              where: {
+                studentId: user.id,
+                courseId: { in: await this.liveCourseIds() },
+              },
               select: { courseId: true },
             })
           ).map((e) => e.courseId);
@@ -1273,7 +1291,10 @@ export class StudentExtraController {
     const enrolledCourses = await this.db.studentCourse.findMany({
       where: {
         studentId: user.id,
-        ...(query.course_id ? { courseId: query.course_id } : {}),
+        AND: [
+          { courseId: { in: await this.liveCourseIds() } },
+          ...(query.course_id ? [{ courseId: query.course_id }] : []),
+        ],
       },
       select: { courseId: true },
     });
@@ -1388,9 +1409,7 @@ export class StudentExtraController {
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
       if (!courseId) throw new NotFoundException('Assignment not found');
-      const enrolled = await this.db.studentCourse.findUnique({
-        where: { studentId_courseId: { studentId: user.id, courseId } },
-      });
+      const enrolled = await this.findLiveEnrollment(user.id, courseId);
       if (!enrolled) throw new NotFoundException('Not enrolled in this course');
     }
     const attempts = await this.db.assignmentSubmission.findMany({
@@ -1723,9 +1742,7 @@ export class StudentExtraController {
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
       if (!courseId) throw new NotFoundException('Assignment not found');
-      const enrolled = await this.db.studentCourse.findUnique({
-        where: { studentId_courseId: { studentId: user.id, courseId } },
-      });
+      const enrolled = await this.findLiveEnrollment(user.id, courseId);
       if (!enrolled) throw new NotFoundException('Not enrolled in this course');
 
       // The chapter this assignment belongs to must itself be unlocked —
@@ -2073,11 +2090,7 @@ export class StudentExtraController {
     const contentId = dto.contentId;
     const value = dto.isCompleted ? 100 : 0;
 
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: {
-        studentId_courseId: { studentId: user.id, courseId },
-      },
-    });
+    const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
@@ -2143,11 +2156,7 @@ export class StudentExtraController {
     if (!courseId) {
       throw new BadRequestException('courseId required');
     }
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: {
-        studentId_courseId: { studentId: user.id, courseId },
-      },
-    });
+    const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
@@ -2200,9 +2209,7 @@ export class StudentExtraController {
     const contentId = (body.contentId ?? '').trim() || null;
     if (!courseId) throw new BadRequestException('courseId required');
 
-    const enrolled = await this.db.studentCourse.findUnique({
-      where: { studentId_courseId: { studentId: user.id, courseId } },
-    });
+    const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) return { success: false };
 
     const existing = await this.db.courseProgress.findFirst({
@@ -2251,11 +2258,7 @@ export class StudentExtraController {
 
     // Walk newest→oldest until we find one whose course is still enrolled.
     for (const row of rows) {
-      const enrolled = await this.db.studentCourse.findUnique({
-        where: {
-          studentId_courseId: { studentId: user.id, courseId: row.courseId },
-        },
-      });
+      const enrolled = await this.findLiveEnrollment(user.id, row.courseId);
       if (!enrolled) continue;
 
       const course = await this.db.course.findFirst({

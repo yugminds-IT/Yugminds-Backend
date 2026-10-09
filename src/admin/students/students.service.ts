@@ -598,6 +598,13 @@ export class AdminStudentsService {
         },
       });
 
+      // A student belongs to one school; a stale active row from a previous
+      // school makes enrollment pick the wrong class.
+      await this.db.studentSchool.updateMany({
+        where: { studentId, schoolId: { not: schoolId }, isActive: true },
+        data: { isActive: false },
+      });
+
       // keep tenantId in sync if not explicitly overridden
       if (body.tenantId === undefined) {
         await this.db.user.update({
@@ -605,6 +612,8 @@ export class AdminStudentsService {
           data: { tenantId: schoolId },
         });
       }
+
+      await this.enrollmentService.syncStudentEnrollments(studentId);
     }
 
     const user = await this.db.user.findFirst({
@@ -709,6 +718,9 @@ export class AdminStudentsService {
             ...(body.section !== undefined ? { section: body.section } : {}),
           },
         });
+        for (const id of ids) {
+          await this.enrollmentService.syncStudentEnrollments(id);
+        }
         return { success: true, updated: result.count };
       }
       case 'enroll': {

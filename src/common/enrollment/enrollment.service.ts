@@ -1,5 +1,26 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
+
+/**
+ * Collapse "Grade 4" / "4" and "Section A" / "Sec A" / "A" to the same token.
+ * CourseAccess stores school structure names (often "Section A") while
+ * StudentSchool.section is frequently the bare letter.
+ */
+function classLabel(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const compact = value.toLowerCase().replace(/[\s._-]+/g, '');
+  const stripped = compact.replace(
+    /^(?:grade|class|standard|std|section|sec)+/,
+    '',
+  );
+  return stripped || null;
+}
+
+/** Trusted identifier → same class-label token used by shouldEnroll. */
+function sqlClassLabel(column: string): Prisma.Sql {
+  return Prisma.sql`regexp_replace(lower(regexp_replace(COALESCE(${Prisma.raw(column)}, ''), '[\\s._-]+', '', 'g')), '^(grade|class|standard|std|section|sec)+', '')`;
+}
 
 /**
  * A course's grant for one school: which grades, and (optionally) which
@@ -17,8 +38,7 @@ export class EnrollmentService {
   constructor(private readonly db: DatabaseService) {}
 
   private normalize(value: string | null): string | null {
-    if (!value) return null;
-    return value.toLowerCase().replace(/\s+/g, '');
+    return classLabel(value);
   }
 
   /**
@@ -64,6 +84,122 @@ export class EnrollmentService {
       gradeName: g.gradeName,
       sectionNames: (g.sectionAccess ?? []).map((s) => s.sectionName),
     }));
+  }
+
+  /**
+   * Bring a student's enrollments in line with their current school/grade/
+   * section: add newly-reachable courses, drop ones their class no longer gets.
+   */
+  async syncStudentEnrollments(studentId: number): Promise<void> {
+    const enrollment = await this.db.studentSchool.findFirst({
+      where: { studentId, isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { schoolId: true, grade: true, section: true },
+    });
+    if (!enrollment) return;
+    await this.enrollStudentInRelevantCourses(
+      studentId,
+      enrollment.schoolId,
+      enrollment.grade,
+      enrollment.section,
+    );
+    await this.pruneStudentEnrollments(
+      studentId,
+      enrollment.schoolId,
+      enrollment.grade,
+      enrollment.section,
+    );
+  }
+
+  /**
+   * Remove in-progress enrollments in published courses the student's class no
+   * longer reaches. Completed enrollments are kept (certificates depend on
+   * them) and unpublished courses are left alone so re-publishing restores
+   * access. CourseProgress is untouched, so re-targeting brings progress back.
+   */
+  async pruneStudentEnrollments(
+    studentId: number,
+    schoolId: string,
+    grade: string | null,
+    section: string | null,
+  ): Promise<void> {
+    const publishedIds = (
+      await this.db.course.findMany({
+        where: { isPublished: true },
+        select: { id: true },
+      })
+    ).map((c) => c.id);
+    const enrollments = await this.db.studentCourse.findMany({
+      where: { studentId, completedAt: null, courseId: { in: publishedIds } },
+      select: { id: true, courseId: true },
+    });
+    if (enrollments.length === 0) return;
+
+    const accessRecords = await this.db.courseAccess.findMany({
+      where: {
+        schoolId,
+        courseId: { in: enrollments.map((e) => e.courseId) },
+      },
+      include: { gradeAccess: { include: { sectionAccess: true } } },
+    });
+    const reachable = new Set(
+      accessRecords
+        .filter((a) =>
+          this.shouldEnroll(this.toGrants(a.gradeAccess), grade, section),
+        )
+        .map((a) => a.courseId),
+    );
+
+    const staleIds = enrollments
+      .filter((e) => !reachable.has(e.courseId))
+      .map((e) => e.id);
+    if (staleIds.length === 0) return;
+    await this.db.studentCourse.deleteMany({
+      where: { studentId, id: { in: staleIds } },
+    });
+  }
+
+  /**
+   * After a course's targeting changes, drop in-progress enrollments of
+   * students it no longer reaches. Returns the affected student ids so callers
+   * can push them a realtime refresh.
+   */
+  async pruneCourseEnrollments(courseId: string): Promise<number[]> {
+    const enrollments = await this.db.studentCourse.findMany({
+      where: { courseId, completedAt: null },
+      select: { id: true, studentId: true },
+    });
+    if (enrollments.length === 0) return [];
+
+    const [accessRecords, schools] = await Promise.all([
+      this.db.courseAccess.findMany({
+        where: { courseId },
+        include: { gradeAccess: { include: { sectionAccess: true } } },
+      }),
+      this.db.studentSchool.findMany({
+        where: {
+          studentId: { in: enrollments.map((e) => e.studentId) },
+          isActive: true,
+        },
+        select: { studentId: true, schoolId: true, grade: true, section: true },
+      }),
+    ]);
+    const grantsBySchool = new Map(
+      accessRecords.map((a) => [a.schoolId, this.toGrants(a.gradeAccess)]),
+    );
+    const schoolByStudent = new Map(schools.map((s) => [s.studentId, s]));
+
+    const stale = enrollments.filter((e) => {
+      const ss = schoolByStudent.get(e.studentId);
+      if (!ss) return false; // inactive students: leave their history alone
+      const grants = grantsBySchool.get(ss.schoolId);
+      return !grants || !this.shouldEnroll(grants, ss.grade, ss.section);
+    });
+    if (stale.length === 0) return [];
+    await this.db.studentCourse.deleteMany({
+      where: { id: { in: stale.map((e) => e.id) } },
+    });
+    return stale.map((e) => e.studentId);
   }
 
   /**
@@ -189,7 +325,7 @@ export class EnrollmentService {
           HAVING
             COUNT(cag.id) = 0
             OR BOOL_OR(
-              lower(replace(cag."gradeName", ' ', '')) = lower(replace(ss.grade, ' ', ''))
+              ${sqlClassLabel('cag."gradeName"')} = ${sqlClassLabel('ss.grade')}
               AND (
                 NOT EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas WHERE cas."courseAccessGradeId" = cag.id
@@ -197,7 +333,7 @@ export class EnrollmentService {
                 OR EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas
                   WHERE cas."courseAccessGradeId" = cag.id
-                    AND lower(replace(cas."sectionName", ' ', '')) = lower(replace(ss.section, ' ', ''))
+                    AND ${sqlClassLabel('cas."sectionName"')} = ${sqlClassLabel('ss.section')}
                 )
               )
             )
@@ -216,7 +352,7 @@ export class EnrollmentService {
           HAVING
             COUNT(cag.id) = 0
             OR BOOL_OR(
-              lower(replace(cag."gradeName", ' ', '')) = lower(replace(ss.grade, ' ', ''))
+              ${sqlClassLabel('cag."gradeName"')} = ${sqlClassLabel('ss.grade')}
               AND (
                 NOT EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas WHERE cas."courseAccessGradeId" = cag.id
@@ -224,7 +360,7 @@ export class EnrollmentService {
                 OR EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas
                   WHERE cas."courseAccessGradeId" = cag.id
-                    AND lower(replace(cas."sectionName", ' ', '')) = lower(replace(ss.section, ' ', ''))
+                    AND ${sqlClassLabel('cas."sectionName"')} = ${sqlClassLabel('ss.section')}
                 )
               )
             )

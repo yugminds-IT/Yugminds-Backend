@@ -358,8 +358,15 @@ export class RealtimeGateway
     }
 
     // Student
+    const liveCourses = await this.db.course.findMany({
+      where: { isPublished: true, deletedAt: null },
+      select: { id: true },
+    });
     const enrollments = await this.db.studentCourse.findMany({
-      where: { studentId: userId },
+      where: {
+        studentId: userId,
+        courseId: { in: liveCourses.map((c) => c.id) },
+      },
       select: { courseId: true },
     });
     if (enrollments.length === 0) {

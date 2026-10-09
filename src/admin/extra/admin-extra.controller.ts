@@ -348,7 +348,7 @@ export class AdminExtraController {
     // below, exactly as if it still existed.
     const activeCourseIds = (
       await this.db.course.findMany({
-        where: { deletedAt: null },
+        where: { deletedAt: null, isPublished: true },
         select: { id: true },
       })
     ).map((c) => c.id);

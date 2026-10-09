@@ -238,6 +238,49 @@ export class AdminCoursesService {
   }
 
   /** Writes CourseAccess → CourseAccessGrade → CourseAccessSection rows. Assumes prior rows already cleared. */
+  /** Push dashboard:stats so students, teachers, and school admins refetch immediately. */
+  private async notifyCourseAudience(
+    courseId: string,
+    extraUserIds: number[] = [],
+  ): Promise<void> {
+    const access = await this.db.courseAccess.findMany({
+      where: { courseId },
+      select: { schoolId: true },
+    });
+    const schoolIds = Array.from(new Set(access.map((a) => a.schoolId)));
+
+    const [adminUsers, schoolAdmins, teachers, enrollments] = await Promise.all([
+      this.db.user.findMany({
+        where: { role: Role.admin },
+        select: { id: true },
+      }),
+      schoolIds.length > 0
+        ? this.db.schoolAdmin.findMany({
+            where: { schoolId: { in: schoolIds } },
+            select: { userId: true },
+          })
+        : Promise.resolve([] as Array<{ userId: number }>),
+      schoolIds.length > 0
+        ? this.db.teacherSchool.findMany({
+            where: { schoolId: { in: schoolIds } },
+            select: { teacherId: true },
+          })
+        : Promise.resolve([] as Array<{ teacherId: number }>),
+      this.db.studentCourse.findMany({
+        where: { courseId },
+        select: { studentId: true },
+      }),
+    ]);
+
+    await this.realtimeGateway.emitDashboardStatsForUsers([
+      ...adminUsers.map((u) => u.id),
+      ...schoolAdmins.map((s) => s.userId),
+      ...teachers.map((t) => t.teacherId),
+      ...enrollments.map((e) => e.studentId),
+      ...extraUserIds,
+    ]);
+  }
+
   private async writeCourseAccess(
     courseId: string,
     accessMap: Map<string, Map<string, string[]>>,
@@ -881,22 +924,7 @@ export class AdminCoursesService {
       await this.enrollmentService.enrollRelevantStudentsInCourse(created.id);
     }
 
-    // Notify dashboards
-    const adminUsers = await this.db.user.findMany({
-      where: { role: Role.admin },
-      select: { id: true },
-    });
-    const schoolAdmins =
-      uniqueSchoolIds.length > 0
-        ? await this.db.schoolAdmin.findMany({
-            where: { schoolId: { in: uniqueSchoolIds } },
-            select: { userId: true },
-          })
-        : [];
-    await this.realtimeGateway.emitDashboardStatsForUsers([
-      ...adminUsers.map((u) => u.id),
-      ...schoolAdmins.map((s) => s.userId),
-    ]);
+    await this.notifyCourseAudience(created.id);
 
     return this.get(created.id);
   }
@@ -956,29 +984,7 @@ export class AdminCoursesService {
       );
     }
 
-    // Realtime notifications
-    const adminUsers = await this.db.user.findMany({
-      where: { role: Role.admin },
-      select: { id: true },
-    });
-    const existingAccess = await this.db.courseAccess.findMany({
-      where: { courseId: id },
-      select: { schoolId: true },
-    });
-    const schoolScope = Array.from(
-      new Set(existingAccess.map((a) => a.schoolId)),
-    );
-    const schoolAdmins =
-      schoolScope.length > 0
-        ? await this.db.schoolAdmin.findMany({
-            where: { schoolId: { in: schoolScope } },
-            select: { userId: true },
-          })
-        : [];
-    await this.realtimeGateway.emitDashboardStatsForUsers([
-      ...adminUsers.map((u) => u.id),
-      ...schoolAdmins.map((s) => s.userId),
-    ]);
+    await this.notifyCourseAudience(id);
 
     if (!options?.skipVersionSnapshot) {
       try {
@@ -998,6 +1004,7 @@ export class AdminCoursesService {
       where: { id },
       data: { deletedAt: new Date(), isPublished: false },
     });
+    await this.notifyCourseAudience(id);
     return { success: true };
   }
 
@@ -1018,31 +1025,45 @@ export class AdminCoursesService {
       Array.isArray(body.access) ? body.access : [],
     );
 
+    // Schools losing access still need a refresh push (their teachers/admins).
+    const previousAccess = await this.db.courseAccess.findMany({
+      where: { courseId },
+      select: { schoolId: true },
+    });
+
     // Replace wholesale — cascade clears grade + section rows too.
     await this.db.courseAccess.deleteMany({ where: { courseId } });
     await this.writeCourseAccess(courseId, accessMap);
 
+    const removedStudentIds =
+      await this.enrollmentService.pruneCourseEnrollments(courseId);
     if (course.isPublished) {
       await this.enrollmentService.enrollRelevantStudentsInCourse(courseId);
     }
 
-    // Notify admins + affected school admins.
-    const schoolIds = Array.from(accessMap.keys());
-    const [adminUsers, schoolAdmins] = await Promise.all([
-      this.db.user.findMany({
-        where: { role: Role.admin },
-        select: { id: true },
-      }),
-      schoolIds.length > 0
-        ? this.db.schoolAdmin.findMany({
-            where: { schoolId: { in: schoolIds } },
-            select: { userId: true },
-          })
-        : Promise.resolve([] as Array<{ userId: number }>),
-    ]);
-    await this.realtimeGateway.emitDashboardStatsForUsers([
-      ...adminUsers.map((u) => u.id),
-      ...schoolAdmins.map((s) => s.userId),
+    const droppedSchoolIds = previousAccess
+      .map((a) => a.schoolId)
+      .filter((id) => !accessMap.has(id));
+    const droppedSchoolUsers =
+      droppedSchoolIds.length > 0
+        ? await Promise.all([
+            this.db.schoolAdmin.findMany({
+              where: { schoolId: { in: droppedSchoolIds } },
+              select: { userId: true },
+            }),
+            this.db.teacherSchool.findMany({
+              where: { schoolId: { in: droppedSchoolIds } },
+              select: { teacherId: true },
+            }),
+          ]).then(([admins, teachers]) => [
+            ...admins.map((a) => a.userId),
+            ...teachers.map((t) => t.teacherId),
+          ])
+        : [];
+
+    await this.notifyCourseAudience(courseId, [
+      ...removedStudentIds,
+      ...droppedSchoolUsers,
     ]);
 
     return this.get(courseId);
@@ -1077,6 +1098,8 @@ export class AdminCoursesService {
     if (publishFlag) {
       await this.enrollmentService.enrollRelevantStudentsInCourse(courseId);
     }
+
+    await this.notifyCourseAudience(courseId);
 
     return {
       id: course.id,

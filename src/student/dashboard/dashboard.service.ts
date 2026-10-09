@@ -2,12 +2,14 @@ import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 
 @Injectable()
 export class StudentDashboardService {
   constructor(
     private readonly db: DatabaseService,
     private readonly dailyAssignments: StudentDailyAssignmentsService,
+    private readonly enrollmentService: EnrollmentService,
   ) {}
 
   /**
@@ -33,8 +35,16 @@ export class StudentDashboardService {
   }
 
   async get(user: { id: number }) {
+    await this.enrollmentService.syncStudentEnrollments(user.id);
+    const liveCourses = await this.db.course.findMany({
+      where: { isPublished: true, deletedAt: null },
+      select: { id: true },
+    });
     const enrollments = await this.db.studentCourse.findMany({
-      where: { studentId: user.id },
+      where: {
+        studentId: user.id,
+        courseId: { in: liveCourses.map((c) => c.id) },
+      },
       select: { courseId: true },
     });
 

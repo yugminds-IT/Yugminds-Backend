@@ -1281,12 +1281,7 @@ export class SchoolAdminExtraController {
     const sectionChanged =
       body.section !== undefined && body.section !== enrollment.section;
     if (gradeChanged || sectionChanged) {
-      await this.enrollmentService.enrollStudentInRelevantCourses(
-        studentId,
-        schoolId,
-        updated.ss.grade,
-        updated.ss.section,
-      );
+      await this.enrollmentService.syncStudentEnrollments(studentId);
     }
 
     const prof = updated.p;
@@ -1481,7 +1476,7 @@ export class SchoolAdminExtraController {
     // blank-titled row in the Courses tab (matches /admin/student-progress).
     const activeCourseIds = (
       await this.db.course.findMany({
-        where: { deletedAt: null },
+        where: { deletedAt: null, isPublished: true },
         select: { id: true },
       })
     ).map((c) => c.id);

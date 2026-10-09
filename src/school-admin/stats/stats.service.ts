@@ -113,7 +113,7 @@ export class SchoolAdminStatsService {
         select,
       }),
       this.db.courseAccess.findMany({
-        where: { schoolId },
+        where: { schoolId, course: { isPublished: true, deletedAt: null } },
         select: { courseId: true },
       }),
     ]);
@@ -171,7 +171,7 @@ export class SchoolAdminStatsService {
         select: { id: true, name: true, grade: { select: { name: true } } },
       }),
       this.db.courseAccess.findMany({
-        where: { schoolId },
+        where: { schoolId, course: { isPublished: true, deletedAt: null } },
         select: {
           courseId: true,
           gradeAccess: { select: { gradeName: true } },

@@ -16,6 +16,9 @@ describe('AdminCoursesService', () => {
     };
     user: { findMany: jest.Mock };
     schoolAdmin: { findMany: jest.Mock };
+    teacherSchool: { findMany: jest.Mock };
+    studentCourse: { findMany: jest.Mock };
+    courseAccess: { findMany: jest.Mock };
   };
 
   const baseCourseRow = (overrides: Record<string, unknown> = {}) => ({
@@ -41,6 +44,9 @@ describe('AdminCoursesService', () => {
       },
       user: { findMany: jest.fn().mockResolvedValue([]) },
       schoolAdmin: { findMany: jest.fn().mockResolvedValue([]) },
+      teacherSchool: { findMany: jest.fn().mockResolvedValue([]) },
+      studentCourse: { findMany: jest.fn().mockResolvedValue([]) },
+      courseAccess: { findMany: jest.fn().mockResolvedValue([]) },
     };
 
     const module: TestingModule = await Test.createTestingModule({
