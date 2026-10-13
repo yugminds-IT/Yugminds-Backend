@@ -140,6 +140,34 @@ describe('CertificateService', () => {
       expect(storage.uploadBuffer).toHaveBeenCalled();
     });
 
+    it('never re-renders or re-activates a revoked certificate', async () => {
+      db.studentCertificate.findUnique.mockResolvedValue({
+        id: 'existing-id',
+        certificateUrl: 'pending',
+        status: 'revoked',
+      });
+      const result = await service.issueIfEligible(1, 'course-1');
+      expect(result).toEqual({ issued: false, reason: 'revoked' });
+      expect(storage.uploadBuffer).not.toHaveBeenCalled();
+      expect(db.studentCertificate.update).not.toHaveBeenCalled();
+    });
+
+    it('returns the existing certificate when a concurrent call wins the create race', async () => {
+      db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
+      db.chapterContent.findMany.mockResolvedValue([{ id: 'c1', chapterId: 'ch1' }]);
+      db.courseProgress.findMany.mockResolvedValue([
+        { contentId: 'c1', chapterId: 'ch1', progress: 100, completedAt: new Date(), updatedAt: new Date() },
+      ]);
+      db.studentCertificate.create.mockRejectedValue(
+        Object.assign(new Error('Unique constraint'), { code: 'P2002' }),
+      );
+      db.studentCertificate.findUniqueOrThrow.mockResolvedValue({ id: 'winner-id' });
+
+      const result = await service.issueIfEligible(1, 'course-1');
+      expect(result).toEqual({ issued: true, certificateId: 'winner-id', alreadyExisted: true });
+      expect(storage.uploadBuffer).not.toHaveBeenCalled();
+    });
+
     it('issues a certificate and notifies the student when eligible', async () => {
       db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
       db.chapterContent.findMany.mockResolvedValue([
@@ -201,6 +229,20 @@ describe('CertificateService', () => {
 
       const result = await service.issueIfEligible(1, 'course-1');
       expect(result.issued).toBe(true);
+    });
+  });
+
+  describe('render', () => {
+    it('refuses to redraw a revoked certificate', async () => {
+      db.studentCertificate.findUniqueOrThrow.mockResolvedValue({
+        id: 'r1',
+        status: 'revoked',
+        issuedAt: new Date(),
+        course: { title: 'Course' },
+        student: { email: 's@example.com', profile: null },
+      });
+      await expect(service.render('r1')).rejects.toThrow(/revoked/);
+      expect(db.studentCertificate.update).not.toHaveBeenCalled();
     });
   });
 

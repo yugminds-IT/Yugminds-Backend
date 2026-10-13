@@ -19,11 +19,12 @@ ENV NODE_ENV=production
 # Certificates are rendered SVG -> JPEG by sharp, which draws text with system
 # fonts. Alpine ships none, so without these every letter becomes a box.
 RUN apk add --no-cache fontconfig ttf-dejavu font-liberation && fc-cache -f
-COPY package.json package-lock.json ./
+# The schema + config must exist before `npm ci`: its postinstall runs `prisma generate`.
+COPY package.json package-lock.json prisma.config.ts ./
+COPY --from=build /app/prisma ./prisma
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/prisma ./prisma
-RUN npx prisma generate
 
 EXPOSE 3001
-CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main"]
+# prisma.config.ts sits at the project root, so tsc emits to dist/src/*.
+CMD ["sh", "-c", "npx prisma migrate deploy && node dist/src/main"]

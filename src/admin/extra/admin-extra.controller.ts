@@ -35,6 +35,10 @@ import { CertificateService } from '../../common/certificates/certificate.servic
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
 import { StorageService } from '../../common/storage/storage.service';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import {
+  buildCertificateSvg,
+  svgToJpegBuffer,
+} from '../../common/utils/certificate-svg.util';
 import { AdminTeacherReportsService } from '../teacher-reports/admin-teacher-reports.service';
 import { AdminLogosService } from '../logos/admin-logos.service';
 
@@ -1794,20 +1798,32 @@ export class AdminExtraController {
     let generated = 0;
     let skippedExisting = 0;
     let skippedIneligible = 0;
+    let failed = 0;
 
     if (!dryRun) {
       for (const pair of pairs) {
-        const result = await this.certificateService.issueIfEligible(
-          pair.studentId,
-          pair.courseId,
-          user.id,
-        );
-        if (result.issued) {
-          if (result.alreadyExisted) skippedExisting++;
-          else generated++;
-        } else {
-          skippedIneligible++;
+        try {
+          const result = await this.certificateService.issueIfEligible(
+            pair.studentId,
+            pair.courseId,
+            user.id,
+          );
+          if (result.issued) {
+            if (result.alreadyExisted) skippedExisting++;
+            else generated++;
+          } else if (result.reason === 'revoked') {
+            skippedExisting++;
+          } else {
+            skippedIneligible++;
+          }
+        } catch {
+          // One bad render (e.g. broken template) must not abort the whole batch;
+          // the row stays "pending" and shows up under Fix broken.
+          failed++;
         }
+      }
+      if (failed > 0) {
+        warnings.push(`${failed} certificate(s) could not be drawn and are left as pending — use Fix broken / Regenerate.`);
       }
     } else {
       const existing = await this.db.studentCertificate.findMany({
@@ -1836,6 +1852,7 @@ export class AdminExtraController {
       skipped: skippedExisting + skippedIneligible,
       skipped_existing: skippedExisting,
       skipped_ineligible: skippedIneligible,
+      failed,
       truncated_students: truncatedStudents,
       truncated_enrollments: truncatedEnrollments,
       warning: warnings.length > 0 ? warnings.join(' ') : null,
@@ -1870,9 +1887,14 @@ export class AdminExtraController {
         { course: { title: { contains: search, mode: 'insensitive' } } },
       ];
     }
-    if (status === 'active' || status === 'broken' || status === 'revoked') {
+    // Must agree with the displayed status below: revoked wins, then "pending" (image never drawn).
+    if (status === 'active') {
+      where.status = 'active';
+      where.NOT = { certificateUrl: { startsWith: 'pending' } };
+    } else if (status === 'broken' || status === 'revoked') {
       where.status = status;
     } else if (status === 'pending') {
+      where.status = { not: 'revoked' };
       where.certificateUrl = { startsWith: 'pending' };
     }
     // StudentCertificate has no direct school/grade/section columns — those
@@ -1931,7 +1953,7 @@ export class AdminExtraController {
           id: c.id,
           short_id: StudentExtraController.shortCertId(c.id),
           student_id: c.studentId,
-          student_name: c.student?.profile?.fullName ?? c.student?.email ?? '',
+          student_name: c.student?.profile?.fullName || c.student?.email || '',
           student_email: c.student?.email ?? '',
           school_id: studentSchool?.schoolId ?? null,
           school_name: studentSchool?.school?.name ?? null,
@@ -1941,9 +1963,10 @@ export class AdminExtraController {
           course_title: c.course?.title ?? '',
           certificate_name: c.certificateName,
           certificate_url: c.certificateUrl,
-          status: c.certificateUrl.startsWith('pending')
-            ? 'pending'
-            : c.status,
+          status:
+            c.status !== 'revoked' && c.certificateUrl.startsWith('pending')
+              ? 'pending'
+              : c.status,
           issued_at: c.issuedAt.toISOString(),
           issued_by: c.issuedByUser?.email ?? null,
           revoked_at: c.revokedAt ? c.revokedAt.toISOString() : null,
@@ -1963,7 +1986,9 @@ export class AdminExtraController {
     const key = cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
     if (!key) throw new BadRequestException('Certificate file is unavailable');
 
-    const { body, contentType } = await this.storage.getObject(key);
+    const { body, contentType } = await this.storage.getObject(key).catch(() => {
+      throw new NotFoundException('Certificate file is missing — use Regenerate to redraw it');
+    });
     res.setHeader('Content-Type', contentType ?? 'image/jpeg');
     res.setHeader(
       'Content-Disposition',
@@ -1987,12 +2012,13 @@ export class AdminExtraController {
       include: { course: { select: { title: true } } },
     });
     if (!cert) throw new BadRequestException('Certificate not found');
+    if (cert.status === 'revoked') {
+      throw new BadRequestException('Certificate is revoked — it cannot be regenerated');
+    }
 
-    await this.certificateService.render(id);
-    const updated = await this.db.studentCertificate.update({
-      where: { id },
-      data: { issuedBy: admin.id },
-    });
+    // Keeps the original issuer: regenerating only redraws the image.
+    const { certificateUrl } = await this.certificateService.render(id);
+    const updated = { id: cert.id, certificateUrl };
     await this.notificationsService
       .sendOne(admin.id, cert.studentId, {
         title: `Certificate updated: ${cert.course?.title ?? 'your course'}`,
@@ -2107,6 +2133,31 @@ export class AdminExtraController {
   async saveCertificateTemplate(@Body() body: { template: string }) {
     const tpl = String(body?.template ?? '').trim();
     if (!tpl) throw new BadRequestException('template is required');
+    if (!/<svg[\s>]/i.test(tpl)) {
+      throw new BadRequestException('Template must be an SVG document (no <svg> element found)');
+    }
+    const missing = ['{{studentName}}', '{{certificateId}}'].filter((p) => !tpl.includes(p));
+    if (missing.length > 0) {
+      throw new BadRequestException(`Template is missing required placeholder(s): ${missing.join(', ')}`);
+    }
+    // A template that can't be drawn would leave every new certificate stuck as "pending".
+    try {
+      await svgToJpegBuffer(
+        buildCertificateSvg(
+          {
+            studentName: 'Sample Student',
+            courseTitle: 'Sample Course',
+            issuedAt: '2026-01-01',
+            certificateId: '00000000-0000-0000-0000-000000000000',
+          },
+          tpl,
+        ),
+      );
+    } catch (e: unknown) {
+      throw new BadRequestException(
+        `Template could not be rendered: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     await this.db.systemSetting.upsert({
       where: { key: 'certificate:template' },
       create: { key: 'certificate:template', value: tpl },

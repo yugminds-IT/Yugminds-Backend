@@ -14,7 +14,8 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { Public } from '../../auth/decorators/public.decorator';
 import { DatabaseService } from '../../database/database.service';
-import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
+import { RolesGuard } from '../../auth/roles/roles.guard';
+import { Roles } from '../../auth/decorators/roles.decorator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { PublicSchoolsQueryDto } from './dto/public-schools-query.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -232,7 +233,7 @@ export class CommonExtraController {
   }
 
   @Get('auth/activity')
-  @UseGuards(JwtAuthGuard)
+  @Public(false)
   async getAuthActivity(
     @CurrentUser() user: { id: number; role?: string },
     @Query('limit') limit?: string,
@@ -272,7 +273,7 @@ export class CommonExtraController {
   }
 
   @Post('auth/activity')
-  @UseGuards(JwtAuthGuard)
+  @Public(false)
   async createAuthActivity(
     @CurrentUser() user: { id: number },
     @Body()
@@ -354,7 +355,9 @@ export class CommonExtraController {
   // Misc helpers
 
   @Post('admin/upload')
-  @UseGuards(JwtAuthGuard)
+  @Public(false)
+  @UseGuards(RolesGuard)
+  @Roles('admin')
   @UseInterceptors(
     FileInterceptor('file', {
       // Set a high cap; we enforce tighter limits in code per upload `type`.

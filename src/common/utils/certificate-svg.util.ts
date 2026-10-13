@@ -7,6 +7,51 @@
  * caller (admin regenerate/batch-generate) is unaffected.
  */
 
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+
+/**
+ * sharp/librsvg draw SVG text through fontconfig on Linux; a host without
+ * fonts (e.g. a bare Alpine/Nixpacks image) turns every glyph into a box.
+ * Point fontconfig at the fonts bundled in src/assets/fonts (copied to
+ * dist/assets/fonts by nest-cli) plus the usual system dirs. fontconfig reads
+ * FONTCONFIG_FILE once, on first use, so this must run before any rendering.
+ */
+function configureBundledFonts(): void {
+  const fontsDir = [
+    path.resolve(__dirname, '../../assets/fonts'), // src/common/utils → src/assets
+    path.resolve(__dirname, '../../../assets/fonts'), // dist/src/common/utils → dist/assets
+    path.resolve(process.cwd(), 'dist/assets/fonts'),
+    path.resolve(process.cwd(), 'src/assets/fonts'),
+  ].find((d) => fs.existsSync(d) && fs.readdirSync(d).some((f) => f.endsWith('.ttf')));
+  if (!fontsDir) {
+    console.warn('[certificates] bundled fonts not found; certificate text depends on system fonts');
+    return;
+  }
+  const prefer = (family: string, fonts: string[]) =>
+    `<alias><family>${family}</family><prefer>${fonts.map((f) => `<family>${f}</family>`).join('')}</prefer></alias>`;
+  const conf = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>${escapeXml(fontsDir)}</dir>
+  <dir>/usr/share/fonts</dir>
+  <dir>/usr/local/share/fonts</dir>
+  <cachedir>${escapeXml(path.join(os.tmpdir(), 'yugminds-fontconfig-cache'))}</cachedir>
+  ${prefer('sans-serif', ['Liberation Sans', 'DejaVu Sans'])}
+  ${prefer('serif', ['Liberation Serif', 'DejaVu Serif'])}
+  ${prefer('Arial', ['Liberation Sans'])}
+  ${prefer('Inter', ['Liberation Sans'])}
+  ${prefer('Times New Roman', ['Liberation Serif'])}
+  ${prefer('Georgia', ['Liberation Serif'])}
+</fontconfig>`;
+  const confPath = path.join(os.tmpdir(), 'yugminds-certificate-fonts.conf');
+  fs.writeFileSync(confPath, conf);
+  process.env.FONTCONFIG_FILE = confPath;
+}
+
+configureBundledFonts();
+
 export function escapeXml(s: string): string {
   return s
     .replace(/&/g, '&amp;')
@@ -43,9 +88,8 @@ export function buildCertificateSvg(
   const issued = escapeXml(params.issuedAt);
   const shortId = escapeXml(shortCertId(params.certificateId));
 
-  // Text is rasterised by sharp/librsvg using the server's installed fonts
-  // (see Dockerfile) — keep generic sans-serif/serif fallbacks in every
-  // font-family or a missing font renders every glyph as an empty box.
+  // Text is rasterised with the bundled fonts (see configureBundledFonts) —
+  // keep generic sans-serif/serif fallbacks in every font-family.
 
   // If a custom template is provided, replace placeholders and return it
   if (templateSvg) {

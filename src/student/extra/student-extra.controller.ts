@@ -243,8 +243,9 @@ export class StudentExtraController {
         short_id: certificateSvgUtil.shortCertId(c.id),
         course_id: c.courseId,
         certificate_name: c.certificateName,
-        certificate_url: c.certificateUrl,
+        certificate_url: c.status === 'revoked' ? '' : c.certificateUrl,
         status: c.status,
+        revoked_reason: c.status === 'revoked' ? (c.revokedReason ?? null) : null,
         issued_at: c.issuedAt.toISOString(),
         courses: {
           id: c.courseId,
@@ -275,17 +276,23 @@ export class StudentExtraController {
         studentId: true,
         certificateKey: true,
         certificateUrl: true,
+        status: true,
         id: true,
       },
     });
     if (!cert || cert.studentId !== user.id) {
       throw new NotFoundException('Certificate not found');
     }
+    if (cert.status === 'revoked') {
+      throw new ForbiddenException('This certificate has been revoked');
+    }
     const key =
       cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
     if (!key) throw new BadRequestException('Certificate file is unavailable');
 
-    const { body, contentType } = await this.storage.getObject(key);
+    const { body, contentType } = await this.storage.getObject(key).catch(() => {
+      throw new NotFoundException('Certificate file is missing — please ask your administrator to regenerate it');
+    });
     res.setHeader('Content-Type', contentType ?? 'image/jpeg');
     res.setHeader(
       'Content-Disposition',
@@ -2001,16 +2008,15 @@ export class StudentExtraController {
     const courseId = String(body?.courseId ?? '').trim();
     if (!courseId) throw new BadRequestException('courseId is required');
 
-    const result = await this.certificateService.issueIfEligible(
-      user.id,
-      courseId,
-      user.id,
-    );
+    // No actor: "Issued By" must not show the student as issuing their own certificate.
+    const result = await this.certificateService.issueIfEligible(user.id, courseId);
     if (!result.issued) {
       throw new BadRequestException(
         result.reason === 'not_enrolled'
           ? 'Not enrolled in this course'
-          : 'Course not eligible for certificate (requires 80%+ completion).',
+          : result.reason === 'revoked'
+            ? 'Your certificate for this course was revoked. Please contact your school administrator.'
+            : 'Course not eligible for certificate (requires 80%+ completion).',
       );
     }
 

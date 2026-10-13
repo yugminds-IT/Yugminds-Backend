@@ -1,4 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  OnApplicationBootstrap,
+} from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StorageService } from '../storage/storage.service';
 import { NotificationsService } from '../notifications/notifications.service';
@@ -12,7 +17,12 @@ import {
 export type CertificateIssueResult =
   | { issued: true; certificateId: string; alreadyExisted: false }
   | { issued: true; certificateId: string; alreadyExisted: true }
-  | { issued: false; reason: 'not_enrolled' | 'not_eligible' };
+  | { issued: false; reason: 'not_enrolled' | 'not_eligible' | 'revoked' };
+
+/** YYYY-MM-DD in India time — a UTC date prints the previous day for 00:00–05:30 IST. */
+function formatIssuedDate(d: Date): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+}
 
 /**
  * Single source of truth for "is this student eligible for a certificate in
@@ -24,12 +34,49 @@ export type CertificateIssueResult =
  * hadn't completed anything).
  */
 @Injectable()
-export class CertificateService {
+export class CertificateService implements OnApplicationBootstrap {
+  /** Bump when the renderer changes in a way that leaves stored images wrong. */
+  private static readonly RENDER_VERSION = 'bundled-fonts-1';
+  private static readonly RENDER_VERSION_KEY = 'certificate:render-version';
+  private readonly logger = new Logger(CertificateService.name);
+
   constructor(
     private readonly db: DatabaseService,
     private readonly storage: StorageService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  /**
+   * Images drawn before the bundled-fonts fix show boxes instead of text.
+   * Redraw them once, in the background, on the first production boot with
+   * the new renderer. Production only: local dev may share the prod DB.
+   */
+  onApplicationBootstrap(): void {
+    if (process.env.NODE_ENV !== 'production') return;
+    void this.redrawIfRendererChanged().catch((e: unknown) =>
+      this.logger.error(`Certificate redraw on boot failed: ${e instanceof Error ? e.message : String(e)}`),
+    );
+  }
+
+  private async redrawIfRendererChanged(): Promise<void> {
+    const key = CertificateService.RENDER_VERSION_KEY;
+    const version = CertificateService.RENDER_VERSION;
+    const current = await this.db.systemSetting.findUnique({ where: { key } });
+    if (current?.value === version) return;
+
+    const result = await this.renderAll();
+    this.logger.log(
+      `Redrew certificates for renderer ${version}: ${result.regenerated}/${result.total} ok, ${result.failed} failed`,
+    );
+    // Leave the marker unset on failures so the next boot retries them.
+    if (result.failed === 0) {
+      await this.db.systemSetting.upsert({
+        where: { key },
+        create: { key, value: version },
+        update: { value: version },
+      });
+    }
+  }
 
   /** Recomputes course completion % the same way "My Courses" does — via the shared computeCourseProgress util, not a re-derived formula. */
   async computeProgressPercent(
@@ -74,8 +121,9 @@ export class CertificateService {
   ): Promise<CertificateIssueResult> {
     const existing = await this.db.studentCertificate.findUnique({
       where: { studentId_courseId: { studentId, courseId } },
-      select: { id: true, certificateUrl: true },
+      select: { id: true, certificateUrl: true, status: true },
     });
+    if (existing?.status === 'revoked') return { issued: false, reason: 'revoked' };
     if (existing) {
       // A previous attempt created the row but failed to draw/upload the image —
       // finish it now instead of leaving the student stuck on "pending" forever.
@@ -102,16 +150,28 @@ export class CertificateService {
     });
     const courseTitle = course?.title ?? 'Course';
 
-    const created = await this.db.studentCertificate.create({
-      data: {
-        studentId,
-        courseId,
-        certificateName: `${courseTitle} Certificate`,
-        certificateUrl: 'pending',
-        issuedBy: actorId ?? null,
-        status: 'active',
-      },
-    });
+    let created: { id: string };
+    try {
+      created = await this.db.studentCertificate.create({
+        data: {
+          studentId,
+          courseId,
+          certificateName: `${courseTitle} Certificate`,
+          certificateUrl: 'pending',
+          issuedBy: actorId ?? null,
+          status: 'active',
+        },
+      });
+    } catch (e: unknown) {
+      // A concurrent call (progress-save hook, Generate click, admin batch) won the
+      // unique (studentId, courseId) race — that call renders it; report the existing row.
+      if ((e as { code?: string })?.code !== 'P2002') throw e;
+      const winner = await this.db.studentCertificate.findUniqueOrThrow({
+        where: { studentId_courseId: { studentId, courseId } },
+        select: { id: true },
+      });
+      return { issued: true, certificateId: winner.id, alreadyExisted: true };
+    }
 
     await this.render(created.id);
 
@@ -131,6 +191,7 @@ export class CertificateService {
   /**
    * Draws the certificate image from current data (student name, course
    * title, template) and uploads it, replacing any previous image.
+   * Revoked certificates are never redrawn (that would silently re-activate them).
    */
   async render(certificateId: string): Promise<{ certificateUrl: string }> {
     const cert = await this.db.studentCertificate.findUniqueOrThrow({
@@ -142,6 +203,9 @@ export class CertificateService {
         },
       },
     });
+    if (cert.status === 'revoked') {
+      throw new BadRequestException('Certificate is revoked — it cannot be regenerated');
+    }
     const templateSetting = await this.db.systemSetting.findUnique({
       where: { key: 'certificate:template' },
     });
@@ -151,7 +215,7 @@ export class CertificateService {
         studentName:
           cert.student?.profile?.fullName || cert.student?.email || 'Student',
         courseTitle: cert.course?.title ?? 'Course',
-        issuedAt: cert.issuedAt.toISOString().split('T')[0],
+        issuedAt: formatIssuedDate(cert.issuedAt),
         certificateId: cert.id,
       },
       templateSetting?.value ?? null,
