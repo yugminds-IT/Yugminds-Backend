@@ -1061,3 +1061,248 @@ model AdminSavedView {
   @@unique([userId, tableKey, name])
   @@index([userId, tableKey])
 }
+
+// ============ Academy (standalone B2C app: self-paced courses + 1:1 classes) ============
+// Fully separate from the LMS: own accounts, courses, progress and commerce. Shares only the
+// server and database. Field names deliberately avoid userId/studentId/teacherId/schoolId/…
+// so the LMS Prisma tenant extension (database.service.ts) never touches these queries.
+
+enum AcademyRole {
+  LEARNER
+  TUTOR
+  ADMIN
+}
+
+enum AcademyLessonType {
+  VIDEO
+  PDF
+  TEXT
+  QUIZ
+  LINK
+}
+
+enum AcademyEnrollmentSource {
+  PURCHASE
+  GRANT
+}
+
+enum AcademyProductType {
+  COURSE
+  SESSION_PACK
+}
+
+enum AcademyOrderStatus {
+  CREATED
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum AcademyBookingStatus {
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  NO_SHOW
+}
+
+model AcademyAccount {
+  id                 String      @id @default(uuid())
+  email              String      @unique
+  passwordHash       String
+  role               AcademyRole @default(LEARNER)
+  fullName           String
+  phone              String?
+  parentName         String?
+  isActive           Boolean     @default(true)
+  mustChangePassword Boolean     @default(false)
+  // Bumped on logout / password change: invalidates every issued token.
+  tokenVersion       Int         @default(0)
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@index([role, createdAt])
+}
+
+model AcademyCourse {
+  id                      String          @id @default(uuid())
+  title                   String
+  description             String?         @db.Text
+  thumbnailUrl            String?         @db.Text
+  isPublished             Boolean         @default(false)
+  importedFromLmsCourseId String?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  modules                 AcademyModule[]
+  products                AcademyProduct[]
+}
+
+model AcademyModule {
+  id        String          @id @default(uuid())
+  courseId  String
+  course    AcademyCourse   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  title     String
+  sortOrder Int             @default(0)
+  lessons   AcademyLesson[]
+
+  @@index([courseId, sortOrder])
+}
+
+model AcademyLesson {
+  id              String            @id @default(uuid())
+  moduleId        String
+  module          AcademyModule     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  title           String
+  type            AcademyLessonType
+  contentUrl      String?           @db.Text
+  body            String?           @db.Text
+  // QUIZ: [{ question, options: string[], answer: number }] — answers never sent to learners.
+  quiz            Json?
+  durationMinutes Int?
+  isPreview       Boolean           @default(false)
+  sortOrder       Int               @default(0)
+
+  @@index([moduleId, sortOrder])
+}
+
+model AcademyEnrollment {
+  id          String                  @id @default(uuid())
+  learnerId   String
+  courseId    String
+  source      AcademyEnrollmentSource
+  orderId     String?
+  enrolledAt  DateTime                @default(now())
+  completedAt DateTime?
+
+  @@unique([learnerId, courseId])
+  @@index([courseId])
+}
+
+model AcademyLessonProgress {
+  id          String   @id @default(uuid())
+  learnerId   String
+  courseId    String
+  lessonId    String
+  quizScore   Int?
+  completedAt DateTime @default(now())
+
+  @@unique([learnerId, lessonId])
+  @@index([learnerId, courseId])
+}
+
+model AcademyCertificate {
+  id          String   @id @default(uuid())
+  shortId     String   @unique
+  learnerId   String
+  courseId    String
+  // Snapshots: the certificate keeps the names it was issued with.
+  learnerName String
+  courseTitle String
+  issuedAt    DateTime @default(now())
+
+  @@unique([learnerId, courseId])
+}
+
+model AcademyProduct {
+  id             String             @id @default(uuid())
+  type           AcademyProductType
+  slug           String             @unique
+  title          String
+  description    String?            @db.Text
+  thumbnailUrl   String?            @db.Text
+  priceInPaise   Int
+  mrpInPaise     Int?
+  courseId       String?
+  course         AcademyCourse?     @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  sessionMinutes Int?
+  sessionCount   Int?
+  isActive       Boolean            @default(true)
+  sortOrder      Int                @default(0)
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  orders         AcademyOrder[]
+
+  @@index([isActive, sortOrder])
+}
+
+model AcademyOrder {
+  id                String                 @id @default(uuid())
+  accountId         String
+  productId         String
+  product           AcademyProduct         @relation(fields: [productId], references: [id])
+  amountInPaise     Int
+  status            AcademyOrderStatus     @default(CREATED)
+  razorpayOrderId   String                 @unique
+  razorpayPaymentId String?
+  receiptNo         String                 @unique
+  buyerName         String?
+  buyerPhone        String?
+  paidAt            DateTime?
+  refundedAt        DateTime?
+  createdAt         DateTime               @default(now())
+  updatedAt         DateTime               @updatedAt
+  credits           AcademySessionCredit[]
+
+  @@index([accountId])
+  @@index([status, createdAt])
+}
+
+model AcademyTutorProfile {
+  id                 String                     @id @default(uuid())
+  accountId          String                     @unique
+  headline           String?
+  bio                String?                    @db.Text
+  subjects           String[]                   @default([])
+  photoUrl           String?                    @db.Text
+  defaultMeetingLink String?
+  isActive           Boolean                    @default(true)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  availability       AcademyTutorAvailability[]
+}
+
+model AcademyTutorAvailability {
+  id        String              @id @default(uuid())
+  tutorId   String
+  tutor     AcademyTutorProfile @relation(fields: [tutorId], references: [id], onDelete: Cascade)
+  dayOfWeek Int // 0 = Sunday … 6 = Saturday, IST
+  startTime String // "HH:mm" IST
+  endTime   String // "HH:mm" IST
+
+  @@index([tutorId])
+}
+
+model AcademySessionCredit {
+  id        String           @id @default(uuid())
+  learnerId String
+  orderId   String?
+  order     AcademyOrder?    @relation(fields: [orderId], references: [id])
+  total     Int
+  used      Int              @default(0)
+  minutes   Int
+  createdAt DateTime         @default(now())
+  bookings  AcademyBooking[]
+
+  @@index([learnerId])
+}
+
+// One live booking per tutor slot is enforced by the partial unique index
+// "AcademyBooking_tutor_slot_live_key" in the academy migration (not expressible here).
+model AcademyBooking {
+  id          String               @id @default(uuid())
+  tutorId     String // AcademyAccount.id of the tutor
+  learnerId   String
+  creditId    String
+  credit      AcademySessionCredit @relation(fields: [creditId], references: [id])
+  startsAt    DateTime
+  endsAt      DateTime
+  status      AcademyBookingStatus @default(CONFIRMED)
+  meetingLink String?
+  tutorNotes  String?              @db.Text
+  cancelledBy String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([tutorId, startsAt])
+  @@index([learnerId, startsAt])
+  @@index([status, startsAt])
+}

@@ -16,6 +16,7 @@ import { AdminModule } from './admin/admin.module';
 import { TeacherModule } from './teacher/teacher.module';
 import { SchoolAdminModule } from './school-admin/school-admin.module';
 import { StudentModule } from './student/student.module';
+import { AcademyModule } from './academy/academy.module';
 import { MonitoringModule } from './common/monitoring/monitoring.module';
 import { MonitoringInterceptor } from './common/monitoring/monitoring.interceptor';
 import { InternalModule } from './modules/internal/internal.module';
@@ -67,6 +68,7 @@ import { ThrottlerStorageRedisService } from './common/throttler/throttler-stora
     TeacherModule,
     SchoolAdminModule,
     StudentModule,
+    AcademyModule,
     UsersModule,
     TenantsModule,
     CommonModule,

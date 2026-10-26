@@ -46,7 +46,18 @@ async function bootstrap() {
   app.getHttpAdapter().getInstance().set('trust proxy', trustedProxyHops);
 
   // SECURITY: Use smaller global limit to prevent DoS; override per-route for file uploads
-  app.use(express.json({ limit: process.env.JSON_BODY_LIMIT ?? '1mb' }));
+  app.use(
+    express.json({
+      limit: process.env.JSON_BODY_LIMIT ?? '1mb',
+      // Keep the exact bytes for webhook signature checks (Academy / Razorpay) —
+      // only on webhook routes, so ordinary requests don't hold a second copy.
+      verify: (req, _res, buf) => {
+        if (req.url?.startsWith('/academy/webhooks/')) {
+          (req as unknown as { rawBody?: Buffer }).rawBody = buf;
+        }
+      },
+    }),
+  );
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));

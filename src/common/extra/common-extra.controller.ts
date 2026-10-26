@@ -21,6 +21,7 @@ import { PublicSchoolsQueryDto } from './dto/public-schools-query.dto';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { StudentExtraController } from '../../student/extra/student-extra.controller';
 import { StorageService } from '../storage/storage.service';
+import { LeadAlertsService } from '../lead-alerts/lead-alerts.service';
 
 interface PlaceholderResponse {
   endpoint: string;
@@ -34,6 +35,7 @@ export class CommonExtraController {
   constructor(
     private readonly db: DatabaseService,
     private readonly storage: StorageService,
+    private readonly leadAlerts: LeadAlertsService,
   ) {}
 
   private buildResponse(endpoint: string, method: string): PlaceholderResponse {
@@ -128,6 +130,7 @@ export class CommonExtraController {
       phoneNumber?: string;
       purpose?: string;
       message?: string;
+      source?: string;
     },
   ) {
     const firstName = String(body.firstName ?? '').trim();
@@ -141,6 +144,21 @@ export class CommonExtraController {
         'firstName, lastName, email, purpose, and message are required',
       );
     }
+    // Public endpoint: keep fields to sane sizes so the inbox can't be flooded with huge rows.
+    if (
+      firstName.length > 80 ||
+      lastName.length > 80 ||
+      email.length > 200 ||
+      purpose.length > 200 ||
+      message.length > 5000 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+    ) {
+      throw new BadRequestException(
+        'Please check the form: one of the fields is too long or the email is invalid',
+      );
+    }
+    // Which site the message came from; anything unknown is treated as Robocoders, as before.
+    const source = body.source === 'yugminds' ? 'yugminds' : 'robocoders';
 
     await this.db.contactSubmission.create({
       data: {
@@ -151,10 +169,66 @@ export class CommonExtraController {
         phoneNumber: String(body.phoneNumber ?? '').trim() || null,
         purpose,
         message,
-        source: 'robocoders',
+        source,
       },
     });
+    this.leadAlerts.notify({
+      kind: 'brief',
+      name: `${firstName} ${lastName}`,
+      email,
+      phone: String(body.phoneNumber ?? '').trim() || null,
+      topic: `${purpose}${source === 'robocoders' ? ' (Robocoders site)' : ''}`,
+      message,
+    });
+    // The YugMinds brief form gets a "we've got your brief" email back.
+    if (source === 'yugminds') {
+      this.leadAlerts.confirmBrief({
+        firstName,
+        email,
+        project: purpose.replace(/^Project brief:\s*/, ''),
+        message,
+      });
+    }
 
+    return { success: true };
+  }
+
+  // "Call me back" from the YugMinds site assistant: just a name and a phone
+  // number, saved to the same Contact Submissions inbox. Public, so tightly
+  // limited and validated like /contact.
+  @Post('contact/callback')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  async callback(
+    @Body() body: { name?: string; phone?: string; topic?: string },
+  ) {
+    const name = String(body.name ?? '').trim();
+    const phone = String(body.phone ?? '').replace(/[\s()-]/g, '');
+    const topic = String(body.topic ?? '').trim() || 'Not given';
+    if (!name || name.length > 80 || topic.length > 120) {
+      throw new BadRequestException('Enter your name');
+    }
+    if (!/^(\+91)?[6-9]\d{9}$/.test(phone)) {
+      throw new BadRequestException('Enter a 10-digit mobile number');
+    }
+    const [firstName, ...rest] = name.split(/\s+/);
+    await this.db.contactSubmission.create({
+      data: {
+        firstName,
+        lastName: rest.join(' '),
+        email: '',
+        areaCode: '+91',
+        phoneNumber: phone.slice(-10),
+        purpose: `Call back: ${topic}`,
+        message: `Asked for a call back about: ${topic}`,
+        source: 'yugminds',
+      },
+    });
+    this.leadAlerts.notify({
+      kind: 'callback',
+      name,
+      phone: phone.slice(-10),
+      topic,
+    });
     return { success: true };
   }
 
