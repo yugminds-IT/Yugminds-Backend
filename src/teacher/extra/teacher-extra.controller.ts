@@ -2393,6 +2393,10 @@ export class TeacherExtraController {
         schoolId: true,
         courseId: true,
         chapterId: true,
+        gradeId: true,
+        publishScope: true,
+        publishedGradeIds: true,
+        publishedSectionIds: true,
       },
     });
     if (
@@ -2426,7 +2430,41 @@ export class TeacherExtraController {
         grantCount: true,
       },
     });
+    // Students the assignment was published to who have no submission at all.
+    const schoolId = assignment.schoolId;
+    const { targetIds, missing } = schoolId
+      ? await this.runInSchool(schoolId, async () => {
+          const targetIds = await this.resolveTargetedStudentIds(
+            schoolId,
+            assignment,
+          );
+          const submitted = new Set(submissions.map((s) => s.studentId));
+          const missingIds = targetIds.filter((id) => !submitted.has(id));
+          const missing = missingIds.length
+            ? await this.db.studentSchool.findMany({
+                where: {
+                  schoolId,
+                  studentId: { in: missingIds },
+                  isActive: true,
+                },
+                include: { student: { include: { profile: true } } },
+              })
+            : [];
+          return { targetIds, missing };
+        })
+      : { targetIds: [] as number[], missing: [] };
     return {
+      target_count: targetIds.length,
+      not_submitted: missing.map((m) => ({
+        student_id: m.studentId,
+        student_name:
+          m.student.profile?.fullName ??
+          m.student.email ??
+          `Student ${m.studentId}`,
+        email: m.student.email ?? null,
+        grade: m.grade ?? null,
+        section: m.section ?? null,
+      })),
       submissions: submissions.map((s) => {
         const ss = s.student.studentSchools?.[0];
         return {
