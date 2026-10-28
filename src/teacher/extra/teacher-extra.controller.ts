@@ -2397,6 +2397,8 @@ export class TeacherExtraController {
         publishScope: true,
         publishedGradeIds: true,
         publishedSectionIds: true,
+        assignmentType: true,
+        isPublished: true,
       },
     });
     if (
@@ -2431,7 +2433,12 @@ export class TeacherExtraController {
       },
     });
     // Students the assignment was published to who have no submission at all.
-    const schoolId = assignment.schoolId;
+    // Only published DAILY work: course audiences follow enrolment, not
+    // grade/section targeting, and drafts aren't visible to students yet.
+    const schoolId =
+      assignment.assignmentType === 'DAILY' && assignment.isPublished
+        ? assignment.schoolId
+        : null;
     const { targetIds, missing } = schoolId
       ? await this.runInSchool(schoolId, async () => {
           const targetIds = await this.resolveTargetedStudentIds(
