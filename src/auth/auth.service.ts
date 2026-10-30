@@ -26,6 +26,7 @@ import { RealtimeGateway } from '../common/realtime/realtime.gateway';
 import { AuthCacheService } from './auth-cache.service';
 import { RefreshTokenStoreService } from './refresh-token-store.service';
 import { SystemControlsService } from '../admin/system-controls/system-controls.service';
+import { SessionsService, type SessionMeta } from './sessions/sessions.service';
 
 export interface AuthTokens {
   accessToken: string;
@@ -53,6 +54,7 @@ export class AuthService {
     private readonly authCache: AuthCacheService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
     private readonly systemControls: SystemControlsService,
+    private readonly sessions: SessionsService,
   ) {}
 
   private async hashPassword(password: string): Promise<string> {
@@ -92,7 +94,7 @@ export class AuthService {
     return amount * multipliers[unit];
   }
 
-  private async generateTokens(user: User): Promise<AuthTokens> {
+  private async generateTokens(user: User, sid: string): Promise<AuthTokens> {
     const tenantId = user.tenantId ?? undefined;
     // Global admins are allowed to authenticate without tenant scoping.
     const isGlobalUser = user.isSuperAdmin || user.role === 'admin';
@@ -106,6 +108,7 @@ export class AuthService {
       isSuperAdmin: user.isSuperAdmin,
       tenantId,
       tokenVersion: user.tokenVersion,
+      sid,
     };
 
     const accessExpiry =
@@ -209,6 +212,30 @@ export class AuthService {
     );
   }
 
+  private refreshTtlSeconds(): number {
+    const refreshExpiry =
+      this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
+    return Math.ceil(
+      this.parseExpiryToMs(refreshExpiry, 'REFRESH_TOKEN_EXPIRY') / 1000,
+    );
+  }
+
+  /** Records this device as a session and issues its token pair. */
+  private async startSession(
+    user: User,
+    meta: SessionMeta,
+  ): Promise<AuthTokens> {
+    const sid = await this.sessions.create(
+      'lms',
+      user.id,
+      meta,
+      this.refreshTtlSeconds(),
+    );
+    const tokens = await this.generateTokens(user, sid);
+    await this.storeRefreshToken(user.id, tokens.refreshToken!);
+    return tokens;
+  }
+
   private buildAuthResponse(user: User, tokens: AuthTokens): AuthResponse {
     return {
       user: {
@@ -227,6 +254,7 @@ export class AuthService {
   async signup(
     dto: CreateUserOptions,
     isSuperAdmin = false,
+    meta: SessionMeta = {},
   ): Promise<AuthResponse> {
     const existing = await this.db.user.findUnique({
       where: { email: dto.email },
@@ -268,8 +296,7 @@ export class AuthService {
           update: {},
         });
 
-        const tokens = await this.generateTokens(user);
-        await this.storeRefreshToken(user.id, tokens.refreshToken!);
+        const tokens = await this.startSession(user, meta);
 
         return this.buildAuthResponse(user, tokens);
       });
@@ -282,7 +309,7 @@ export class AuthService {
     }
   }
 
-  async login(dto: LoginDto): Promise<AuthResponse> {
+  async login(dto: LoginDto, meta: SessionMeta = {}): Promise<AuthResponse> {
     const user = await this.db.user.findUnique({
       where: { email: dto.email },
     });
@@ -351,8 +378,7 @@ export class AuthService {
     `;
     const mustChangePassword = rows[0]?.mustChangePassword ?? false;
 
-    const tokens = await this.generateTokens(user);
-    await this.storeRefreshToken(user.id, tokens.refreshToken!);
+    const tokens = await this.startSession(user, meta);
 
     const response = this.buildAuthResponse(user, tokens);
     response.user.mustChangePassword = mustChangePassword;
@@ -460,7 +486,10 @@ export class AuthService {
     return { message: 'Password reset request submitted.' };
   }
 
-  async refresh(refreshToken: string): Promise<AuthResponse> {
+  async refresh(
+    refreshToken: string,
+    meta: SessionMeta = {},
+  ): Promise<AuthResponse> {
     if (!refreshToken) {
       throw new UnauthorizedException('Refresh token required');
     }
@@ -470,6 +499,7 @@ export class AuthService {
       tenantId?: string;
       isSuperAdmin?: boolean;
       role?: Role;
+      sid?: string;
     };
     try {
       payload = await this.jwtService.verifyAsync(refreshToken, {
@@ -478,6 +508,15 @@ export class AuthService {
     } catch {
       throw new UnauthorizedException('Invalid refresh token');
     }
+
+    // Tokens issued before device sessions existed carry no sid: force re-login.
+    if (
+      !payload.sid ||
+      !(await this.sessions.isAlive(payload.sid, 'lms', payload.sub))
+    ) {
+      throw new UnauthorizedException('Session ended');
+    }
+    const sid = payload.sid;
 
     const isGlobalUser =
       Boolean(payload.isSuperAdmin) || payload.role === 'admin';
@@ -521,8 +560,11 @@ export class AuthService {
       // Rotation: revoke the matched refresh token, issue and store a new one.
       await this.refreshTokenStore.revoke(payload.sub, matchedTokenId);
 
-      const tokens = await this.generateTokens(user);
+      const tokens = await this.generateTokens(user, sid);
       await this.storeRefreshToken(user.id, tokens.refreshToken!);
+      await this.sessions
+        .touch(sid, meta, this.refreshTtlSeconds())
+        .catch(() => undefined);
 
       return this.buildAuthResponse(user, tokens);
     });
@@ -543,6 +585,7 @@ export class AuthService {
     userId: number,
     currentPassword: string,
     newPassword: string,
+    meta: SessionMeta = {},
   ): Promise<AuthTokens> {
     if (!userId) throw new UnauthorizedException('Authentication required');
     if (!newPassword) throw new BadRequestException('New password is required');
@@ -610,9 +653,8 @@ export class AuthService {
     // request this same browser tab makes (e.g. reloading the profile) gets
     // rejected as "Access token invalidated" immediately after a successful
     // change.
-    const tokens = await this.generateTokens(updated);
-    await this.storeRefreshToken(userId, tokens.refreshToken!);
-    return tokens;
+    await this.sessions.revokeMany('lms', userId);
+    return this.startSession(updated, meta);
   }
 
   /**
@@ -668,31 +710,32 @@ export class AuthService {
     });
 
     await this.refreshTokenStore.revokeAll(userId);
+    await this.sessions.revokeMany('lms', userId);
     await this.authCache.invalidate(userId);
   }
 
-  async logout(userId: number, refreshToken?: string): Promise<void> {
+  /** Ends only the calling device's session; other devices stay signed in. */
+  async logout(userId: number, sid?: string): Promise<void> {
     if (!userId) throw new UnauthorizedException('Authentication required');
+    if (sid) await this.sessions.revoke('lms', userId, sid);
+  }
 
-    // Invalidate all previously issued access tokens immediately.
-    await this.db.user.update({
-      where: { id: userId },
-      data: { tokenVersion: { increment: 1 } },
-    });
-    await this.authCache.invalidate(userId);
+  listSessions(userId: number, currentSid?: string) {
+    return this.sessions.list('lms', userId, currentSid);
+  }
 
-    if (refreshToken && refreshToken.trim()) {
-      const raw = refreshToken.trim();
-      const matchedTokenId = await this.refreshTokenStore.findMatch(
-        userId,
-        raw,
-      );
-      if (matchedTokenId) {
-        await this.refreshTokenStore.revoke(userId, matchedTokenId);
-      }
-      return;
+  async revokeSession(userId: number, sid: string): Promise<void> {
+    if (!(await this.sessions.revoke('lms', userId, sid))) {
+      throw new NotFoundException('Session not found');
     }
+  }
 
-    await this.refreshTokenStore.revokeAll(userId);
+  revokeOtherSessions(userId: number, currentSid?: string) {
+    return this.sessions.revokeMany('lms', userId, currentSid);
+  }
+
+  /** Every device, including this one. */
+  revokeAllSessions(userId: number) {
+    return this.sessions.revokeMany('lms', userId);
   }
 }

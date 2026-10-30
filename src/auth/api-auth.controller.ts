@@ -1,7 +1,6 @@
 import { Body, Controller, Post, Res } from '@nestjs/common';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthService } from './auth.service';
-import { LogoutDto } from './dto/logout.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { ConfigService } from '@nestjs/config';
 import type { Response } from 'express';
@@ -47,11 +46,10 @@ export class ApiAuthController {
 
   @Post('logout')
   async logout(
-    @CurrentUser() user: { id: number },
-    @Body() dto: LogoutDto,
+    @CurrentUser() user: { id: number; sid?: string },
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean }> {
-    await this.authService.logout(user.id, dto?.refreshToken);
+    await this.authService.logout(user.id, user.sid);
 
     const refreshExpiry =
       this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';

@@ -51,6 +51,7 @@ describe('AuthController', () => {
 
       const result = await controller.login(
         { email: 'a@b.c', password: 'x' } as never,
+        { ip: '1.2.3.4', headers: { 'user-agent': 'jest' } } as never,
         res as never,
       );
 
@@ -83,7 +84,7 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('old-refresh');
+      expect(mockAuthService.refresh).toHaveBeenCalledWith('old-refresh', expect.anything());
       expect(res.cookie).toHaveBeenCalledWith(
         'refresh_token',
         'rotated-refresh',
@@ -98,7 +99,7 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-bff');
+      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-bff', expect.anything());
     });
 
     it('prefers the cookie over a body token', async () => {
@@ -111,7 +112,7 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-cookie');
+      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-cookie', expect.anything());
     });
 
     it('rejects and clears the cookie when neither cookie nor body has a token', async () => {

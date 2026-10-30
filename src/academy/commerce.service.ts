@@ -8,6 +8,7 @@ import { AcademyOrderStatus, AcademyRole, Prisma } from '@prisma/client';
 import { randomBytes, randomUUID } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import { RazorpayService } from './razorpay.service';
+import { SessionsService } from '../auth/sessions/sessions.service';
 import type { ProductDto } from './academy.dto';
 
 type Tx = Prisma.TransactionClient;
@@ -34,6 +35,7 @@ export class CommerceService {
   constructor(
     private readonly db: DatabaseService,
     private readonly razorpay: RazorpayService,
+    private readonly sessions: SessionsService,
   ) {}
 
   // ─── Catalog (public) ────────────────────────────────────────────────────
@@ -506,6 +508,7 @@ export class CommerceService {
         ...(isActive ? {} : { tokenVersion: { increment: 1 } }),
       },
     });
+    if (!isActive) await this.sessions.revokeMany('academy', id);
     return { ok: true };
   }
 

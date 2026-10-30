@@ -11,6 +11,7 @@ import * as bcrypt from 'bcrypt';
 import { randomBytes } from 'crypto';
 import { DatabaseService } from '../database/database.service';
 import type { AcademySignupDto } from './academy.dto';
+import { SessionsService } from '../auth/sessions/sessions.service';
 
 const PUBLIC_ACCOUNT = {
   id: true,
@@ -31,7 +32,10 @@ export function tempPassword(): string {
 export class AcademyAuthService implements OnApplicationBootstrap {
   private readonly logger = new Logger(AcademyAuthService.name);
 
-  constructor(private readonly db: DatabaseService) {}
+  constructor(
+    private readonly db: DatabaseService,
+    private readonly sessions: SessionsService,
+  ) {}
 
   /** First Academy admin from env, like the LMS ADMIN_SEED_*. Safe to leave set. */
   async onApplicationBootstrap() {
@@ -162,6 +166,7 @@ export class AcademyAuthService implements OnApplicationBootstrap {
       },
       select: { email: true },
     });
+    await this.sessions.revokeMany('academy', id);
     return { email: account.email, tempPassword: password };
   }
 

@@ -3,6 +3,7 @@ import { BadRequestException } from '@nestjs/common';
 import { PasswordResetRequestService } from './password-reset-request.service';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
 
 describe('PasswordResetRequestService', () => {
@@ -60,6 +61,7 @@ describe('PasswordResetRequestService', () => {
         { provide: DatabaseService, useValue: db },
         { provide: RealtimeGateway, useValue: realtimeGateway },
         { provide: RefreshTokenStoreService, useValue: refreshTokenStore },
+        { provide: SessionsService, useValue: { revokeMany: jest.fn() } },
       ],
     }).compile();
 

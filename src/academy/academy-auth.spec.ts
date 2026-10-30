@@ -29,7 +29,7 @@ describe('Academy auth tokens', () => {
       cookie: (n: string, value: string, opts: Record<string, unknown>) =>
         (cookies[n] = { value, opts }),
     };
-    await issueTokens(jwt, res as never, account);
+    await issueTokens(jwt, res as never, account, 'sid-1');
     return cookies;
   };
 
@@ -68,6 +68,8 @@ describe('Academy auth tokens', () => {
   });
 
   describe('AcademyAuthGuard', () => {
+    let alive = true;
+    beforeEach(() => (alive = true));
     const ctx = (cookie: string | undefined, roles?: string[]) => {
       const req: Record<string, unknown> = {
         headers: {},
@@ -81,15 +83,44 @@ describe('Academy auth tokens', () => {
         getHandler: () => null,
         getClass: () => null,
       } as unknown as ExecutionContext;
-      return { guard: new AcademyAuthGuard(jwt, reflector), context, req };
+      const sessions = { isAlive: async () => alive } as never;
+      return {
+        guard: new AcademyAuthGuard(jwt, reflector, sessions),
+        context,
+        req,
+      };
     };
 
     it('admits a valid account and never sets req.user (keeps LMS tenant logic out)', async () => {
       const token = (await issue())[ACCESS_COOKIE].value;
       const { guard, context, req } = ctx(token, ['LEARNER']);
       await expect(guard.canActivate(context)).resolves.toBe(true);
-      expect(req.academy).toEqual({ id: 'acc-1', role: 'LEARNER' });
+      expect(req.academy).toEqual({
+        id: 'acc-1',
+        role: 'LEARNER',
+        sid: 'sid-1',
+      });
       expect(req.user).toBeUndefined();
+    });
+
+    it('401 once the session is revoked, even with a valid token', async () => {
+      const token = (await issue())[ACCESS_COOKIE].value;
+      alive = false;
+      const { guard, context } = ctx(token);
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+
+    it('401 for a token with no sid (issued before device sessions)', async () => {
+      const old = await jwt.signAsync(
+        { sub: 'acc-1', role: 'LEARNER', v: 3, typ: 'access' },
+        { secret: process.env.ACADEMY_JWT_SECRET },
+      );
+      const { guard, context } = ctx(old);
+      await expect(guard.canActivate(context)).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
     });
 
     it('401 without a token, 403 for the wrong role', async () => {

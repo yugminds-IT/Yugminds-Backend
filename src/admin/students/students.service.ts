@@ -17,6 +17,7 @@ import {
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 
 type StudentSchoolDto = {
   school_id: string;
@@ -64,6 +65,7 @@ export class AdminStudentsService {
     private readonly enrollmentService: EnrollmentService,
     private readonly authCache: AuthCacheService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly sessions: SessionsService,
   ) {}
 
   private toStudentDetail(u: UserWithRelations): StudentDetailResponse {
@@ -537,6 +539,7 @@ export class AdminStudentsService {
       });
       if (data.password) {
         await this.refreshTokenStore.revokeAll(studentId);
+        await this.sessions.revokeMany('lms', studentId);
       }
     }
 
@@ -777,6 +780,7 @@ export class AdminStudentsService {
             },
           });
           await this.authCache.invalidate(id);
+          await this.sessions.revokeMany('lms', id);
           results.push({ id, new_password: newPassword });
         }
         return { success: true, results };

@@ -10,12 +10,15 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { JwtAuthGuard } from './jwt-auth/jwt-auth.guard';
 import { RolesGuard } from './roles/roles.guard';
 import { RealtimeModule } from '../common/realtime/realtime.module';
+import { SessionsModule } from './sessions/sessions.module';
+import { SessionsController } from './sessions/sessions.controller';
 import { SystemControlsModule } from '../admin/system-controls/system-controls.module';
 
 @Module({
   imports: [
     DatabaseModule,
     SystemControlsModule,
+    SessionsModule,
     forwardRef(() => RealtimeModule),
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
@@ -39,7 +42,7 @@ import { SystemControlsModule } from '../admin/system-controls/system-controls.m
     }),
   ],
   providers: [AuthService, JwtStrategy, JwtAuthGuard, RolesGuard],
-  controllers: [AuthController, ApiAuthController],
+  controllers: [AuthController, ApiAuthController, SessionsController],
   exports: [JwtModule, JwtAuthGuard, RolesGuard, AuthService],
 })
 export class AuthModule {}

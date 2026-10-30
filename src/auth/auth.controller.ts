@@ -14,10 +14,14 @@ import { CurrentUser } from './decorators/current-user.decorator';
 import { SignupDto } from './dto/signup.dto';
 import type { CreateUserOptions } from './auth.service';
 import { LoginDto } from './dto/login.dto';
-import { LogoutDto } from './dto/logout.dto';
 import type { Request, Response } from 'express';
 
 const REFRESH_TOKEN_COOKIE_NAME = 'refresh_token';
+
+function clientMeta(req: Request) {
+  // req.ip honours the app's `trust proxy` setting; never parse x-forwarded-for by hand.
+  return { ip: req.ip, userAgent: req.headers?.['user-agent'] };
+}
 
 function parseExpiryToMs(expiry: string, envName: string): number {
   const v = String(expiry ?? '').trim();
@@ -62,6 +66,7 @@ export class AuthController {
   @Post('signup')
   async signup(
     @Body() dto: SignupDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponse> {
     // Map the public DTO (restricted roles, no isSuperAdmin) to the internal options type.
@@ -71,7 +76,7 @@ export class AuthController {
       role: dto.role,
       tenantId: dto.tenantId,
     };
-    const result = await this.authService.signup(opts);
+    const result = await this.authService.signup(opts, false, clientMeta(req));
     const refreshToken = result.tokens.refreshToken;
     if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
 
@@ -97,9 +102,10 @@ export class AuthController {
   @Post('login')
   async login(
     @Body() dto: LoginDto,
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponse> {
-    const result = await this.authService.login(dto);
+    const result = await this.authService.login(dto, clientMeta(req));
     const refreshToken = result.tokens.refreshToken;
     if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
 
@@ -134,9 +140,9 @@ export class AuthController {
       | { refreshToken?: string; refresh_token?: string }
       | undefined;
     const refreshToken =
-      ((req as { cookies?: Record<string, string> }).cookies?.[
+      (req as { cookies?: Record<string, string> }).cookies?.[
         REFRESH_TOKEN_COOKIE_NAME
-      ] as string | undefined) ||
+      ] ||
       body?.refreshToken ||
       body?.refresh_token;
 
@@ -147,7 +153,10 @@ export class AuthController {
     }
 
     try {
-      const result = await this.authService.refresh(refreshToken);
+      const result = await this.authService.refresh(
+        refreshToken,
+        clientMeta(req),
+      );
       const newRefreshToken = result.tokens.refreshToken;
       if (!newRefreshToken)
         throw new UnauthorizedException('Refresh token missing');
@@ -203,6 +212,7 @@ export class AuthController {
       password?: string;
       new_password?: string;
     },
+    @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean; tokens: { accessToken: string } }> {
     const currentPassword = String(body?.current_password ?? '').trim();
@@ -213,6 +223,7 @@ export class AuthController {
       user.id,
       currentPassword,
       nextPassword,
+      clientMeta(req),
     );
 
     // The change bumps tokenVersion, invalidating the access token this very
@@ -242,11 +253,10 @@ export class AuthController {
 
   @Post('logout')
   async logout(
-    @CurrentUser() user: { id: number },
-    @Body() dto: LogoutDto,
+    @CurrentUser() user: { id: number; sid?: string },
     @Res({ passthrough: true }) res: Response,
   ): Promise<{ success: boolean }> {
-    await this.authService.logout(user.id, dto?.refreshToken);
+    await this.authService.logout(user.id, user.sid);
 
     const refreshExpiry =
       this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';

@@ -7,6 +7,7 @@ import { AcademyLearnerController } from './academy-learner.controller';
 import { AcademyTutorController } from './academy-tutor.controller';
 import { AcademyAdminController } from './academy-admin.controller';
 import { AcademyAuthGuard } from './academy-auth';
+import { SessionsModule } from '../auth/sessions/sessions.module';
 import { AcademyAuthService } from './academy-auth.service';
 import { CommerceService } from './commerce.service';
 import { BookingService } from './booking.service';
@@ -20,7 +21,7 @@ import { RazorpayService } from './razorpay.service';
  * default secret: every sign/verify passes ACADEMY_JWT_SECRET explicitly.
  */
 @Module({
-  imports: [DatabaseModule, JwtModule.register({})],
+  imports: [DatabaseModule, SessionsModule, JwtModule.register({})],
   controllers: [
     AcademyAuthController,
     AcademyPublicController,

@@ -27,7 +27,7 @@ describe('CommerceService.fulfil', () => {
       academyOrder: { findUnique: jest.fn().mockResolvedValue(order) },
       $transaction: (fn: (t: typeof tx) => unknown) => fn(tx),
     };
-    return { service: new CommerceService(db as never, {} as never), tx };
+    return { service: new CommerceService(db as never, {} as never, {} as never), tx };
   };
 
   it('grants a PURCHASE enrollment once when the claim wins', async () => {
@@ -116,7 +116,7 @@ describe('CommerceService free offers', () => {
     };
     const razorpay = { createOrder: jest.fn() };
     return {
-      service: new CommerceService(db as never, razorpay as never),
+      service: new CommerceService(db as never, razorpay as never, {} as never),
       tx,
       razorpay,
     };

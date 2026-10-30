@@ -77,11 +77,14 @@ describe('school-admin settings — /auth/verify-password + /auth/update-passwor
 
   it('POST /auth/update-password succeeds with the correct current_password and a strong new_password, and the new password then verifies', async () => {
     const newPassword = 'NewStrongPass1';
-    await request(app.getHttpServer())
+    const changed = await request(app.getHttpServer())
       .post('/auth/update-password')
       .set(...auth)
       .send({ current_password: fixture.schoolAdmin.password, new_password: newPassword })
       .expect(201);
+    // A password change signs out every session (tokenVersion bump + session
+    // revoke); the caller's own session continues on the re-issued token.
+    auth = ['Authorization', `Bearer ${changed.body.tokens.accessToken}`];
 
     const verifyOld = await request(app.getHttpServer())
       .post('/auth/verify-password')
@@ -103,7 +106,10 @@ describe('school-admin settings — /auth/verify-password + /auth/update-passwor
       .post('/auth/update-password')
       .set(...auth)
       .send({ current_password: newPassword, new_password: fixture.schoolAdmin.password })
-      .expect(201);
+      .expect(201)
+      .then((r) => {
+        auth = ['Authorization', `Bearer ${r.body.tokens.accessToken}`];
+      });
   });
 
   it('rejects unauthenticated requests to both endpoints', async () => {

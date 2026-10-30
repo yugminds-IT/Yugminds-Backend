@@ -61,6 +61,7 @@ describe('AdminTeachersService.create — assigned_from/assigned_until', () => {
       db as unknown as DatabaseService,
       {} as unknown as AuthCacheService,
       {} as unknown as RefreshTokenStoreService,
+      { revokeMany: jest.fn() } as never,
     );
   });
 
@@ -161,6 +162,7 @@ describe('AdminTeachersService.create — working days vs school operatingDays',
       db as unknown as DatabaseService,
       {} as unknown as AuthCacheService,
       {} as unknown as RefreshTokenStoreService,
+      { revokeMany: jest.fn() } as never,
     );
   });
 
@@ -202,6 +204,7 @@ describe('AdminTeachersService.list — tenant scoping', () => {
       db as unknown as DatabaseService,
       {} as unknown as AuthCacheService,
       {} as unknown as RefreshTokenStoreService,
+      { revokeMany: jest.fn() } as never,
     );
   });
 

@@ -2,11 +2,16 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
-import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { DatabaseService } from '../database/database.service';
 import { RealtimeGateway } from '../common/realtime/realtime.gateway';
 import { AuthCacheService } from './auth-cache.service';
+import { SessionsService } from './sessions/sessions.service';
 import { RefreshTokenStoreService } from './refresh-token-store.service';
 import { SystemControlsService } from '../admin/system-controls/system-controls.service';
 
@@ -47,6 +52,14 @@ describe('AuthService', () => {
     revoke: jest.fn(),
     revokeAll: jest.fn(),
   };
+  const mockSessions = {
+    create: jest.fn().mockResolvedValue('sid-1'),
+    isAlive: jest.fn().mockResolvedValue(true),
+    touch: jest.fn(),
+    revoke: jest.fn().mockResolvedValue(true),
+    revokeMany: jest.fn().mockResolvedValue(2),
+    list: jest.fn().mockResolvedValue([]),
+  };
   const mockSystemControls = {
     isMaintenanceActive: jest.fn().mockResolvedValue({ active: false, message: '' }),
   };
@@ -62,6 +75,7 @@ describe('AuthService', () => {
         { provide: AuthCacheService, useValue: mockAuthCache },
         { provide: RefreshTokenStoreService, useValue: mockRefreshTokenStore },
         { provide: SystemControlsService, useValue: mockSystemControls },
+        { provide: SessionsService, useValue: mockSessions },
       ],
     }).compile();
 
@@ -101,6 +115,9 @@ describe('AuthService', () => {
       ).resolves.not.toBeUndefined();
       expect(mockDb.user.update).toHaveBeenCalled();
       expect(mockRefreshTokenStore.revokeAll).toHaveBeenCalledWith(userId);
+      // every other device is signed out; the caller gets a fresh session
+      expect(mockSessions.revokeMany).toHaveBeenCalledWith('lms', userId);
+      expect(mockSessions.create).toHaveBeenCalled();
     });
 
     it('rejects a password missing an uppercase letter (matches client-side rule)', async () => {
@@ -153,7 +170,7 @@ describe('AuthService', () => {
             isSuperAdmin: boolean;
             tenantId: string | null;
             tokenVersion: number;
-          }) => Promise<{ accessToken: string; refreshToken: string }>;
+          }, sid: string) => Promise<{ accessToken: string; refreshToken: string }>;
         }
       ).generateTokens({
         id: 1,
@@ -162,11 +179,11 @@ describe('AuthService', () => {
         isSuperAdmin: true,
         tenantId: null,
         tokenVersion: 0,
-      });
+      }, 'sid-1');
 
       expect(mockJwtService.signAsync).toHaveBeenNthCalledWith(
         1,
-        expect.objectContaining({ sub: 1, role: 'admin' }),
+        expect.objectContaining({ sub: 1, role: 'admin', sid: 'sid-1' }),
         expect.objectContaining({
           secret: 'access-secret',
           expiresIn: '15m',
@@ -184,6 +201,39 @@ describe('AuthService', () => {
         accessToken: 'access-jwt',
         refreshToken: 'refresh-jwt',
       });
+    });
+  });
+
+  describe('device sessions', () => {
+    it('logout revokes only the calling session and never bumps tokenVersion', async () => {
+      await service.logout(7, 'sid-1');
+      expect(mockSessions.revoke).toHaveBeenCalledWith('lms', 7, 'sid-1');
+      expect(mockDb.user.update).not.toHaveBeenCalled();
+    });
+
+    it('revokeSession 404s when the session is not the caller\'s', async () => {
+      mockSessions.revoke.mockResolvedValueOnce(false);
+      await expect(service.revokeSession(7, 'other')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('revokeOtherSessions spares the current sid; revokeAllSessions spares none', async () => {
+      await service.revokeOtherSessions(7, 'sid-1');
+      expect(mockSessions.revokeMany).toHaveBeenLastCalledWith('lms', 7, 'sid-1');
+      await service.revokeAllSessions(7);
+      expect(mockSessions.revokeMany).toHaveBeenLastCalledWith('lms', 7);
+    });
+
+    it('refresh rejects tokens with no sid (issued before device sessions)', async () => {
+      mockJwtService.verifyAsync.mockResolvedValueOnce({ sub: 7 });
+      await expect(service.refresh('tok')).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('refresh rejects a revoked session', async () => {
+      mockJwtService.verifyAsync.mockResolvedValueOnce({ sub: 7, sid: 's' });
+      mockSessions.isAlive.mockResolvedValueOnce(false);
+      await expect(service.refresh('tok')).rejects.toThrow(UnauthorizedException);
     });
   });
 });

@@ -9,6 +9,7 @@ import * as bcrypt from 'bcrypt';
 import { validatePasswordStrength } from '../../common/utils/password.util';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
 import {
   normalizeWeekdays,
@@ -128,6 +129,7 @@ export class AdminTeachersService {
     private readonly db: DatabaseService,
     private readonly authCache: AuthCacheService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly sessions: SessionsService,
   ) {}
 
   private buildGradesAssignedFromSectionAssignments(
@@ -503,12 +505,27 @@ export class AdminTeachersService {
     effectiveFrom: Date,
     actorId?: number,
   ): Promise<void> {
-    await this.assertEffectiveFromNotBeforeStart(db, teacherId, schoolId, effectiveFrom);
+    await this.assertEffectiveFromNotBeforeStart(
+      db,
+      teacherId,
+      schoolId,
+      effectiveFrom,
+    );
     await db.teacherWorkingDaysHistory.upsert({
       where: {
-        teacherId_schoolId_effectiveFrom: { teacherId, schoolId, effectiveFrom },
+        teacherId_schoolId_effectiveFrom: {
+          teacherId,
+          schoolId,
+          effectiveFrom,
+        },
       },
-      create: { teacherId, schoolId, workingDays, effectiveFrom, createdByUserId: actorId },
+      create: {
+        teacherId,
+        schoolId,
+        workingDays,
+        effectiveFrom,
+        createdByUserId: actorId,
+      },
       update: { workingDays },
     });
   }
@@ -663,7 +680,10 @@ export class AdminTeachersService {
           `assigned_until must not be before assigned_from for school ${schoolId}`,
         );
       }
-      await this.assertWorkingDaysWithinSchoolOperatingDays(schoolId, workingDays);
+      await this.assertWorkingDaysWithinSchoolOperatingDays(
+        schoolId,
+        workingDays,
+      );
 
       const sectionIdsToAssign: string[] = [];
       for (const gs of gradeSectionsAssigned) {
@@ -777,6 +797,7 @@ export class AdminTeachersService {
     // Invalidate stale sessions when password is changed
     if (rawPassword) {
       await this.refreshTokenStore.revokeAll(teacherId);
+      await this.sessions.revokeMany('lms', teacherId);
     }
     const experienceRaw = body.experience as string | undefined;
     const experienceYears = body.experience_years as number | undefined;
@@ -882,7 +903,10 @@ export class AdminTeachersService {
             `assigned_until must not be before assigned_from for school ${schoolId}`,
           );
         }
-        await this.assertWorkingDaysWithinSchoolOperatingDays(schoolId, workingDays);
+        await this.assertWorkingDaysWithinSchoolOperatingDays(
+          schoolId,
+          workingDays,
+        );
 
         if (changed) {
           await this.assertEffectiveFromNotBeforeStart(
@@ -922,9 +946,19 @@ export class AdminTeachersService {
             ? [
                 this.db.teacherWorkingDaysHistory.upsert({
                   where: {
-                    teacherId_schoolId_effectiveFrom: { teacherId, schoolId, effectiveFrom },
+                    teacherId_schoolId_effectiveFrom: {
+                      teacherId,
+                      schoolId,
+                      effectiveFrom,
+                    },
                   },
-                  create: { teacherId, schoolId, workingDays, effectiveFrom, createdByUserId: actorId },
+                  create: {
+                    teacherId,
+                    schoolId,
+                    workingDays,
+                    effectiveFrom,
+                    createdByUserId: actorId,
+                  },
                   update: { workingDays },
                 }),
               ]
@@ -1004,6 +1038,7 @@ export class AdminTeachersService {
           data: { isActive: false, tokenVersion: { increment: 1 } },
         });
         await this.authCache.invalidate(ids);
+        await this.sessions.revokeMany('lms', ids);
         return { success: true, updated: result.count };
       }
       case 'activate': {
@@ -1023,6 +1058,7 @@ export class AdminTeachersService {
           },
         });
         await this.authCache.invalidate(ids);
+        await this.sessions.revokeMany('lms', ids);
         return { success: true, deleted: result.count };
       }
       default:
@@ -1045,6 +1081,7 @@ export class AdminTeachersService {
         },
       });
       await this.authCache.invalidate(parseInt(id, 10));
+      await this.sessions.revokeMany('lms', parseInt(id, 10));
       return result;
     } catch (err: unknown) {
       // P2025 = record already deleted — treat as success

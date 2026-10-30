@@ -1306,3 +1306,25 @@ model AcademyBooking {
   @@index([learnerId, startsAt])
   @@index([status, startsAt])
 }
+
+// One row per signed-in device (LMS user or Academy account). The row id is the
+// `sid` claim inside the access/refresh JWTs; revoking the row kills that
+// device's tokens. subjectId is a string so both Int user ids and Academy uuids fit.
+model LoginSession {
+  id          String    @id @default(uuid())
+  subjectType String // 'lms' | 'academy'
+  subjectId   String
+  browser     String?
+  os          String?
+  deviceType  String? // desktop | mobile | tablet
+  ip          String?
+  location    String?
+  userAgent   String?   @db.Text
+  createdAt   DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
+  expiresAt   DateTime
+  revokedAt   DateTime?
+
+  @@index([subjectType, subjectId, revokedAt])
+  @@index([expiresAt])
+}

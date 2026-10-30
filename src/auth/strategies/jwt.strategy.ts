@@ -5,6 +5,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '../types/role.type';
 import { AuthCacheService } from '../auth-cache.service';
+import { SessionsService } from '../sessions/sessions.service';
 
 export interface JwtPayload {
   sub: number;
@@ -13,6 +14,8 @@ export interface JwtPayload {
   isSuperAdmin: boolean;
   tokenVersion?: number;
   tenantId?: string;
+  sid?: string;
+  impersonatorId?: number;
   iat?: number;
   exp?: number;
 }
@@ -23,6 +26,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
     private readonly authCache: AuthCacheService,
+    private readonly sessions: SessionsService,
   ) {
     const accessSecret = config.get<string>('JWT_ACCESS_SECRET');
     if (!accessSecret || !String(accessSecret).trim()) {
@@ -36,6 +40,16 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
   }
 
   async validate(payload: JwtPayload) {
+    // Every device login carries a session id; revoking that session ends the
+    // token immediately. Impersonation tokens are short-lived and sessionless.
+    if (!payload.impersonatorId) {
+      if (
+        !payload.sid ||
+        !(await this.sessions.isAlive(payload.sid, 'lms', payload.sub))
+      ) {
+        throw new UnauthorizedException('Session ended');
+      }
+    }
     const cached = await this.authCache.get(payload.sub);
     const jwtTokenVersion = payload.tokenVersion ?? 0;
 
@@ -53,6 +67,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         role: cached.role,
         isSuperAdmin: cached.isSuperAdmin,
         tenantId: cached.tenantId ?? undefined,
+        sid: payload.sid,
       };
     }
 
@@ -88,6 +103,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       role: user.role,
       isSuperAdmin: user.isSuperAdmin,
       tenantId: user.tenantId ?? undefined,
+      sid: payload.sid,
     };
   }
 }

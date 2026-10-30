@@ -7,6 +7,7 @@ import * as bcrypt from 'bcrypt';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 import { AuthCacheService } from '../../auth/auth-cache.service';
 import { ok } from '../../common/api-response';
 import { validatePasswordStrength } from '../../common/utils/password.util';
@@ -17,6 +18,7 @@ export class AdminSchoolAdminsService {
     private readonly db: DatabaseService,
     private readonly authService: AuthService,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly sessions: SessionsService,
     private readonly authCache: AuthCacheService,
   ) {}
 
@@ -231,6 +233,7 @@ export class AdminSchoolAdminsService {
       });
       // Invalidate all existing sessions so stale tokens can't be used
       await this.refreshTokenStore.revokeAll(sa.userId);
+      await this.sessions.revokeMany('lms', sa.userId);
       // The JWT strategy's 120s auth cache short-circuits the DB lookup and
       // would keep validating against the pre-bump tokenVersion until it
       // expires on its own — invalidate it so the bump above takes effect
@@ -252,7 +255,10 @@ export class AdminSchoolAdminsService {
           ? { isActive }
           : { isActive, tokenVersion: { increment: 1 } },
       });
-      if (!isActive) await this.authCache.invalidate(sa.userId);
+      if (!isActive) {
+        await this.authCache.invalidate(sa.userId);
+        await this.sessions.revokeMany('lms', sa.userId);
+      }
       updatedIsActive = isActive;
     } else {
       updatedIsActive = sa.user.isActive;

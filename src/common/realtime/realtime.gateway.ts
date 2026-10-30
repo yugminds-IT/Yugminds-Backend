@@ -15,9 +15,12 @@ import { DatabaseService } from '../../database/database.service';
 import { tenantContext } from '../../tenants/tenant-context';
 import { Role } from '@prisma/client';
 import { getAllowedOrigins } from '../allowed-origins';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 
 type JwtPayload = {
   sub: number;
+  sid?: string;
+  impersonatorId?: number;
   exp?: number;
   iat?: number;
 };
@@ -57,7 +60,16 @@ export class RealtimeGateway
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
-  ) {}
+    private readonly sessions: SessionsService,
+  ) {
+    // A revoked device must stop receiving live data, not just fail its next API call.
+    this.sessions.onRevoked((sids) => {
+      const dead = new Set(sids);
+      for (const socket of this.server?.sockets?.sockets?.values() ?? []) {
+        if (dead.has(socket.data.sid as string)) socket.disconnect(true);
+      }
+    });
+  }
 
   private getRoom(userId: number): string {
     return `user:${userId}`;
@@ -95,6 +107,16 @@ export class RealtimeGateway
       throw new UnauthorizedException('Invalid socket token payload');
     }
 
+    // Same rule as JwtStrategy: a live device session (impersonation tokens are sessionless).
+    if (
+      !payload.impersonatorId &&
+      (!payload.sid ||
+        !(await this.sessions.isAlive(payload.sid, 'lms', payload.sub)))
+    ) {
+      throw new UnauthorizedException('Session ended');
+    }
+    client.data.sid = payload.sid;
+
     const user = await this.db.user.findUnique({
       where: { id: payload.sub },
       select: { id: true, tokenVersion: true, isActive: true },
@@ -126,7 +148,10 @@ export class RealtimeGateway
     const data = await tenantContext.runSuperAdmin(() =>
       this._computeDashboardStats(userId),
     );
-    this.statsCache.set(userId, { data, expiry: Date.now() + this.STATS_TTL_MS });
+    this.statsCache.set(userId, {
+      data,
+      expiry: Date.now() + this.STATS_TTL_MS,
+    });
     return data;
   }
 
@@ -154,11 +179,11 @@ export class RealtimeGateway
         // See AdminDashboardService.getStats() — TeacherLeave rows have no
         // enforced FK, so a plain status count can include orphaned rows
         // left behind by a hard-deleted teacher or school.
-        this.db
-          .$queryRaw<
-            Array<{ count: bigint }>
-          >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
-          .then((rows) => Number(rows[0]?.count ?? 0)),
+        this.db.$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`.then(
+          (rows) => Number(rows[0]?.count ?? 0),
+        ),
       ]);
       return {
         totalSchools,
@@ -206,11 +231,11 @@ export class RealtimeGateway
         // schoolId here is real (sourced from the requesting school_admin's
         // own SchoolAdmin row), but teacherId can still be orphaned — see
         // note above.
-        this.db
-          .$queryRaw<
-            Array<{ count: bigint }>
-          >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`
-          .then((rows) => Number(rows[0]?.count ?? 0)),
+        this.db.$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`.then(
+          (rows) => Number(rows[0]?.count ?? 0),
+        ),
         this.db.attendance.groupBy({
           by: ['status'],
           where: { schoolId, date: { gte: since } },

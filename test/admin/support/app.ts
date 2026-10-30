@@ -1,6 +1,7 @@
 import './env';
 import { Test } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
+import cookieParser from 'cookie-parser';
 import { AppModule } from '../../../src/app.module';
 import { AllExceptionsFilter } from '../../../src/common/filters/all-exceptions.filter';
 
@@ -16,6 +17,7 @@ export async function bootstrapApp(): Promise<INestApplication> {
   }).compile();
 
   const app = moduleFixture.createNestApplication();
+  app.use(cookieParser()); // same as main.ts
   app.useGlobalPipes(new ValidationPipe({ whitelist: true }));
   app.useGlobalFilters(new AllExceptionsFilter());
   await app.init();

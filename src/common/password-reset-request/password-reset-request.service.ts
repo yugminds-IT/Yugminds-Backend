@@ -3,6 +3,7 @@ import { DatabaseService } from '../../database/database.service';
 import * as bcrypt from 'bcrypt';
 import { RealtimeGateway } from '../realtime/realtime.gateway';
 import { RefreshTokenStoreService } from '../../auth/refresh-token-store.service';
+import { SessionsService } from '../../auth/sessions/sessions.service';
 
 export interface ListOptions {
   status?: string;
@@ -30,6 +31,7 @@ export class PasswordResetRequestService {
     private readonly db: DatabaseService,
     private readonly realtimeGateway: RealtimeGateway,
     private readonly refreshTokenStore: RefreshTokenStoreService,
+    private readonly sessions: SessionsService,
   ) {}
 
   private async hashPassword(password: string): Promise<string> {
@@ -73,7 +75,9 @@ export class PasswordResetRequestService {
 
       where.OR = [
         { user: { email: { contains: q, mode: 'insensitive' } } },
-        { user: { profile: { fullName: { contains: q, mode: 'insensitive' } } } },
+        {
+          user: { profile: { fullName: { contains: q, mode: 'insensitive' } } },
+        },
         { approvedByUser: { email: { contains: q, mode: 'insensitive' } } },
         {
           approvedByUser: {
@@ -222,6 +226,7 @@ export class PasswordResetRequestService {
 
       // Invalidate all existing sessions so the old password can't be used
       await this.refreshTokenStore.revokeAll(request.userId);
+      await this.sessions.revokeMany('lms', request.userId);
 
       // Mark request as approved
       await this.db.passwordResetRequest.update({
