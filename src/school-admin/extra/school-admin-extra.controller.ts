@@ -3156,6 +3156,7 @@ export class SchoolAdminExtraController {
       const x = normalizeIn(s);
       if (x === 'approved') return 'Approved';
       if (x === 'rejected') return 'Rejected';
+      if (x === 'cancelled') return 'Cancelled';
       return 'Pending';
     };
     return {
@@ -3281,6 +3282,9 @@ export class SchoolAdminExtraController {
       where: { id, schoolId },
     });
     if (!leave) throw new BadRequestException('Leave not found');
+    if (leave.status === 'cancelled') {
+      throw new BadRequestException('This leave request was cancelled by the teacher.');
+    }
     // School admins can only act on a leave until 11pm IST the day before it
     // starts (same day for a leave starting today); after that only a system
     // admin can approve/reject it.
@@ -3325,7 +3329,12 @@ export class SchoolAdminExtraController {
       }
       assertSchoolAdminStageOpen(leave);
     }
-    const status = emergency && statusRaw === 'approved' ? 'pending' : statusRaw;
+    // If the admin already approved (admin-filed leave), the school admin's
+    // approval is the second one and finalises the leave.
+    const status =
+      emergency && statusRaw === 'approved' && leave.adminStatus !== 'approved'
+        ? 'pending'
+        : statusRaw;
 
     const updated = await this.db.teacherLeave.update({
       where: { id },
@@ -3391,7 +3400,7 @@ export class SchoolAdminExtraController {
 
     // Stage 1 of an emergency leave approved: tell the teacher it is now
     // waiting on the admin, and tell the admins their approval is needed.
-    if (emergency && statusRaw === 'approved') {
+    if (emergency && statusRaw === 'approved' && status === 'pending') {
       await this.notificationsService.sendOne(user.id, updated.teacherId, {
         title: 'Emergency leave: approved by school admin',
         message: 'Your school admin approved your emergency leave. It is now waiting for the admin\'s approval — please contact the admin to request it.',

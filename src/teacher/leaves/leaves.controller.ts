@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
@@ -24,6 +24,12 @@ export class TeacherLeavesController {
       reason: body.reason as string | undefined,
       substitute_required: body.substitute_required as boolean | undefined,
     });
+  }
+
+  /** Teacher cancels their own pending (or not-yet-started approved) leave. */
+  @Patch(':id/cancel')
+  cancel(@CurrentUser() user: { id: number }, @Param('id') id: string) {
+    return this.service.cancel(user.id, id);
   }
 
   @Get()

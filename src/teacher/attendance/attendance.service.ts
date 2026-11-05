@@ -200,6 +200,7 @@ export class TeacherAttendanceService {
         schoolId: { in: workingSchoolIds },
         startDate: { lte: dateEnd },
         endDate: { gte: dateStart },
+        status: { not: 'cancelled' }, // a cancelled request is not a leave
       },
     });
 

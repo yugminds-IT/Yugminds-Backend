@@ -2,6 +2,7 @@ import {
   Injectable,
   BadRequestException,
   ForbiddenException,
+  NotFoundException,
 } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
@@ -169,6 +170,66 @@ export class TeacherLeavesService {
   }
 
   /**
+   * Teacher cancels their own leave request. Allowed while it is still pending,
+   * or while an approved leave has not started yet (it can't be cancelled once
+   * it has begun — attendance for those days is already settled). Cancelling an
+   * approved leave clears its Leave-Approved days. Rejected/cancelled leaves
+   * can't be cancelled again.
+   */
+  async cancel(teacherId: number, id: string) {
+    const leave = await this.db.teacherLeave.findFirst({ where: { id, teacherId } });
+    if (!leave) throw new NotFoundException('Leave request not found');
+    if (leave.status === 'cancelled') {
+      throw new BadRequestException('This leave request is already cancelled.');
+    }
+    if (leave.status === 'rejected') {
+      throw new BadRequestException('A rejected leave request cannot be cancelled.');
+    }
+    const startStr = leave.startDate.toISOString().split('T')[0];
+    if (leave.status === 'approved' && startStr <= getTodayIstDateStr()) {
+      throw new BadRequestException(
+        'An approved leave can only be cancelled before it starts. Please contact your administrator.',
+      );
+    }
+
+    await this.db.teacherLeave.update({ where: { id }, data: { status: 'cancelled' } });
+    if (leave.status === 'approved') {
+      // Clear the days this leave had marked Leave-Approved (all in the future here).
+      await this.db.attendance.deleteMany({
+        where: {
+          teacherId,
+          schoolId: leave.schoolId,
+          date: { gte: leave.startDate, lte: leave.endDate },
+          status: 'Leave-Approved',
+        },
+      });
+    }
+
+    const teacher = await this.db.user.findUnique({
+      where: { id: teacherId },
+      select: { profile: { select: { fullName: true } }, email: true },
+    });
+    const teacherLabel = teacher?.profile?.fullName?.trim() || teacher?.email || 'A teacher';
+    const [schoolAdmins, adminUsers] = await Promise.all([
+      this.db.schoolAdmin.findMany({ where: { schoolId: leave.schoolId }, select: { userId: true } }),
+      this.db.user.findMany({ where: { role: Role.admin, isActive: true }, select: { id: true } }),
+    ]);
+    const recipientIds = [...new Set([...schoolAdmins.map((s) => s.userId), ...adminUsers.map((a) => a.id)])];
+    const endStr = leave.endDate.toISOString().split('T')[0];
+    await this.notifications.createManyRespectingPrefs(
+      recipientIds.map((userId) => ({
+        userId,
+        senderId: teacherId,
+        title: `Leave request cancelled: ${teacherLabel}`,
+        message: `${teacherLabel} cancelled their leave request (${startStr} to ${endStr}).`,
+        mode: 'teacher_leave',
+        allowReplies: false,
+      })),
+    );
+    return { leave: { id, status: 'Cancelled' } };
+  }
+
+  /**
    * List leave requests for the current teacher (optional filter by school_id).
    */
   async list(teacherId: number, schoolId?: string) {
@@ -192,7 +253,9 @@ export class TeacherLeavesService {
           ? 'Approved'
           : s === 'rejected'
             ? 'Rejected'
-            : s;
+            : s === 'cancelled'
+              ? 'Cancelled'
+              : s;
     return {
       leaves: leaves.map((l) => ({
         id: l.id,

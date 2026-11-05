@@ -9,6 +9,7 @@ import { NotificationsService } from '../../common/notifications/notifications.s
 import { Role } from '@prisma/client';
 import { assertAdminMayApproveEmergency, isEmergencyLeave, leaveStageFields, revertLeaveApprovedAttendance } from '../../common/utils/leave-rules.util';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed } from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class AdminLeavesService {
@@ -84,7 +85,9 @@ export class AdminLeavesService {
               ? 'Approved'
               : l.status === 'rejected'
                 ? 'Rejected'
-                : l.status,
+                : l.status === 'cancelled'
+                  ? 'Cancelled'
+                  : l.status,
         applied_at: l.createdAt.toISOString(),
         approved_by: l.approvedBy ?? undefined,
         // Real timestamps (the row's own updatedAt, which only changes when
@@ -127,6 +130,90 @@ export class AdminLeavesService {
   }
 
   /**
+   * System admin files an EMERGENCY leave on behalf of a teacher. Same strict
+   * rules as the school-admin version (reason required, start at most 2 days
+   * back, no time cutoff). The admin filing it is approval stage 2 (approved);
+   * the school admin must still approve (stage 1) before it becomes final and
+   * attendance changes — both must know and approve.
+   */
+  async createEmergency(
+    body: { teacher_id?: number | string; school_id?: string; start_date?: string; end_date?: string; reason?: string },
+    actorUserId: number,
+  ) {
+    const teacherId = Number(body?.teacher_id);
+    const { school_id, start_date, end_date, reason } = body ?? {};
+    if (!Number.isInteger(teacherId) || !school_id || !start_date || !end_date) {
+      throw new BadRequestException('teacher_id, school_id, start_date and end_date are required');
+    }
+    const start = new Date(start_date + 'T00:00:00.000Z');
+    const end = new Date(end_date + 'T23:59:59.999Z');
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
+    }
+    if (start > end) throw new BadRequestException('End date must be on or after start date');
+    assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
+
+    const assigned = await this.db.teacherSchool.findFirst({
+      where: { teacherId, schoolId: school_id },
+      select: { schoolId: true },
+    });
+    if (!assigned) throw new BadRequestException('Teacher is not assigned to this school');
+
+    const overlap = await this.db.teacherLeave.findFirst({
+      where: {
+        teacherId,
+        schoolId: school_id,
+        startDate: { lte: end },
+        endDate: { gte: start },
+        status: { in: ['pending', 'approved'] },
+      },
+      select: { id: true },
+    });
+    if (overlap) {
+      throw new BadRequestException('This teacher already has a pending or approved leave overlapping these dates.');
+    }
+
+    const leave = await this.db.teacherLeave.create({
+      data: {
+        teacherId,
+        schoolId: school_id,
+        startDate: start,
+        endDate: end,
+        reason: reason!.trim(),
+        leaveType: EMERGENCY_LEAVE_TYPE,
+        status: 'pending',
+        adminStatus: 'approved',
+        adminBy: String(actorUserId),
+        adminAt: new Date(),
+        schoolAdminStatus: 'pending',
+      },
+    });
+
+    const schoolAdmins = await this.db.schoolAdmin.findMany({
+      where: { schoolId: school_id },
+      select: { userId: true },
+    });
+    await this.notifications.sendOne(actorUserId, teacherId, {
+      title: 'Emergency leave recorded — awaiting school admin approval',
+      message: `The admin recorded an emergency leave for ${start_date} to ${end_date} (reason: ${reason!.trim()}). It is approved by the admin and waiting for your school admin's approval — please contact them.`,
+      type: 'system_alert',
+      allowReplies: false,
+    });
+    await Promise.all(
+      schoolAdmins.map((sa) =>
+        this.notifications.sendOne(actorUserId, sa.userId, {
+          title: 'Emergency leave awaiting your approval',
+          message: `The admin recorded an emergency leave for one of your teachers (${start_date} to ${end_date}). Your approval is needed to finalise it.`,
+          type: 'system_alert',
+          allowReplies: false,
+        }),
+      ),
+    );
+    await this.realtimeGateway.emitDashboardStatsForUsers([teacherId, ...schoolAdmins.map((s) => s.userId)]);
+    return { success: true, leave_id: leave.id };
+  }
+
+  /**
    * Update a leave request (approve or reject). Body: id, status ('Approved' | 'Rejected'), admin_remarks?, approved_by?
    */
   async update(body: {
@@ -155,6 +242,9 @@ export class AdminLeavesService {
 
     const leave = await this.db.teacherLeave.findUnique({ where: { id } });
     if (!leave) throw new NotFoundException('Leave request not found');
+    if (leave.status === 'cancelled') {
+      throw new BadRequestException('This leave request was cancelled by the teacher.');
+    }
     // Emergency leave: the admin is approval stage 2 — approving requires the
     // school admin's approval first. Rejecting is always allowed.
     const emergency = isEmergencyLeave(leave);

@@ -179,4 +179,23 @@ describe('school admin: approving leave (11pm deadline vs emergency)', () => {
       ctl.updateLeave(user, 'E', { status: 'pending' }),
     ).rejects.toThrow(/approved or rejected/i);
   });
+  it('school admin approval FINALISES an admin-filed emergency leave (admin already approved) and marks attendance', async () => {
+    const { ctl, db, attendanceUpsert } = make({
+      leave: { ...emergencyLeave, adminStatus: 'approved' },
+    });
+    await ctl.updateLeave(user, 'E', { action: 'approve' });
+    expect(db.teacherLeave.update.mock.calls[0][0].data).toMatchObject({
+      status: 'approved',
+      schoolAdminStatus: 'approved',
+    });
+    expect(attendanceUpsert).toHaveBeenCalled();
+  });
+  it('a cancelled leave cannot be approved or rejected', async () => {
+    const { ctl } = make({
+      leave: { ...regular, id: 'C', status: 'cancelled' },
+    });
+    await expect(
+      ctl.updateLeave(user, 'C', { action: 'approve' }),
+    ).rejects.toThrow(/cancelled/i);
+  });
 });

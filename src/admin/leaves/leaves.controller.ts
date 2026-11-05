@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Put, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Put, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Role } from '@prisma/client';
@@ -16,6 +16,24 @@ export class AdminLeavesController {
   @Get()
   list(@Query('school_id') schoolId?: string) {
     return this.service.list(schoolId);
+  }
+
+  /** Emergency leave filed on behalf of a teacher (admin = approval stage 2). */
+  @Post()
+  createEmergency(
+    @Body() body: Record<string, unknown>,
+    @CurrentUser() user: CurrentUserPayload,
+  ) {
+    return this.service.createEmergency(
+      {
+        teacher_id: body.teacher_id as number | string | undefined,
+        school_id: body.school_id as string | undefined,
+        start_date: body.start_date as string | undefined,
+        end_date: body.end_date as string | undefined,
+        reason: body.reason as string | undefined,
+      },
+      user.id,
+    );
   }
 
   @Put()

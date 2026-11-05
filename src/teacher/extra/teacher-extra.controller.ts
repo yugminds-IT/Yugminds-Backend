@@ -544,6 +544,7 @@ export class TeacherExtraController {
           schoolId: { in: schoolIds },
           startDate: { lte: safeTo },
           endDate: { gte: safeFrom },
+          status: { not: 'cancelled' },
         },
         select: { status: true, createdAt: true },
       }),
