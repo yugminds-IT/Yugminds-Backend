@@ -7,6 +7,8 @@ import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
+import { assertAdminMayApproveEmergency, isEmergencyLeave, leaveStageFields, revertLeaveApprovedAttendance } from '../../common/utils/leave-rules.util';
+import { getTodayIstDateStr } from '../../common/utils/date.util';
 
 @Injectable()
 export class AdminLeavesService {
@@ -69,7 +71,8 @@ export class AdminLeavesService {
         id: l.id,
         teacher_id: String(l.teacherId),
         school_id: l.schoolId,
-        leave_type: 'Leave',
+        leave_type: (l as { leaveType?: string }).leaveType ?? 'Leave',
+        ...leaveStageFields(l),
         start_date: l.startDate.toISOString().split('T')[0],
         end_date: l.endDate.toISOString().split('T')[0],
         total_days: totalDays,
@@ -152,11 +155,20 @@ export class AdminLeavesService {
 
     const leave = await this.db.teacherLeave.findUnique({ where: { id } });
     if (!leave) throw new NotFoundException('Leave request not found');
+    // Emergency leave: the admin is approval stage 2 — approving requires the
+    // school admin's approval first. Rejecting is always allowed.
+    const emergency = isEmergencyLeave(leave);
+    if (emergency && normalized === 'approved') assertAdminMayApproveEmergency(leave);
 
     const updated = await this.db.teacherLeave.update({
       where: { id },
       data: {
         status: normalized === 'approved' ? 'approved' : 'rejected',
+        ...(emergency && {
+          adminStatus: normalized,
+          adminBy: actor_user_id ?? approved_by ?? null,
+          adminAt: new Date(),
+        }),
         adminRemarks: admin_remarks ?? leave.adminRemarks,
         approvedBy: actor_user_id ?? approved_by ?? leave.approvedBy,
       },
@@ -233,19 +245,7 @@ export class AdminLeavesService {
     }
 
     if (normalized === 'rejected') {
-      const rejStart = new Date(updated.startDate);
-      rejStart.setUTCHours(0, 0, 0, 0);
-      const rejEnd = new Date(updated.endDate);
-      rejEnd.setUTCHours(23, 59, 59, 999);
-      await this.db.attendance.updateMany({
-        where: {
-          teacherId: updated.teacherId,
-          schoolId: updated.schoolId,
-          date: { gte: rejStart, lte: rejEnd },
-          status: 'Leave-Approved',
-        },
-        data: { status: 'Unreported' },
-      });
+      await revertLeaveApprovedAttendance(this.db, updated, getTodayIstDateStr());
     }
 
     // Notify the teacher when their leave is approved or rejected (in-app).

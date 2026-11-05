@@ -4,7 +4,14 @@ import { TeacherReportsService } from './reports.service';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
-import { getTodayIstDateOnly, getTodayIstDateStr } from '../../common/utils/date.util';
+import { getTodayIstDateOnly, getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+
+// "Today" is frozen at the fixture date (2020-01-06): reports are same-day only.
+jest.mock('../../common/utils/date.util', () => ({
+  ...jest.requireActual('../../common/utils/date.util'),
+  getTodayIstDateStr: () => '2020-01-06',
+  isBeforeAttendanceCutoff: jest.fn(() => true),
+}));
 
 describe('TeacherReportsService.create', () => {
   let service: TeacherReportsService;
@@ -133,6 +140,13 @@ describe('TeacherReportsService.create', () => {
     expect(db.teacherReport.create).not.toHaveBeenCalled();
   });
 
+  it('rejects a backdated report — reports are for today only', async () => {
+    await expect(
+      service.create(1, { ...baseBody, date: '2020-01-05' }),
+    ).rejects.toThrow(/only be submitted for today/i);
+    expect(db.teacherReport.create).not.toHaveBeenCalled();
+  });
+
   it('rejects a duplicate report for the same teacher+school+date+period', async () => {
     db.teacherReport.findFirst.mockResolvedValue({
       id: 'existing-report',
@@ -217,6 +231,22 @@ describe('TeacherReportsService.create', () => {
   });
 
   describe('attendance auto-marking', () => {
+    it('does NOT mark Present for a report submitted after the 8pm IST cutoff (report is still saved)', async () => {
+      (isBeforeAttendanceCutoff as jest.Mock).mockReturnValueOnce(false);
+      db.classSchedule.findMany.mockResolvedValue([]);
+      const result = await service.create(1, baseBody);
+      expect(db.teacherReport.create).toHaveBeenCalled();
+      expect(db.attendance.upsert).not.toHaveBeenCalled();
+      expect(result.attendance_marked_present).toBe(false);
+    });
+
+    it('does not filter rejected reports when checking coverage (rejection never affects attendance)', async () => {
+      db.classSchedule.findMany.mockResolvedValue([{ periodId: 'period-1' }]);
+      db.teacherReport.count.mockResolvedValue(1);
+      await service.create(1, baseBody);
+      expect(db.teacherReport.count.mock.calls[0][0].where.status).toBeUndefined();
+    });
+
     it('marks attendance Present when the teacher has no schedule that day (any report counts)', async () => {
       db.classSchedule.findMany.mockResolvedValue([]);
       const result = await service.create(1, baseBody);

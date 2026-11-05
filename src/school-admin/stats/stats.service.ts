@@ -23,6 +23,7 @@ export class SchoolAdminStatsService {
         activeCourses: 0,
         pendingReports: 0,
         pendingLeaves: 0,
+        pendingEmergencyLeaves: 0,
         averageAttendance: 0,
       };
     }
@@ -36,6 +37,7 @@ export class SchoolAdminStatsService {
       activeCourses,
       pendingReports,
       pendingLeaves,
+      pendingEmergencyLeaves,
       attendanceAgg,
     ] = await Promise.all([
       this.db.studentSchool.count({ where: { schoolId, isActive: true } }),
@@ -57,6 +59,12 @@ export class SchoolAdminStatsService {
       this.db.$queryRaw<
         Array<{ count: bigint }>
       >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending'`.then(
+        (rows) => Number(rows[0]?.count ?? 0),
+      ),
+      // Of those, how many are emergency leaves (shown separately on the dashboard).
+      this.db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending' AND tl."leaveType" = 'Emergency'`.then(
         (rows) => Number(rows[0]?.count ?? 0),
       ),
       this.db.attendance.groupBy({
@@ -85,6 +93,7 @@ export class SchoolAdminStatsService {
       activeCourses,
       pendingReports,
       pendingLeaves,
+      pendingEmergencyLeaves,
       averageAttendance,
     };
   }

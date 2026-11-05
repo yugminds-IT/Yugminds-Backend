@@ -8,7 +8,7 @@ import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
-import { getTodayIstDateStr } from '../../common/utils/date.util';
+import { getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
 
 @Injectable()
 export class TeacherReportsService {
@@ -78,11 +78,15 @@ export class TeacherReportsService {
     if (isNaN(reportDate.getTime())) {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
-    // A report describes teaching that already happened — nothing client- or
-    // server-side previously stopped submitting one for an arbitrary future
-    // date (and its accompanying attendance side-effect).
-    if (dateStr > getTodayIstDateStr()) {
-      throw new BadRequestException('Cannot submit a report for a future date.');
+    // Reports are same-day only: attendance is settled by the 8pm cron, so a
+    // backdated (or future) report would silently rewrite a closed day.
+    // The comparison uses the SERVER clock (IST), never the browser's, so
+    // changing the device date/time can't backdate a report or beat the 8pm cutoff.
+    const serverToday = getTodayIstDateStr();
+    if (dateStr !== serverToday) {
+      throw new BadRequestException(
+        `Reports can only be submitted for today (${serverToday}). If this looks wrong, check your device's date and time.`,
+      );
     }
 
     // A teacher can only submit reports for a school they're actually
@@ -218,8 +222,9 @@ export class TeacherReportsService {
         // Mark attendance as Present only when ALL scheduled periods for
         // that day have been reported — this ensures the UI promise
         // ("submit all reports → marked Present") matches backend behavior.
-        // Exclude rejected reports from coverage so a rejected row does not
-        // count toward Present until it is resubmitted.
+        // Attendance depends only on SUBMITTING (before the 8pm IST cutoff) —
+        // a later rejection by an admin never affects it, so rejected rows
+        // still count as covered.
         const scheduledPeriods = await tx.classSchedule.findMany({
           where: { teacherId, schoolId, dayOfWeek, isActive: true },
           select: { periodId: true },
@@ -237,12 +242,13 @@ export class TeacherReportsService {
                   schoolId,
                   reportDate: { gte: dateOnly, lte: dateEnd },
                   periodId: { in: scheduledPeriodIds },
-                  status: { not: 'rejected' },
                 },
               })) >= scheduledPeriodIds.length;
 
         let marked = false;
-        if (allCovered) {
+        // After the cutoff the 8pm cron has already settled the day (Absent);
+        // a late report is still saved but does not turn the day Present.
+        if (allCovered && isBeforeAttendanceCutoff()) {
           // Never clobber an approved-leave day — a teacher on approved
           // leave who still submits a report for part of the day (e.g.
           // covering one class) must not have their leave status silently

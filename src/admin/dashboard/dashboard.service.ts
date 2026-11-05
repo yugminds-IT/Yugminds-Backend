@@ -22,6 +22,7 @@ export class AdminDashboardService {
       totalStudents,
       activeCourses,
       pendingLeaves,
+      pendingEmergencyLeaves,
     ] = await Promise.all([
       // Keep school totals aligned with Admin Schools Management,
       // which is tenant-backed and excludes orphan School rows.
@@ -38,6 +39,12 @@ export class AdminDashboardService {
           Array<{ count: bigint }>
         >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
         .then((rows) => Number(rows[0]?.count ?? 0)),
+      // Of those, how many are emergency leaves (shown separately on the dashboard).
+      this.db
+        .$queryRaw<
+          Array<{ count: bigint }>
+        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending' AND tl."leaveType" = 'Emergency'`
+        .then((rows) => Number(rows[0]?.count ?? 0)),
     ]);
 
     return {
@@ -47,6 +54,7 @@ export class AdminDashboardService {
         totalStudents,
         activeCourses,
         pendingLeaves,
+        pendingEmergencyLeaves,
       },
     };
   }

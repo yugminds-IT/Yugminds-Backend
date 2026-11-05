@@ -25,7 +25,8 @@ import { DataImportDto } from './dto/data-import.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
-import { getTodayIstDateOnly } from '../../common/utils/date.util';
+import { getTodayIstDateOnly, getTodayIstDateStr, isSchoolAdminLeaveDeadlinePassed } from '../../common/utils/date.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, applyApprovedLeaveToAttendance, revertLeaveApprovedAttendance, assertSchoolAdminStageOpen, isEmergencyLeave, leaveStageFields } from '../../common/utils/leave-rules.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import {
   WEEKDAY_NAMES,
@@ -3166,6 +3167,7 @@ export class SchoolAdminExtraController {
         end_date: l.endDate.toISOString(),
         reason: l.reason,
         leave_type: (l as { leaveType?: string }).leaveType ?? 'General',
+        ...leaveStageFields(l),
         status: toStatusOut(l.status),
         total_days: Math.max(
           1,
@@ -3279,6 +3281,14 @@ export class SchoolAdminExtraController {
       where: { id, schoolId },
     });
     if (!leave) throw new BadRequestException('Leave not found');
+    // School admins can only act on a leave until 11pm IST the day before it
+    // starts (same day for a leave starting today); after that only a system
+    // admin can approve/reject it.
+    if (isSchoolAdminLeaveDeadlinePassed(leave)) {
+      throw new ForbiddenException(
+        'The 11:00 PM deadline for school admins to act on this leave has passed. Please ask a system admin to approve or reject it.',
+      );
+    }
     const normalize = (s: string) => s.trim().toLowerCase();
     // An unrecognized action/status used to silently fall back to the
     // leave's current status and return 200 OK with no actual change —
@@ -3304,12 +3314,28 @@ export class SchoolAdminExtraController {
         "action must be 'approve' or 'reject' (or status must be 'approved'/'rejected'/'pending')",
       );
     }
-    const status = statusRaw;
+    // Emergency leave = two sequential approvals. The school admin is stage 1:
+    // approving only records their stage — the leave stays pending (and no
+    // attendance changes) until the system admin approves too. Rejecting at
+    // either stage rejects the whole leave.
+    const emergency = isEmergencyLeave(leave);
+    if (emergency) {
+      if (statusRaw === 'pending') {
+        throw new BadRequestException('An emergency leave can only be approved or rejected.');
+      }
+      assertSchoolAdminStageOpen(leave);
+    }
+    const status = emergency && statusRaw === 'approved' ? 'pending' : statusRaw;
 
     const updated = await this.db.teacherLeave.update({
       where: { id },
       data: {
         status,
+        ...(emergency && {
+          schoolAdminStatus: statusRaw,
+          schoolAdminBy: String(user.id),
+          schoolAdminAt: new Date(),
+        }),
         ...(body?.admin_remarks !== undefined && {
           adminRemarks: body.admin_remarks,
         }),
@@ -3323,46 +3349,9 @@ export class SchoolAdminExtraController {
       },
     });
 
-    // On approval, update attendance for the leave date range.
-    // Mark as Leave-Approved unless already Present.
+    // On approval, mark the leave's days Leave-Approved unless already Present.
     if (status === 'approved') {
-      const start = new Date(updated.startDate);
-      start.setUTCHours(0, 0, 0, 0);
-      const end = new Date(updated.endDate);
-      end.setUTCHours(0, 0, 0, 0);
-      for (
-        let d = new Date(start);
-        d.getTime() <= end.getTime();
-        d.setUTCDate(d.getUTCDate() + 1)
-      ) {
-        const day = new Date(d);
-        const existing = await this.db.attendance.findUnique({
-          where: {
-            teacherId_schoolId_date: {
-              teacherId: updated.teacherId,
-              schoolId: updated.schoolId,
-              date: day,
-            },
-          },
-        });
-        if (existing?.status === 'Present') continue;
-        await this.db.attendance.upsert({
-          where: {
-            teacherId_schoolId_date: {
-              teacherId: updated.teacherId,
-              schoolId: updated.schoolId,
-              date: day,
-            },
-          },
-          create: {
-            teacherId: updated.teacherId,
-            schoolId: updated.schoolId,
-            date: day,
-            status: 'Leave-Approved',
-          },
-          update: { status: 'Leave-Approved' },
-        });
-      }
+      await applyApprovedLeaveToAttendance(this.db, updated);
     }
 
     // On rejection, revert any Leave-Approved days from a prior approval
@@ -3370,19 +3359,7 @@ export class SchoolAdminExtraController {
     // otherwise those Attendance rows stayed permanently stuck showing the
     // teacher as on approved leave for a leave that's no longer approved.
     if (status === 'rejected') {
-      const rejStart = new Date(updated.startDate);
-      rejStart.setUTCHours(0, 0, 0, 0);
-      const rejEnd = new Date(updated.endDate);
-      rejEnd.setUTCHours(23, 59, 59, 999);
-      await this.db.attendance.updateMany({
-        where: {
-          teacherId: updated.teacherId,
-          schoolId: updated.schoolId,
-          date: { gte: rejStart, lte: rejEnd },
-          status: 'Leave-Approved',
-        },
-        data: { status: 'Unreported' },
-      });
+      await revertLeaveApprovedAttendance(this.db, updated, getTodayIstDateStr());
     }
 
     // Notify the teacher when their leave is approved or rejected (in-app).
@@ -3412,6 +3389,31 @@ export class SchoolAdminExtraController {
       });
     }
 
+    // Stage 1 of an emergency leave approved: tell the teacher it is now
+    // waiting on the admin, and tell the admins their approval is needed.
+    if (emergency && statusRaw === 'approved') {
+      await this.notificationsService.sendOne(user.id, updated.teacherId, {
+        title: 'Emergency leave: approved by school admin',
+        message: 'Your school admin approved your emergency leave. It is now waiting for the admin\'s approval — please contact the admin to request it.',
+        type: 'system_alert',
+        allowReplies: false,
+      });
+      const admins = await this.db.user.findMany({
+        where: { role: Role.admin, isActive: true },
+        select: { id: true },
+      });
+      await Promise.all(
+        admins.map((a) =>
+          this.notificationsService.sendOne(user.id, a.id, {
+            title: 'Emergency leave awaiting your approval',
+            message: 'A school admin approved a teacher\'s emergency leave. Your approval is needed to finalise it.',
+            type: 'system_alert',
+            allowReplies: false,
+          }),
+        ),
+      );
+    }
+
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
         where: { schoolId },
@@ -3428,6 +3430,96 @@ export class SchoolAdminExtraController {
       ...adminUsers.map((u) => u.id),
     ]);
     return { success: true };
+  }
+
+  /**
+   * School admin files an EMERGENCY leave on behalf of a teacher (e.g. the
+   * teacher phoned in). No time cutoff, but strict: reason required and the
+   * start can be at most 2 days back. The school admin filing it is approval
+   * stage 1; it stays pending until the system admin approves (stage 2), and
+   * only then are the days marked Leave-Approved.
+   */
+  @Post('leaves')
+  async createEmergencyLeave(
+    @CurrentUser() user: { id: number },
+    @Body()
+    body: { teacher_id?: number | string; start_date?: string; end_date?: string; reason?: string },
+  ) {
+    const schoolId = await this.getSchoolId(user.id);
+    if (!schoolId) throw new BadRequestException('School not found');
+    const teacherId = Number(body?.teacher_id);
+    const { start_date, end_date, reason } = body ?? {};
+    if (!Number.isInteger(teacherId) || !start_date || !end_date) {
+      throw new BadRequestException('teacher_id, start_date and end_date are required');
+    }
+    const start = new Date(start_date + 'T00:00:00.000Z');
+    const end = new Date(end_date + 'T23:59:59.999Z');
+    if (isNaN(start.getTime()) || isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
+    }
+    if (start > end) throw new BadRequestException('End date must be on or after start date');
+    assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
+
+    const assigned = await this.db.teacherSchool.findFirst({
+      where: { teacherId, schoolId },
+      select: { schoolId: true },
+    });
+    if (!assigned) throw new BadRequestException('Teacher is not assigned to this school');
+
+    const overlap = await this.db.teacherLeave.findFirst({
+      where: {
+        teacherId,
+        schoolId,
+        startDate: { lte: end },
+        endDate: { gte: start },
+        status: { in: ['pending', 'approved'] },
+      },
+      select: { id: true },
+    });
+    if (overlap) {
+      throw new BadRequestException('This teacher already has a pending or approved leave overlapping these dates.');
+    }
+
+    // The school admin filing it IS stage 1 (approved). It stays pending until
+    // the system admin approves — attendance only changes on final approval.
+    const leave = await this.db.teacherLeave.create({
+      data: {
+        teacherId,
+        schoolId,
+        startDate: start,
+        endDate: end,
+        reason: reason!.trim(),
+        leaveType: EMERGENCY_LEAVE_TYPE,
+        status: 'pending',
+        schoolAdminStatus: 'approved',
+        schoolAdminBy: String(user.id),
+        schoolAdminAt: new Date(),
+        adminStatus: 'pending',
+      },
+    });
+
+    await this.notificationsService.sendOne(user.id, teacherId, {
+      title: 'Emergency leave recorded — awaiting admin approval',
+      message: `Your school admin recorded an emergency leave for ${start_date} to ${end_date} (reason: ${reason!.trim()}). It is approved by the school admin and waiting for the admin's approval.`,
+      type: 'system_alert',
+      allowReplies: false,
+    });
+    const admins = await this.db.user.findMany({
+      where: { role: Role.admin, isActive: true },
+      select: { id: true },
+    });
+    await Promise.all(
+      admins.map((a) =>
+        this.notificationsService.sendOne(user.id, a.id, {
+          title: 'Emergency leave awaiting your approval',
+          message: `A school admin recorded an emergency leave for a teacher (${start_date} to ${end_date}). Your approval is needed to finalise it.`,
+          type: 'system_alert',
+          allowReplies: false,
+        }),
+      ),
+    );
+    await this.realtimeGateway.emitDashboardStatsForUsers([teacherId, user.id, ...admins.map((a) => a.id)]);
+    return { success: true, leave_id: leave.id };
   }
 
   // Password reset requests - scoped to this school admin's school

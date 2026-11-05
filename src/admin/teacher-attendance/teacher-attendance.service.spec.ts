@@ -94,4 +94,10 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
     // Mon-Sat pattern, none in the future relative to the frozen "today".
     expect(createdDates.sort()).toEqual(['2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04']);
   });
+
+  it('stamps settled days Absent (rule: no report by 8pm = Absent), never Unreported', async () => {
+    await service.markMissing({ start_date: '2026-07-01', end_date: '2026-07-04' });
+    const statuses = new Set(db.attendance.create.mock.calls.map((c) => c[0].data.status));
+    expect([...statuses]).toEqual(['Absent']);
+  });
 });

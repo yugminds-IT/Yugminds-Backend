@@ -756,6 +756,14 @@ model TeacherLeave {
   status        String    @default("pending")
   adminRemarks  String?
   approvedBy    String?
+  // Emergency leave only: two sequential approvals (school admin, then system
+  // admin). pending | approved | rejected; null on regular leaves.
+  schoolAdminStatus String?
+  schoolAdminBy     String?
+  schoolAdminAt     DateTime?
+  adminStatus       String?
+  adminBy           String?
+  adminAt           DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
   @@index([teacherId])

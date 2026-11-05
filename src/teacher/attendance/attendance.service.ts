@@ -1,5 +1,6 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
+import { getTodayIstDateOnly, getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 
@@ -29,7 +30,7 @@ export class TeacherAttendanceService {
    * Get today's attendance status and report progress for the teacher.
    */
   async getToday(teacherId: number, schoolId?: string, dateStr?: string) {
-    const date = dateStr ? this.toDateOnly(dateStr) : new Date();
+    const date = dateStr ? this.toDateOnly(dateStr) : getTodayIstDateOnly();
     const dateStart = new Date(date);
     dateStart.setUTCHours(0, 0, 0, 0);
     const dateEnd = new Date(date);
@@ -60,6 +61,8 @@ export class TeacherAttendanceService {
       holidaySchoolIds: [],
       offScheduleSchoolIds: [],
       notScheduledToday: true,
+      // Server clock: is it still before the 8pm IST attendance cutoff?
+      before_cutoff: isBeforeAttendanceCutoff(),
     };
 
     if (schoolIds.length === 0) return result;
@@ -212,15 +215,25 @@ export class TeacherAttendanceService {
             ? 'Leave-Rejected'
             : 'Pending';
     } else {
-      // Inferred status
-      status =
-        result.totalPeriods > 0
-          ? result.periodsWithReports >= result.totalPeriods
-            ? 'Present'
-            : 'Unreported'
+      // Inferred status (no attendance row yet). Once the day is settled
+      // (a past date, or after the 8pm cutoff) a missing row means the
+      // teacher didn't report in time — Absent, matching the monthly view;
+      // a report that arrives after the cutoff never makes the day Present.
+      const daySettled =
+        result.date < getTodayIstDateStr() || !isBeforeAttendanceCutoff();
+      status = daySettled
+        ? 'Absent'
+        : result.totalPeriods > 0 &&
+            result.periodsWithReports >= result.totalPeriods
+          ? 'Present'
           : 'Unreported';
     }
-    result.attendance = { status, date: result.date };
+    // Absent although a report exists = the report came in after the 8pm cutoff.
+    result.attendance = {
+      status,
+      date: result.date,
+      ...(status === 'Absent' && reportedPeriodIds.size > 0 && { late_report: true }),
+    };
     return result;
   }
 
@@ -464,12 +477,25 @@ export class TeacherAttendanceService {
           }
         });
 
-        const absentDays = attendanceRecords.filter(
-          (a) => a.status === 'Absent',
-        ).length;
-        const unreportedDays = attendanceRecords.filter(
-          (a) => a.status === 'Unreported',
-        ).length;
+        // Rule: no report = Absent. Any past working day that isn't Present
+        // or on leave is Absent (even with no Attendance row, e.g. no
+        // timetable); today / unsettled days stay Unreported. Same rule as
+        // the admin view (computeAttendanceMetrics).
+        const todayStr = getTodayIstDateStr();
+        const absentDates = new Set(
+          attendanceRecords
+            .filter((a) => a.status === 'Absent')
+            .map((a) => a.date.toISOString().split('T')[0]),
+        );
+        const unreportedDates = new Set<string>();
+        for (const d of combinedWorkingDates.keys()) {
+          if (presentDayDates.has(d) || processedLeaveDates.has(d)) continue;
+          if (d < todayStr) absentDates.add(d);
+          else unreportedDates.add(d);
+        }
+        for (const d of [...presentDayDates, ...processedLeaveDates]) absentDates.delete(d);
+        const absentDays = absentDates.size;
+        const unreportedDays = unreportedDates.size;
 
         // Use schedule-based working days as denominator when available
         // Fallback to sum of recorded statuses if no schedule exists
@@ -529,14 +555,39 @@ export class TeacherAttendanceService {
       },
       orderBy: { date: 'desc' },
     });
+    // An Absent day that still has a submitted report means the report came in
+    // after the 8pm cutoff — flag it so the UI can say "Absent (late report)".
+    const absent = records.filter((r) => r.status === 'Absent');
+    const lateDays = new Set<string>();
+    if (absent.length > 0) {
+      const reports = await this.db.teacherReport.findMany({
+        where: {
+          teacherId,
+          schoolId: { in: schoolIds },
+          reportDate: { gte: fromDate, lte: new Date(toDate.getTime() + 24 * 3600 * 1000) },
+        },
+        select: { schoolId: true, reportDate: true },
+      });
+      const reported = new Set(
+        reports.map((r) => `${r.schoolId}|${r.reportDate.toISOString().split('T')[0]}`),
+      );
+      for (const r of absent) {
+        const day = r.date.toISOString().split('T')[0];
+        if (reported.has(`${r.schoolId}|${day}`)) lateDays.add(`${r.schoolId}|${day}`);
+      }
+    }
     return {
-      attendance: records.map((r) => ({
-        id: r.id,
-        school_id: r.schoolId,
-        date: r.date.toISOString().split('T')[0],
-        status: r.status,
-        recorded_at: r.createdAt.toISOString(),
-      })),
+      attendance: records.map((r) => {
+        const day = r.date.toISOString().split('T')[0];
+        return {
+          id: r.id,
+          school_id: r.schoolId,
+          date: day,
+          status: r.status,
+          recorded_at: r.createdAt.toISOString(),
+          ...(lateDays.has(`${r.schoolId}|${day}`) && { late_report: true }),
+        };
+      }),
     };
   }
 }

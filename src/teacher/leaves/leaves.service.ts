@@ -6,6 +6,8 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
+import { getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, leaveStageFields } from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class TeacherLeavesService {
@@ -29,6 +31,7 @@ export class TeacherLeavesService {
       end_date: string;
       reason?: string;
       substitute_required?: boolean;
+      is_emergency?: boolean;
     },
   ) {
     const { school_id, start_date, end_date, reason } = body;
@@ -44,6 +47,27 @@ export class TeacherLeavesService {
     }
     if (start > end) {
       throw new BadRequestException('End date must be on or after start date');
+    }
+    // Server clock (IST), never the browser's.
+    const serverToday = getTodayIstDateStr();
+    const isEmergency = body.is_emergency === true;
+    if (isEmergency) {
+      // Emergency: no 8pm cutoff, but strict — reason required and the start
+      // may be at most 2 days back. Approval then has no cutoff either.
+      assertEmergencyLeaveAllowed(start_date, reason, serverToday);
+    } else {
+      // Regular leave: accepted only before the 8pm cutoff (attendance for
+      // the day is settled then) and can't be backdated.
+      if (start_date < serverToday) {
+        throw new BadRequestException(
+          `Leave cannot start in the past (today is ${serverToday}).`,
+        );
+      }
+      if (!isBeforeAttendanceCutoff()) {
+        throw new BadRequestException(
+          'Leave requests must be submitted before 8:00 PM IST. For a genuine emergency, submit it as an emergency leave.',
+        );
+      }
     }
 
     const assigned = await this.db.teacherSchool.findFirst({
@@ -83,6 +107,9 @@ export class TeacherLeavesService {
         endDate: end,
         reason: reason ?? null,
         substituteRequired: !!body.substitute_required,
+        leaveType: isEmergency ? EMERGENCY_LEAVE_TYPE : 'General',
+        // Emergency leave needs two sequential approvals: school admin, then admin.
+        ...(isEmergency && { schoolAdminStatus: 'pending', adminStatus: 'pending' }),
         status: 'pending',
       },
     });
@@ -115,8 +142,8 @@ export class TeacherLeavesService {
       recipientIds.map((userId) => ({
         userId,
         senderId: teacherId,
-        title: `Leave request: ${teacherLabel}`,
-        message: `${teacherLabel} requested leave (${dateLabel})${reason ? `: ${reason}` : '.'}`,
+        title: `${isEmergency ? 'EMERGENCY leave request' : 'Leave request'}: ${teacherLabel}`,
+        message: `${teacherLabel} requested ${isEmergency ? 'EMERGENCY ' : ''}leave (${dateLabel})${reason ? `: ${reason}` : '.'}${isEmergency ? ' Needs approval from the school admin first, then the admin.' : ''}`,
         mode: 'teacher_leave',
         allowReplies: false,
       })),
@@ -129,6 +156,7 @@ export class TeacherLeavesService {
       end_date: l.endDate.toISOString().split('T')[0],
       reason: l.reason,
       status: l.status,
+      ...leaveStageFields(leave),
       substitute_required:
         (l as { substituteRequired?: boolean }).substituteRequired ?? false,
     });
@@ -174,6 +202,8 @@ export class TeacherLeavesService {
         end_date: l.endDate.toISOString().split('T')[0],
         reason: l.reason,
         status: norm(l.status),
+        leave_type: l.leaveType,
+        ...leaveStageFields(l),
         substitute_required:
           (l as { substituteRequired?: boolean }).substituteRequired ?? false,
         created_at: l.createdAt.toISOString(),

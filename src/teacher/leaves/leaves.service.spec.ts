@@ -3,6 +3,14 @@ import { BadRequestException, ForbiddenException } from '@nestjs/common';
 import { TeacherLeavesService } from './leaves.service';
 import { DatabaseService } from '../../database/database.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
+import { isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+
+// "Today" frozen at 2026-07-20 (IST); the cutoff is toggled per test.
+jest.mock('../../common/utils/date.util', () => ({
+  ...jest.requireActual('../../common/utils/date.util'),
+  getTodayIstDateStr: () => '2026-07-20',
+  isBeforeAttendanceCutoff: jest.fn(() => true),
+}));
 
 describe('TeacherLeavesService', () => {
   let service: TeacherLeavesService;
@@ -104,5 +112,70 @@ describe('TeacherLeavesService', () => {
   it('rejects listing leaves for a school the teacher is not assigned to', async () => {
     db.teacherSchool.findFirst.mockResolvedValue(null);
     await expect(service.list(1, 'school-b')).rejects.toThrow(ForbiddenException);
+  });
+
+  it('rejects a leave that starts in the past', async () => {
+    await expect(
+      service.create(1, { ...baseBody, start_date: '2026-07-19' }),
+    ).rejects.toThrow(/cannot start in the past/i);
+    expect(db.teacherLeave.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects any leave submitted after the 8pm IST cutoff, even for tomorrow', async () => {
+    (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(false);
+    await expect(service.create(1, baseBody)).rejects.toThrow(/before 8:00 PM/i);
+    await expect(
+      service.create(1, { ...baseBody, start_date: '2026-07-21', end_date: '2026-07-22' }),
+    ).rejects.toThrow(/before 8:00 PM/i);
+    expect(db.teacherLeave.create).not.toHaveBeenCalled();
+    (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(true);
+  });
+
+  it('allows a leave for tomorrow before the cutoff', async () => {
+    await service.create(1, { ...baseBody, start_date: '2026-07-21', end_date: '2026-07-22' });
+    expect(db.teacherLeave.create).toHaveBeenCalled();
+  });
+
+  describe('emergency leave', () => {
+    const emergency = { ...baseBody, is_emergency: true, reason: 'Medical emergency' };
+
+    it('is accepted after the 8pm cutoff and stored as Emergency/pending with both approval stages pending', async () => {
+      (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(false);
+      await service.create(1, emergency);
+      expect(db.teacherLeave.create.mock.calls[0][0].data).toMatchObject({
+        leaveType: 'Emergency',
+        status: 'pending',
+        schoolAdminStatus: 'pending',
+        adminStatus: 'pending',
+      });
+      (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(true);
+    });
+
+    it('requires a reason', async () => {
+      await expect(service.create(1, { ...emergency, reason: '   ' })).rejects.toThrow(/reason is required/i);
+      await expect(service.create(1, { ...baseBody, is_emergency: true })).rejects.toThrow(/reason is required/i);
+    });
+
+    it('may start up to 2 days back (today is 2026-07-20) but no further', async () => {
+      await service.create(1, { ...emergency, start_date: '2026-07-18', end_date: '2026-07-20' });
+      expect(db.teacherLeave.create).toHaveBeenCalledTimes(1);
+      await expect(
+        service.create(1, { ...emergency, start_date: '2026-07-17', end_date: '2026-07-20' }),
+      ).rejects.toThrow(/at most 2 days back/i);
+    });
+
+    it('a regular (non-emergency) leave stays blocked in the past and after the cutoff', async () => {
+      await expect(service.create(1, { ...baseBody, start_date: '2026-07-19' })).rejects.toThrow(/in the past/i);
+      (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(false);
+      await expect(service.create(1, baseBody)).rejects.toThrow(/emergency leave/i);
+      (isBeforeAttendanceCutoff as jest.Mock).mockReturnValue(true);
+    });
+
+    it('still blocks overlapping leave requests', async () => {
+      db.teacherLeave.findFirst.mockResolvedValue({
+        id: 'x', status: 'pending', startDate: new Date('2026-07-20'), endDate: new Date('2026-07-21'),
+      });
+      await expect(service.create(1, emergency)).rejects.toThrow(/overlapping/i);
+    });
   });
 });

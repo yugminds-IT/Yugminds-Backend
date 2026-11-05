@@ -3,7 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import { AdminCalendarService } from '../calendar/calendar.service';
-import { getTodayIstDateOnly } from '../../common/utils/date.util';
+import { attendanceCutoffInstant, getTodayIstDateOnly, getTodayIstDateStr } from '../../common/utils/date.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 
 @Injectable()
@@ -486,11 +486,15 @@ export class AdminTeacherAttendanceService {
     start: Date,
     end: Date,
     workingSet: Set<string>,
+    // Dates the teacher submitted any report on (YYYY-MM-DD). An Absent day
+    // that has one means the report came in after the 8pm cutoff.
+    reportedDates: Set<string> = new Set(),
   ): {
     present_days: number;
     absent_days: number;
     leave_days: number;
     unreported_days: number;
+    late_report_days: number;
     total_working_days: number;
     attendance_percentage: number;
   } {
@@ -523,22 +527,24 @@ export class AdminTeacherAttendanceService {
     for (const d of presentDayDates) absentDayDates.delete(d);
     for (const d of leaveDayDates) absentDayDates.delete(d);
 
-    // Every working day not covered by present/absent/leave counts as
-    // unreported — including days with NO Attendance row at all (e.g. a
-    // historical date the daily marking cron never ran for). Deriving this
-    // as the working-set complement, rather than only counting existing
-    // rows literally stamped `status: 'Unreported'`, is what makes the
-    // denominator (present+absent+leave+unreported) always equal
-    // total_working_days.
+    // Rule: no report = no attendance = Absent. Every PAST working day not
+    // covered by present/absent/leave is Absent — including days with no
+    // Attendance row (teachers without a timetable, a cron that never ran).
+    // Today stays Unreported until the 8pm cron settles it. Deriving this
+    // from the working-set complement keeps present+absent+leave+unreported
+    // always equal to total_working_days.
+    const todayStr = getTodayIstDateStr();
     const unreportedDayDates = new Set<string>();
     for (const d of workingSet) {
       if (
-        !presentDayDates.has(d) &&
-        !absentDayDates.has(d) &&
-        !leaveDayDates.has(d)
+        presentDayDates.has(d) ||
+        absentDayDates.has(d) ||
+        leaveDayDates.has(d)
       ) {
-        unreportedDayDates.add(d);
+        continue;
       }
+      if (d < todayStr) absentDayDates.add(d);
+      else unreportedDayDates.add(d);
     }
 
     const totalWorkingDays = workingSet.size;
@@ -549,6 +555,7 @@ export class AdminTeacherAttendanceService {
       absent_days: absentDayDates.size,
       leave_days: leaveDayDates.size,
       unreported_days: unreportedDayDates.size,
+      late_report_days: [...absentDayDates].filter((d) => reportedDates.has(d)).length,
       total_working_days: totalWorkingDays,
       attendance_percentage:
         totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0,
@@ -622,7 +629,7 @@ export class AdminTeacherAttendanceService {
       const schoolName = displaySchool?.school?.name ?? '';
       const schoolCode = displaySchool?.school?.schoolCode ?? '';
 
-      const [attendanceRecords, leaveRecords, workingSetEntries, historyEntries] = await Promise.all([
+      const [attendanceRecords, leaveRecords, workingSetEntries, historyEntries, monthReports] = await Promise.all([
         this.db.attendance.findMany({
           where: {
             teacherId: t.id,
@@ -651,7 +658,17 @@ export class AdminTeacherAttendanceService {
             await this.getWorkingDaysHistory(t.id, sid, end),
           ] as const),
         ),
+        this.db.teacherReport.findMany({
+          where: {
+            teacherId: t.id,
+            schoolId: { in: effectiveSchoolIds },
+            reportDate: { gte: start, lte: end },
+          },
+          select: { schoolId: true, reportDate: true },
+        }),
       ]);
+      const reportedDay = (r: { reportDate: Date }) => r.reportDate.toISOString().split('T')[0];
+      const reportedAll = new Set(monthReports.map(reportedDay));
       const historyBySchool = new Map(historyEntries);
       // Per-school working-day calendar (a school's declared holidays never
       // apply to a different school a co-teacher happens to also work at),
@@ -682,6 +699,7 @@ export class AdminTeacherAttendanceService {
         start,
         end,
         combinedWorkingSet,
+        reportedAll,
       );
 
       // Per-school breakdown so "filter to check the working days for that
@@ -698,6 +716,7 @@ export class AdminTeacherAttendanceService {
             start,
             end,
             set,
+            new Set(monthReports.filter((r) => r.schoolId === sid).map(reportedDay)),
           );
           const ts = t.teacherSchools.find((x) => x.schoolId === sid);
           return {
@@ -773,6 +792,7 @@ export class AdminTeacherAttendanceService {
     // createdAt timestamp — the "Recorded At" values a teacher sees are
     // meant to reflect when each day was actually processed).
     const today = getTodayIstDateOnly();
+    const todayStr = today.toISOString().split('T')[0];
     const end = requestedEnd < today ? requestedEnd : today;
     end.setUTCHours(23, 59, 59, 999);
     if (start > end) {
@@ -850,11 +870,14 @@ export class AdminTeacherAttendanceService {
           holidaysSkipped++;
           continue;
         }
+        // Today isn't settled until the 8pm run, so don't stamp it yet.
+        if (dateStr >= todayStr) continue;
         const key = `${teacherId}-${schoolId}-${dateStr}`;
         if (existingSet.has(key)) continue;
         const dateOnly = new Date(dateStr + 'T00:00:00.000Z');
+        // Rule: no report by 8pm = Absent (a settled day is never "Unreported").
         await this.db.attendance.create({
-          data: { teacherId, schoolId, date: dateOnly, status: 'Unreported' },
+          data: { teacherId, schoolId, date: dateOnly, status: 'Absent' },
         });
         recordsCreated++;
         datesAffected.add(dateStr);
@@ -984,6 +1007,12 @@ export class AdminTeacherAttendanceService {
       where: {
         reportDate: { gte: dateOnly, lte: dateEnd },
         schoolId: { in: distinctSchoolIds },
+        // Any submitted report counts, even if later rejected: attendance
+        // depends on submitting, not on review outcome. But only reports
+        // submitted BEFORE that day's 8pm cutoff count — this matters when the
+        // catch-up run settles a day whose 8pm run was missed (a 9pm report
+        // must not rescue it).
+        createdAt: { lt: attendanceCutoffInstant(dateOnly.toISOString().split('T')[0]) },
       },
       select: { teacherId: true, schoolId: true, periodId: true },
     });
@@ -995,8 +1024,7 @@ export class AdminTeacherAttendanceService {
       reportedByPair.get(key)!.add(r.periodId);
     }
 
-    let recordsCreated = 0;
-    let noScheduleSkipped = 0;
+    const toCreate: Array<{ teacherId: number; schoolId: string; date: Date; status: string }> = [];
     let notWorkingDaySkipped = 0;
     const teachersMarkedAbsent = new Set<number>();
 
@@ -1013,31 +1041,51 @@ export class AdminTeacherAttendanceService {
         continue;
       }
 
-      const scheduledPeriodIds = scheduledByPair.get(pairKey);
-      if (!scheduledPeriodIds || scheduledPeriodIds.size === 0) {
-        noScheduleSkipped++;
-        continue;
-      }
+      // No timetable => nothing to cover, so the only evidence of presence
+      // is a report that day; none means Absent (rule: no report = Absent).
+      const scheduledPeriodIds = scheduledByPair.get(pairKey) ?? new Set<string>();
       const reportedPeriodIds = reportedByPair.get(pairKey) ?? new Set<string>();
-      const allCovered = [...scheduledPeriodIds].every((p) => reportedPeriodIds.has(p));
+      const allCovered =
+        scheduledPeriodIds.size === 0
+          ? reportedPeriodIds.size > 0
+          : [...scheduledPeriodIds].every((p) => reportedPeriodIds.has(p));
       if (allCovered) continue;
 
-      await this.db.attendance.create({
-        data: { teacherId, schoolId, date: dateOnly, status: 'Absent' },
-      });
-      recordsCreated++;
+      toCreate.push({ teacherId, schoolId, date: dateOnly, status: 'Absent' });
       teachersMarkedAbsent.add(teacherId);
     }
+
+    // One idempotent insert: a late report (or a second instance) that wrote
+    // a row after our check is skipped instead of aborting the whole run.
+    // A report submitted afterwards still upserts the row to Present.
+    const { count: recordsCreated } = toCreate.length
+      ? await this.db.attendance.createMany({ data: toCreate, skipDuplicates: true })
+      : { count: 0 };
 
     return {
       summary: {
         records_created: recordsCreated,
         teachers_marked_absent: teachersMarkedAbsent.size,
         holiday_schools_skipped: holidaySchoolsSkipped,
-        no_schedule_skipped: noScheduleSkipped,
         not_working_day_skipped: notWorkingDaySkipped,
       },
     };
+  }
+
+  /**
+   * Catch-up for a missed 8pm run (server down/redeploy): settles yesterday.
+   * Idempotent — existing rows are skipped, so it's a no-op when 8pm ran.
+   */
+  @Cron('30 0 * * *', { timeZone: 'Asia/Kolkata' })
+  async catchUpYesterdayCron(): Promise<void> {
+    try {
+      const y = getTodayIstDateOnly();
+      y.setUTCDate(y.getUTCDate() - 1);
+      const result = await this.markAbsentForToday(y);
+      this.logger.log(`Catch-up absence marking: ${JSON.stringify(result.summary)}`);
+    } catch (err) {
+      this.logger.error(`Catch-up absence marking failed: ${(err as Error)?.message}`);
+    }
   }
 
   @Cron('0 20 * * *', { timeZone: 'Asia/Kolkata' })
