@@ -12,6 +12,7 @@ describe('AuthController', () => {
     login: jest.fn(),
     refresh: jest.fn(),
     logout: jest.fn(),
+    recordLoginActivity: jest.fn().mockResolvedValue(undefined),
   };
   const mockConfigService = {
     get: jest.fn((key: string) =>
@@ -42,6 +43,43 @@ describe('AuthController', () => {
   });
 
   describe('login', () => {
+    it('records the sign-in outcome server-side with the real IP and user-agent', async () => {
+      mockAuthService.login.mockResolvedValue({
+        user: { id: 7, email: 'a@b.c', role: 'student' },
+        tokens: { accessToken: 'a', refreshToken: 'r' },
+      });
+      await controller.login(
+        { email: 'a@b.c', password: 'x' } as never,
+        { ip: '9.9.9.9', headers: { 'user-agent': 'jest-ua' } } as never,
+        mockRes() as never,
+      );
+      expect(mockAuthService.recordLoginActivity).toHaveBeenCalledWith({
+        userId: 7,
+        email: 'a@b.c',
+        success: true,
+        meta: { ip: '9.9.9.9', userAgent: 'jest-ua' },
+      });
+    });
+
+    it('records a failed sign-in (server-observed) and still rethrows', async () => {
+      const err = new Error('Invalid email or password');
+      mockAuthService.login.mockRejectedValue(err);
+      await expect(
+        controller.login(
+          { email: 'a@b.c', password: 'bad' } as never,
+          { ip: '9.9.9.9', headers: { 'user-agent': 'jest-ua' } } as never,
+          mockRes() as never,
+        ),
+      ).rejects.toBe(err);
+      expect(mockAuthService.recordLoginActivity).toHaveBeenCalledWith(
+        expect.objectContaining({
+          email: 'a@b.c',
+          success: false,
+          meta: { ip: '9.9.9.9', userAgent: 'jest-ua' },
+        }),
+      );
+    });
+
     it('sets an httpOnly refresh cookie and omits refreshToken from the JSON body', async () => {
       mockAuthService.login.mockResolvedValue({
         user: { id: 1, email: 'a@b.c', role: 'admin' },

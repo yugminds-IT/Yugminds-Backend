@@ -6,6 +6,7 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '../types/role.type';
 import { AuthCacheService } from '../auth-cache.service';
 import { SessionsService } from '../sessions/sessions.service';
+import { isAccountActive } from '../account-active.util';
 
 export interface JwtPayload {
   sub: number;
@@ -61,6 +62,9 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       if (jwtTokenVersion !== cached.tokenVersion) {
         throw new UnauthorizedException('Access token invalidated');
       }
+      if (cached.active === false) {
+        throw new UnauthorizedException('Account or school is inactive');
+      }
       return {
         id: payload.sub,
         email: payload.email,
@@ -85,12 +89,20 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       throw new UnauthorizedException('tenantId missing');
     }
 
+    // Deactivated user or deactivated school: reject here, per request. Login
+    // is not the only place this must hold, or an already-open session (and its
+    // refresh token) would keep working after the account was switched off.
+    const active = await isAccountActive(this.db as any, user);
     await this.authCache.set(user.id, {
       tokenVersion: user.tokenVersion,
       tenantId: user.tenantId ?? null,
       role: user.role,
       isSuperAdmin: user.isSuperAdmin,
+      active,
     });
+    if (!active) {
+      throw new UnauthorizedException('Account or school is inactive');
+    }
 
     // Enforce access-token invalidation via tokenVersion.
     // Missing claim (old tokens) is treated as version 0.

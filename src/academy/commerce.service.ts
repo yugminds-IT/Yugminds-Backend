@@ -14,6 +14,9 @@ import type { ProductDto } from './academy.dto';
 type Tx = Prisma.TransactionClient;
 const { CREATED, PAID, FAILED, REFUNDED } = AcademyOrderStatus;
 
+/** An unpaid checkout older than this is stale: paying it refunds instead of granting. */
+const STALE_ORDER_MS = 24 * 60 * 60 * 1000;
+
 const PUBLIC_PRODUCT = {
   id: true,
   type: true,
@@ -159,6 +162,16 @@ export class CommerceService {
       throw new BadRequestException("You've already claimed this free offer");
     const receipt = `FREE-${Date.now().toString(36).toUpperCase()}-${randomBytes(3).toString('hex').toUpperCase()}`;
     await this.db.$transaction(async (tx) => {
+      // The check above is only a fast path: two parallel requests both pass it.
+      // Serialise per (learner, product) with a transaction-scoped advisory lock and
+      // re-check under the lock, so "once per learner" holds without a schema change.
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`free:${accountId}:${product.id}`}, 0))`;
+      const again = await tx.academyOrder.findFirst({
+        where: { accountId, productId: product.id, status: PAID },
+        select: { id: true },
+      });
+      if (again)
+        throw new BadRequestException("You've already claimed this free offer");
       const order = await tx.academyOrder.create({
         data: {
           accountId,
@@ -255,6 +268,34 @@ export class CommerceService {
       );
       return false;
     }
+
+    // A CREATED order keeps a price snapshot forever. If it is paid long after
+    // checkout, or the product was since deactivated or its price raised, do not
+    // grant at the stale terms. The money has already been captured, so refund it
+    // (an error here propagates, so the webhook is retried) rather than keep it
+    // and deliver nothing.
+    const openOrder = order.status === CREATED || order.status === FAILED;
+    const stale =
+      Date.now() - new Date(order.createdAt).getTime() > STALE_ORDER_MS ||
+      !order.product.isActive ||
+      order.amountInPaise < order.product.priceInPaise;
+    if (openOrder && stale) {
+      this.logger.warn(
+        `Payment ${paymentId} arrived for stale order ${order.id}; refunding instead of granting`,
+      );
+      if (!paymentId) return false;
+      await this.razorpay.refund(paymentId, order.amountInPaise);
+      await this.db.academyOrder.updateMany({
+        where: { id: order.id, status: { in: [CREATED, FAILED] } },
+        data: {
+          status: REFUNDED,
+          razorpayPaymentId: paymentId,
+          refundedAt: new Date(),
+        },
+      });
+      return false;
+    }
+
     return this.db.$transaction(async (tx) => {
       const claim = await tx.academyOrder.updateMany({
         where: { id: order.id, status: { in: [CREATED, FAILED] } },

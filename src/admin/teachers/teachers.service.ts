@@ -790,14 +790,32 @@ export class AdminTeachersService {
       validatePasswordStrength(rawPassword);
       data.password = await bcrypt.hash(rawPassword, 10);
     }
+    // Credential / identity / active-state changes must end the account's live sessions.
+    // An unchanged email re-sent by the edit form is not an email change.
+    const current = data.email
+      ? await this.db.user.findUnique({
+          where: { id: teacherId },
+          select: { email: true },
+        })
+      : null;
+    const emailChanged =
+      !!data.email &&
+      String(data.email).trim().toLowerCase() !==
+        (current?.email ?? '').toLowerCase();
+    const endSessions = !!(
+      rawPassword ||
+      emailChanged ||
+      data.isActive === false
+    );
+    if (endSessions) data.tokenVersion = { increment: 1 };
     await this.db.user.update({
       where: { id: teacherId },
       data: data as never,
     });
-    // Invalidate stale sessions when password is changed
-    if (rawPassword) {
+    if (endSessions) {
       await this.refreshTokenStore.revokeAll(teacherId);
       await this.sessions.revokeMany('lms', teacherId);
+      await this.authCache.invalidate(teacherId);
     }
     const experienceRaw = body.experience as string | undefined;
     const experienceYears = body.experience_years as number | undefined;

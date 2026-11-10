@@ -1,11 +1,4 @@
-import {
-  IsEmail,
-  IsEnum,
-  IsOptional,
-  IsString,
-  Matches,
-  MinLength,
-} from 'class-validator';
+import { IsEmail, IsEnum, IsString, Matches, MinLength } from 'class-validator';
 
 // Full role set — used internally by admin-only account creation flows.
 export const SignupRole = {
@@ -42,8 +35,6 @@ export class SignupDto {
   @IsEnum(PublicSignupRole, { message: 'Role must be teacher or student' })
   role: PublicSignupRole;
 
-  @IsOptional()
-  @IsString()
-  tenantId?: string;
+  // No tenantId on purpose: a client must never choose which school it lands in.
   // isSuperAdmin is intentionally excluded — public callers cannot elevate privileges.
 }

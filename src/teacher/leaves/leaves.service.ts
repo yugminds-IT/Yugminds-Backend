@@ -8,7 +8,7 @@ import { DatabaseService } from '../../database/database.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
 import { getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, leaveStageFields } from '../../common/utils/leave-rules.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan, leaveStageFields } from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class TeacherLeavesService {
@@ -49,6 +49,7 @@ export class TeacherLeavesService {
     if (start > end) {
       throw new BadRequestException('End date must be on or after start date');
     }
+    assertLeaveSpan(start_date, end_date);
     // Server clock (IST), never the browser's.
     const serverToday = getTodayIstDateStr();
     const isEmergency = body.is_emergency === true;

@@ -71,20 +71,30 @@ describe('LeadAlertsService', () => {
     await flush();
   });
 
-  it('sends the brief writer a confirmation with their brief, safely escaped', async () => {
+  it('sends a fixed-template confirmation and never echoes sender-supplied text', async () => {
     new LeadAlertsService().confirmBrief({
       firstName: 'Asha',
       email: 'asha@example.com',
-      project: 'A robot or smart device',
-      message: 'A <b>delivery</b> robot',
     });
     await flush();
     const mail = sendMail.mock.calls[0][0];
     expect(mail.to).toBe('asha@example.com');
     expect(mail.replyTo).toBe('info@yugminds.org');
     expect(mail.subject).toBe("We've got your brief, Asha");
-    expect(mail.text).toContain('A <b>delivery</b> robot');
-    expect(mail.html).toContain('A &lt;b&gt;delivery&lt;/b&gt; robot');
-    expect(mail.html).not.toContain('<b>delivery</b>');
+    expect(mail.text).toContain('Hi Asha,');
+    expect(mail.text).not.toContain('Your brief');
+  });
+
+  it('falls back to a neutral greeting when the name is not a plain name', async () => {
+    new LeadAlertsService().confirmBrief({
+      firstName: 'Click http://evil.example/pay NOW <b>',
+      email: 'victim@example.com',
+    });
+    await flush();
+    const mail = sendMail.mock.calls[0][0];
+    expect(mail.subject).toBe("We've got your brief, there");
+    expect(mail.text).toContain('Hi there,');
+    expect(mail.text).not.toContain('evil.example');
+    expect(mail.html).not.toContain('evil.example');
   });
 });

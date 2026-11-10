@@ -62,6 +62,7 @@ export class StorageService {
     key: string,
     buffer: Buffer,
     contentType: string,
+    opts?: { contentDisposition?: string },
   ): Promise<string> {
     await this.client.send(
       new PutObjectCommand({
@@ -69,6 +70,9 @@ export class StorageService {
         Key: key,
         Body: buffer,
         ContentType: contentType,
+        ...(opts?.contentDisposition
+          ? { ContentDisposition: opts.contentDisposition }
+          : {}),
       }),
     );
     return `${this.publicUrl}/${key}`;

@@ -171,7 +171,12 @@ export class StudentRankingService {
     const asgns = subAsgnIds.length
       ? await this.db.assignment.findMany({
           where: { id: { in: subAsgnIds } },
-          select: { id: true, assignmentType: true, retakeScoringRule: true },
+          select: {
+            id: true,
+            assignmentType: true,
+            retakeScoringRule: true,
+            totalMarks: true,
+          },
         })
       : [];
     const asgnTypeMap = new Map(asgns.map((a) => [a.id, a]));
@@ -204,8 +209,11 @@ export class StudentRankingService {
         dMax: 0,
         graded: 0,
       };
-      const score = Number(s.score ?? 0);
-      const max = Number(s.maxScore ?? 0);
+      // Same denominator rule as RankingService (maxScore, else the assignment's
+      // totalMarks), and never let a score exceed it, so one bad grade can't push
+      // a student past 100% on the cross-school leaderboard.
+      const max = Number(s.maxScore ?? asgn?.totalMarks ?? 0);
+      const score = Math.min(Math.max(Number(s.score ?? 0), 0), max);
       if (asgn?.assignmentType === 'COURSE') {
         cur.cTotal += score;
         cur.cMax += max;

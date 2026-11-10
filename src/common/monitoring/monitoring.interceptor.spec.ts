@@ -11,6 +11,8 @@ describe('MonitoringInterceptor', () => {
     method?: string;
     url?: string;
     userId?: string;
+    /** Express route template; pass null for an unmatched request. */
+    route?: string | null;
   } = {}) {
     const finishHandlers: Array<() => void> = [];
     const res: any = {
@@ -23,6 +25,10 @@ describe('MonitoringInterceptor', () => {
       method: overrides.method ?? 'GET',
       originalUrl: overrides.url ?? '/some/path',
       user: overrides.userId ? { id: overrides.userId } : undefined,
+      route:
+        overrides.route === null
+          ? undefined
+          : { path: overrides.route ?? overrides.url ?? '/some/path' },
     };
     const context = {
       switchToHttp: () => ({
@@ -105,18 +111,31 @@ describe('MonitoringInterceptor', () => {
     expect(recorded.duration).toBeGreaterThanOrEqual(0);
   });
 
-  it('sanitizes numeric ids and uuids in the recorded endpoint', async () => {
+  it('labels metrics by the matched route template, never the raw path', async () => {
     const { context, fireFinish } = makeContext({
       url: '/admin/courses/42/students/9f8b2b2a-1c3d-4e5f-8a9b-0c1d2e3f4a5b',
+      route: '/admin/courses/:courseId/students/:studentId',
     });
     const handler: CallHandler = { handle: () => of({}) };
 
-    const result$ = interceptor.intercept(context, handler);
-    await firstValueFrom(result$);
+    await firstValueFrom(interceptor.intercept(context, handler));
     fireFinish();
 
     expect(monitoring.record.mock.calls[0][0].endpoint).toBe(
-      '/admin/courses/:id/students/:uuid',
+      '/admin/courses/:courseId/students/:studentId',
     );
+  });
+
+  it('folds unmatched (attacker-chosen) paths into one fixed bucket', async () => {
+    const { context, fireFinish } = makeContext({
+      url: '/verify/ZZZZ0001',
+      route: null,
+    });
+    const handler: CallHandler = { handle: () => of({}) };
+
+    await firstValueFrom(interceptor.intercept(context, handler));
+    fireFinish();
+
+    expect(monitoring.record.mock.calls[0][0].endpoint).toBe('(unmatched)');
   });
 });

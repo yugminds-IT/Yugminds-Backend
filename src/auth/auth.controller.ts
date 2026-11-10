@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Post,
   Req,
   Res,
@@ -11,8 +12,6 @@ import { Throttle } from '@nestjs/throttler';
 import { AuthService, AuthResponse } from './auth.service';
 import { Public } from './decorators/public.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
-import { SignupDto } from './dto/signup.dto';
-import type { CreateUserOptions } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import type { Request, Response } from 'express';
 
@@ -60,39 +59,21 @@ export class AuthController {
     private readonly config: ConfigService,
   ) {}
 
+  /**
+   * Closed. Public self-signup used to accept a client-chosen tenantId, letting
+   * anyone create a student/teacher inside any school. A tenant-less account is
+   * rejected by JwtStrategy on every request, so the endpoint could only ever
+   * mint inert or cross-tenant accounts. Students register through a school
+   * joining code (POST /validate-joining-code); staff are created by admins.
+   * AuthService.signup() stays for those internal flows.
+   */
   @Public()
-  // Per-IP (pre-auth). Raised for shared school IPs while keeping signup-spam protection.
-  @Throttle({ default: { limit: 50, ttl: 60000 } })
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('signup')
-  async signup(
-    @Body() dto: SignupDto,
-    @Req() req: Request,
-    @Res({ passthrough: true }) res: Response,
-  ): Promise<AuthResponse> {
-    // Map the public DTO (restricted roles, no isSuperAdmin) to the internal options type.
-    const opts: CreateUserOptions = {
-      email: dto.email,
-      password: dto.password,
-      role: dto.role,
-      tenantId: dto.tenantId,
-    };
-    const result = await this.authService.signup(opts, false, clientMeta(req));
-    const refreshToken = result.tokens.refreshToken;
-    if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
-
-    // Set refresh token as httpOnly cookie; do not expose refresh token in JS.
-    const refreshExpiry =
-      this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
-    res.cookie(
-      REFRESH_TOKEN_COOKIE_NAME,
-      refreshToken,
-      getCookieOptions(refreshExpiry),
+  signup(): never {
+    throw new ForbiddenException(
+      'Self-registration is closed. Ask your school for a joining code.',
     );
-
-    return {
-      ...result,
-      tokens: { accessToken: result.tokens.accessToken },
-    };
   }
 
   @Public()
@@ -105,7 +86,25 @@ export class AuthController {
     @Req() req: Request,
     @Res({ passthrough: true }) res: Response,
   ): Promise<AuthResponse> {
-    const result = await this.authService.login(dto, clientMeta(req));
+    const meta = clientMeta(req);
+    let result: AuthResponse;
+    try {
+      result = await this.authService.login(dto, meta);
+    } catch (err) {
+      await this.authService.recordLoginActivity({
+        email: dto.email,
+        success: false,
+        failureReason: err instanceof Error ? err.message : 'Login failed',
+        meta,
+      });
+      throw err;
+    }
+    await this.authService.recordLoginActivity({
+      userId: result.user.id,
+      email: result.user.email,
+      success: true,
+      meta,
+    });
     const refreshToken = result.tokens.refreshToken;
     if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
 

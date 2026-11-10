@@ -1,6 +1,11 @@
-import { IsString, Matches, MinLength } from 'class-validator';
+import { IsOptional, IsString, Matches, MinLength } from 'class-validator';
 
 export class ResetPasswordDto {
+  /** Required unless the account is in forced-change mode (mustChangePassword). */
+  @IsOptional()
+  @IsString()
+  current_password?: string;
+
   @IsString()
   @MinLength(8)
   @Matches(/[A-Z]/, {

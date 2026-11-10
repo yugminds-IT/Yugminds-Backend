@@ -170,9 +170,14 @@ describe('NotificationsService', () => {
       expect(db.notification.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
           where: expect.objectContaining({
-            OR: [
-              { title: { contains: 'digest', mode: 'insensitive' } },
-              { message: { contains: 'digest', mode: 'insensitive' } },
+            // AND-combined so the search narrows within the caller's own rows
+            AND: [
+              {
+                OR: [
+                  { title: { contains: 'digest', mode: 'insensitive' } },
+                  { message: { contains: 'digest', mode: 'insensitive' } },
+                ],
+              },
             ],
           }),
         }),

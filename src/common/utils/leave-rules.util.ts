@@ -8,6 +8,23 @@ export const EMERGENCY_MAX_BACKDATE_DAYS = 2;
 export const isEmergencyLeave = (l: { leaveType?: string | null }): boolean =>
   l.leaveType === EMERGENCY_LEAVE_TYPE;
 
+/** Longest single leave request; approval writes one attendance row per day. */
+export const MAX_LEAVE_DAYS = 366;
+
+/** Rejects a leave range longer than MAX_LEAVE_DAYS (inputs already validated YYYY-MM-DD). */
+export function assertLeaveSpan(startDate: string, endDate: string): void {
+  const days =
+    (Date.parse(`${endDate}T00:00:00.000Z`) -
+      Date.parse(`${startDate}T00:00:00.000Z`)) /
+      86400000 +
+    1;
+  if (days > MAX_LEAVE_DAYS) {
+    throw new BadRequestException(
+      `A leave cannot span more than ${MAX_LEAVE_DAYS} days.`,
+    );
+  }
+}
+
 /** YYYY-MM-DD shifted by `days` (calendar math in UTC, no timezone drift). */
 export function shiftDateStr(dateStr: string, days: number): string {
   const d = new Date(`${dateStr}T00:00:00.000Z`);

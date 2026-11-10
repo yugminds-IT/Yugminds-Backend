@@ -48,7 +48,15 @@ export class MonitoringService {
   private readonly allDurations: number[] = [];
   private readonly startTime = Date.now();
 
-  record(metric: PerformanceMetric): void {
+  // Safety net: never track more than this many distinct endpoint keys.
+  private static readonly MAX_ENDPOINT_KEYS = 500;
+
+  record(input: PerformanceMetric): void {
+    const metric =
+      this.requestsByEndpoint.has(input.endpoint) ||
+      this.requestsByEndpoint.size < MonitoringService.MAX_ENDPOINT_KEYS
+        ? input
+        : { ...input, endpoint: '(other)' };
     this.totalRequests += 1;
     this.totalDurationMs += metric.duration;
 

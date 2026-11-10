@@ -27,6 +27,7 @@ import { AuthCacheService } from './auth-cache.service';
 import { RefreshTokenStoreService } from './refresh-token-store.service';
 import { SystemControlsService } from '../admin/system-controls/system-controls.service';
 import { SessionsService, type SessionMeta } from './sessions/sessions.service';
+import { isAccountActive } from './account-active.util';
 
 export interface AuthTokens {
   accessToken: string;
@@ -309,6 +310,37 @@ export class AuthService {
     }
   }
 
+  /**
+   * Audit trail for sign-in attempts, written by the server from facts it
+   * observed (real IP / user-agent / outcome) — never from client-supplied
+   * fields. Best effort: auditing must never break or delay a login.
+   */
+  async recordLoginActivity(a: {
+    userId?: number;
+    email?: string;
+    success: boolean;
+    failureReason?: string;
+    meta?: SessionMeta;
+  }): Promise<void> {
+    const cut = (v: string | undefined | null, n: number) =>
+      v ? String(v).slice(0, n) : null;
+    try {
+      await this.db.authActivity.create({
+        data: {
+          userId: a.userId,
+          email: cut(a.email, 320),
+          action: 'login',
+          success: a.success,
+          failureReason: cut(a.failureReason, 300),
+          ipAddress: cut(a.meta?.ip, 64),
+          userAgent: cut(a.meta?.userAgent as string | undefined, 500),
+        },
+      });
+    } catch {
+      /* audit is best effort */
+    }
+  }
+
   async login(dto: LoginDto, meta: SessionMeta = {}): Promise<AuthResponse> {
     const user = await this.db.user.findUnique({
       where: { email: dto.email },
@@ -556,6 +588,10 @@ export class AuthService {
       if (!user) {
         throw new UnauthorizedException('Invalid refresh token');
       }
+      // A deactivated user / school must not be able to keep renewing a session.
+      if (!(await isAccountActive(this.db as any, user))) {
+        throw new UnauthorizedException('Invalid refresh token');
+      }
 
       // Rotation: revoke the matched refresh token, issue and store a new one.
       await this.refreshTokenStore.revoke(payload.sub, matchedTokenId);
@@ -680,7 +716,31 @@ export class AuthService {
   }
 
   /**
-   * Resets the password for the currently authenticated user (no current password required).
+   * HTTP entry for self-service password change: a bearer token alone must not be
+   * convertible into a new password, so the current password is required unless the
+   * account is in forced-change mode (same rule as updatePassword).
+   */
+  async resetOwnPassword(
+    userId: number,
+    currentPassword: string | undefined,
+    newPassword: string,
+  ): Promise<void> {
+    if (!userId) throw new UnauthorizedException('Authentication required');
+    const user = await this.db.user.findUnique({ where: { id: userId } });
+    if (!user) throw new UnauthorizedException('User not found');
+    if (!user.mustChangePassword) {
+      if (!currentPassword)
+        throw new BadRequestException('Current password is required');
+      if (!(await this.validatePassword(currentPassword, user.password)))
+        throw new UnauthorizedException('Current password is incorrect');
+    }
+    await this.resetPassword(userId, newPassword);
+  }
+
+  /**
+   * Resets the password for the currently authenticated user (no current password
+   * required). Internal use only (e.g. admin-initiated reset); HTTP callers go
+   * through resetOwnPassword.
    */
   async resetPassword(userId: number, newPassword: string): Promise<void> {
     if (!userId) throw new UnauthorizedException('Authentication required');
@@ -712,6 +772,33 @@ export class AuthService {
     await this.refreshTokenStore.revokeAll(userId);
     await this.sessions.revokeMany('lms', userId);
     await this.authCache.invalidate(userId);
+  }
+
+  /**
+   * Ends every session of a user: bump tokenVersion (kills live access tokens,
+   * including sid-less impersonation tokens), revoke refresh tokens and device
+   * sessions, drop the auth cache. Call from any handler that changes a user's
+   * password, login email, active flag or deletes them, so none can forget a step.
+   */
+  async revokeAllAccess(userId: number): Promise<void> {
+    await this.db.user
+      .update({
+        where: { id: userId },
+        data: { tokenVersion: { increment: 1 } } as never,
+      })
+      .catch((e: { code?: string }) => {
+        if (e?.code !== 'P2025') throw e; // already deleted
+      });
+    await this.refreshTokenStore.revokeAll(userId);
+    await this.sessions.revokeMany('lms', userId);
+    await this.authCache.invalidate(userId);
+  }
+
+  /** Drop cached auth entries (e.g. for every user of a school whose active flag changed). */
+  async invalidateAuthCacheFor(userIds: number[]): Promise<void> {
+    for (let i = 0; i < userIds.length; i += 1000) {
+      await this.authCache.invalidate(userIds.slice(i, i + 1000));
+    }
   }
 
   /** Ends only the calling device's session; other devices stay signed in. */

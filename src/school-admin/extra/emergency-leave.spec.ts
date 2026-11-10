@@ -56,6 +56,7 @@ function make(
     realtime,
     {} as any,
     notifications,
+    {} as any,
   );
   return { ctl, db, attendanceUpsert, leaveCreate, notifications };
 }

@@ -63,7 +63,11 @@ export class ApiAuthController {
     @CurrentUser() user: { id: number },
     @Body() dto: ResetPasswordDto,
   ): Promise<{ success: boolean }> {
-    await this.authService.resetPassword(user.id, dto.password);
+    await this.authService.resetOwnPassword(
+      user.id,
+      dto.current_password,
+      dto.password,
+    );
     return { success: true };
   }
 }

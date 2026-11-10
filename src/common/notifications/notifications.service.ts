@@ -334,10 +334,7 @@ export class NotificationsService {
     } else if (mode === 'all') {
       where = {
         deletedAt: null,
-        OR: [
-          { userId },
-          { senderId: userId, ...recipientFilter },
-        ],
+        OR: [{ userId }, { senderId: userId, ...recipientFilter }],
       };
     } else {
       where = { userId, deletedAt: null };
@@ -357,9 +354,17 @@ export class NotificationsService {
 
     const q = (search ?? '').trim();
     if (q) {
-      where.OR = [
-        { title: { contains: q, mode: 'insensitive' } },
-        { message: { contains: q, mode: 'insensitive' } },
+      // AND-combine: in 'all' mode `where.OR` already encodes ownership
+      // (recipient OR sender). Assigning to where.OR here used to REPLACE it, so
+      // a search returned every user's notifications. Notification has no
+      // schoolId and no tenant scoping, so this clause is the isolation boundary.
+      where.AND = [
+        {
+          OR: [
+            { title: { contains: q, mode: 'insensitive' } },
+            { message: { contains: q, mode: 'insensitive' } },
+          ],
+        },
       ];
     }
 
@@ -629,7 +634,9 @@ export class NotificationsService {
     if (!canReply)
       throw new ForbiddenException('Cannot reply to this notification');
     if (!notification.allowReplies)
-      throw new ForbiddenException('Replies are disabled for this notification');
+      throw new ForbiddenException(
+        'Replies are disabled for this notification',
+      );
 
     const text = String(replyText ?? '').trim();
     if (!text) throw new BadRequestException('reply_text is required');

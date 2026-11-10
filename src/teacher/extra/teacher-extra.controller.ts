@@ -45,6 +45,45 @@ export class TeacherExtraController {
     private readonly notificationsService: NotificationsService,
   ) {}
 
+  /**
+   * Shared (school-less, admin-authored) assignments are used by many schools.
+   * A teacher may change/delete them only if they authored them; otherwise only
+   * an administrator may (a teacher edit or delete would hit every school).
+   */
+  private assertMayModifyAssignment(
+    userId: number,
+    a: { schoolId: string | null; teacherId: number | null },
+  ): void {
+    if (!a.schoolId && a.teacherId !== userId) {
+      throw new ForbiddenException(
+        'Shared course assignments can only be changed by an administrator',
+      );
+    }
+  }
+
+  /**
+   * For a shared assignment, submissions from every school exist; a teacher may
+   * only see/grade their own schools' students. School-owned assignments need no
+   * extra filter (access already required membership of that school).
+   */
+  private async sharedStudentScope(
+    userId: number,
+    a: { schoolId: string | null },
+  ): Promise<Record<string, unknown>> {
+    if (a.schoolId) return {};
+    const ids = (
+      await this.db.teacherSchool.findMany({
+        where: { teacherId: userId },
+        select: { schoolId: true },
+      })
+    ).map((t) => t.schoolId);
+    return {
+      student: {
+        studentSchools: { some: { isActive: true, schoolId: { in: ids } } },
+      },
+    };
+  }
+
   private async canTeacherAccessAssignment(
     userId: number,
     assignment: {
@@ -54,15 +93,22 @@ export class TeacherExtraController {
       chapterId: string | null;
     },
   ): Promise<boolean> {
-    if (assignment.teacherId === userId) return true;
     const teacherSchools = await this.db.teacherSchool.findMany({
       where: { teacherId: userId },
       select: { schoolId: true },
     });
     const schoolIds = teacherSchools.map((s) => s.schoolId);
+    // Authorship is not a standing entitlement: a teacher removed from the
+    // assignment's school loses access to it (school-less/global ones stay).
+    if (assignment.teacherId === userId)
+      return !assignment.schoolId || schoolIds.includes(assignment.schoolId);
     if (!schoolIds.length) return false;
     if (assignment.schoolId && schoolIds.includes(assignment.schoolId))
       return true;
+    // An assignment owned by a school the teacher does NOT belong to is never
+    // reachable through shared course access; that fallback is only for
+    // school-less (admin-authored, shared) assignments.
+    if (assignment.schoolId) return false;
 
     // chapterId may be null for DAILY assignments; fall back to courseId directly
     const chapter = assignment.chapterId
@@ -1300,12 +1346,20 @@ export class TeacherExtraController {
       assignments = await this.db.assignment.findMany({
         where: {
           assignmentType: 'COURSE',
-          OR: [
-            ...(chapterIds.length ? [{ chapterId: { in: chapterIds } }] : []),
-            ...(accessibleCourseIds.length
-              ? [{ courseId: { in: accessibleCourseIds } }]
-              : []),
-            { teacherId: user.id, schoolId: { in: allowedSchoolIds } },
+          AND: [
+            // Never list another school's assignment just because the course is shared.
+            { OR: [{ schoolId: null }, { schoolId: { in: allowedSchoolIds } }] },
+            {
+              OR: [
+                ...(chapterIds.length
+                  ? [{ chapterId: { in: chapterIds } }]
+                  : []),
+                ...(accessibleCourseIds.length
+                  ? [{ courseId: { in: accessibleCourseIds } }]
+                  : []),
+                { teacherId: user.id, schoolId: { in: allowedSchoolIds } },
+              ],
+            },
           ],
         },
         orderBy: { createdAt: 'desc' },
@@ -1617,6 +1671,7 @@ export class TeacherExtraController {
     ) {
       throw new NotFoundException('Assignment not found');
     }
+    this.assertMayModifyAssignment(user.id, current);
 
     if (Array.isArray(body.questions) || body.totalMarks != null) {
       const questionRows = Array.isArray(body.questions)
@@ -1765,6 +1820,7 @@ export class TeacherExtraController {
     ) {
       throw new NotFoundException('Assignment not found');
     }
+    this.assertMayModifyAssignment(user.id, assignment);
 
     // Deleting an assignment with graded submissions removes score-bearing
     // rows the cached global leaderboard (StudentRankingService) was built
@@ -1816,6 +1872,7 @@ export class TeacherExtraController {
     ) {
       throw new NotFoundException('Assignment not found');
     }
+    this.assertMayModifyAssignment(user.id, assignment);
     const updated = await this.db.assignment.update({
       where: { id: assignmentId },
       data: {
@@ -1881,11 +1938,44 @@ export class TeacherExtraController {
     ) {
       throw new NotFoundException('Assignment not found');
     }
-    const studentIds = (body.studentIds ?? [])
-      .map((x) => Number(x))
-      .filter((x) => Number.isFinite(x) && x > 0);
-    if (!studentIds.length)
+    const requestedIds = [
+      ...new Set(
+        (body.studentIds ?? [])
+          .map((x) => Number(x))
+          .filter((x) => Number.isInteger(x) && x > 0),
+      ),
+    ].slice(0, 500);
+    if (!requestedIds.length)
       throw new BadRequestException('studentIds are required');
+
+    // Only students actively enrolled in the assignment's school (or, for
+    // school-less shared assignments, in one of this teacher's schools).
+    const scopeSchoolIds = assignment.schoolId
+      ? [assignment.schoolId]
+      : (
+          await this.db.teacherSchool.findMany({
+            where: { teacherId: user.id },
+            select: { schoolId: true },
+          })
+        ).map((t) => t.schoolId);
+    const studentIds = [
+      ...new Set(
+        (
+          await this.db.studentSchool.findMany({
+            where: {
+              studentId: { in: requestedIds },
+              schoolId: { in: scopeSchoolIds },
+              isActive: true,
+            },
+            select: { studentId: true },
+          })
+        ).map((r) => r.studentId),
+      ),
+    ];
+    if (!studentIds.length)
+      throw new BadRequestException(
+        'None of the given students belong to this assignment\'s school',
+      );
 
     const isActive = body.isActive ?? true;
     await Promise.all(
@@ -2111,9 +2201,18 @@ export class TeacherExtraController {
     @CurrentUser() user: { id: number },
     @Query('status') status?: string,
   ) {
+    // targetTeacherIds is a snapshot taken at request time; also require the
+    // teacher to still belong to the request's school.
+    const mySchoolIds = (
+      await this.db.teacherSchool.findMany({
+        where: { teacherId: user.id },
+        select: { schoolId: true },
+      })
+    ).map((t) => t.schoolId);
     const requests = await this.db.retakeRequest.findMany({
       where: {
         targetTeacherIds: { has: user.id },
+        OR: [{ schoolId: null }, { schoolId: { in: mySchoolIds } }],
         ...(status ? { status } : {}),
       },
       orderBy: { createdAt: 'desc' },
@@ -2197,6 +2296,15 @@ export class TeacherExtraController {
     if (!request) throw new NotFoundException('Retake request not found');
     if (!request.targetTeacherIds.includes(user.id)) {
       throw new ForbiddenException('You are not assigned to this request');
+    }
+    if (request.schoolId) {
+      const stillMember = await this.db.teacherSchool.findFirst({
+        where: { teacherId: user.id, schoolId: request.schoolId },
+        select: { teacherId: true },
+      });
+      if (!stillMember) {
+        throw new ForbiddenException('You are not assigned to this request');
+      }
     }
     if (request.status !== 'pending') {
       throw new BadRequestException('This request has already been decided');
@@ -2314,14 +2422,24 @@ export class TeacherExtraController {
         continue;
 
       const submission = await this.db.assignmentSubmission.findFirst({
-        where: { id: g.submissionId, assignmentId: g.assignmentId },
+        where: {
+          id: g.submissionId,
+          assignmentId: g.assignmentId,
+          ...(await this.sharedStudentScope(user.id, assignment)),
+        },
       });
       if (!submission) continue;
+
+      // Same bounds as the single-grade route: finite, >= 0, <= max marks.
+      const score = Number(g.score);
+      const cap = submission.maxScore ?? assignment.totalMarks;
+      if (!Number.isFinite(score) || score < 0 || (cap != null && score > cap))
+        continue;
 
       const updated = await this.db.assignmentSubmission.update({
         where: { id: g.submissionId },
         data: {
-          score: Number(g.score),
+          score,
           feedback: g.feedback ?? null,
           status: 'graded',
           gradedAt: new Date(),
@@ -2409,7 +2527,10 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     const submissions = await this.db.assignmentSubmission.findMany({
-      where: { assignmentId },
+      where: {
+        assignmentId,
+        ...(await this.sharedStudentScope(user.id, assignment)),
+      },
       orderBy: [{ studentId: 'asc' }, { attemptNumber: 'asc' }],
       include: {
         student: {
@@ -2529,7 +2650,11 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     const submission = await this.db.assignmentSubmission.findFirst({
-      where: { id: submissionId, assignmentId },
+      where: {
+        id: submissionId,
+        assignmentId,
+        ...(await this.sharedStudentScope(user.id, assignment)),
+      },
     });
     if (!submission) throw new NotFoundException('Submission not found');
 
@@ -2613,9 +2738,14 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     const studentIdNum = Number(studentId);
+    const sharedScope = await this.sharedStudentScope(user.id, assignment);
     const attempts = await this.runInSchool(assignment.schoolId, () =>
       this.db.assignmentSubmission.findMany({
-        where: { assignmentId, studentId: studentIdNum },
+        where: {
+          assignmentId,
+          studentId: studentIdNum,
+          ...sharedScope,
+        },
         orderBy: { attemptNumber: 'asc' },
         select: {
           id: true,
@@ -2663,7 +2793,10 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     const latestByStudent = await this.db.assignmentSubmission.findMany({
-      where: { assignmentId },
+      where: {
+        assignmentId,
+        ...(await this.sharedStudentScope(user.id, assignment)),
+      },
       orderBy: [{ studentId: 'asc' }, { attemptNumber: 'desc' }],
       distinct: ['studentId'],
       select: { studentId: true, score: true, status: true, submittedAt: true },

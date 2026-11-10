@@ -11,7 +11,13 @@ export class ProfileService {
       include: { profile: true },
     });
     if (!user) throw new NotFoundException('User not found');
-    const { password: _, profile: profileRow, ...userRest } = user;
+    const {
+      password: _pw,
+      initialPassword: _ip,
+      tokenVersion: _tv,
+      profile: profileRow,
+      ...userRest
+    } = user;
     const profile = {
       ...userRest,
       id: String(user.id),
@@ -124,7 +130,13 @@ export class ProfileService {
       include: { profile: true },
     });
 
-    const { password: _, profile: profileRow, ...userRest } = updated;
+    const {
+      password: _pw,
+      initialPassword: _ip,
+      tokenVersion: _tv,
+      profile: profileRow,
+      ...userRest
+    } = updated;
     return {
       profile: {
         ...userRest,

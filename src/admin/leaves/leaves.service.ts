@@ -9,7 +9,7 @@ import { NotificationsService } from '../../common/notifications/notifications.s
 import { Role } from '@prisma/client';
 import { assertAdminMayApproveEmergency, isEmergencyLeave, leaveStageFields, revertLeaveApprovedAttendance } from '../../common/utils/leave-rules.util';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed } from '../../common/utils/leave-rules.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan } from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class AdminLeavesService {
@@ -151,6 +151,7 @@ export class AdminLeavesService {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
     if (start > end) throw new BadRequestException('End date must be on or after start date');
+    assertLeaveSpan(start_date, end_date);
     assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
 
     const assigned = await this.db.teacherSchool.findFirst({

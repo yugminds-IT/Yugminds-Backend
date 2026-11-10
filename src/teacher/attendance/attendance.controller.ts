@@ -31,7 +31,9 @@ export class TeacherAttendanceController {
     return this.service.getMonthly(
       user.id,
       schoolId,
-      limit ? parseInt(limit, 10) : 6,
+      // Bounded: each month costs several queries, and an unbounded value let one
+      // request fan out into thousands of concurrent queries on the shared pool.
+      Math.min(Math.max(Number.parseInt(limit ?? '', 10) || 6, 1), 24),
       yearMonth,
     );
   }

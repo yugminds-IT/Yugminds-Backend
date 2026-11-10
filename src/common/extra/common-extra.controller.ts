@@ -181,13 +181,20 @@ export class CommonExtraController {
       message,
     });
     // The YugMinds brief form gets a "we've got your brief" email back.
+    // At most one confirmation per address per hour: the address is unverified, so
+    // without this the form could be used to repeatedly mail a third party in our name.
     if (source === 'yugminds') {
-      this.leadAlerts.confirmBrief({
-        firstName,
-        email,
-        project: purpose.replace(/^Project brief:\s*/, ''),
-        message,
+      const recent = await this.db.contactSubmission.count({
+        where: {
+          email,
+          source: 'yugminds',
+          createdAt: { gt: new Date(Date.now() - 60 * 60 * 1000) },
+        },
       });
+      if (recent <= 1) {
+        // (the submission just created is the one)
+        this.leadAlerts.confirmBrief({ firstName, email });
+      }
     }
 
     return { success: true };
@@ -233,78 +240,6 @@ export class CommonExtraController {
   }
 
   // Auth helpers / debug
-
-  @Post('auth/track-login')
-  async trackLogin(
-    @Body()
-    body: {
-      user_id?: string;
-      email?: string;
-      success?: boolean;
-      failure_reason?: string;
-      ip_address?: string | null;
-      user_agent?: string | null;
-      action?: string;
-      metadata?: Record<string, unknown>;
-    },
-  ) {
-    const parsedUserId =
-      typeof body.user_id === 'string' && body.user_id.trim()
-        ? parseInt(body.user_id, 10)
-        : undefined;
-    const userId =
-      typeof parsedUserId === 'number' && Number.isFinite(parsedUserId)
-        ? parsedUserId
-        : undefined;
-
-    const created = await this.db.authActivity.create({
-      data: {
-        userId,
-        email:
-          typeof body.email === 'string' && body.email.trim()
-            ? body.email.trim()
-            : null,
-        action:
-          typeof body.action === 'string' && body.action.trim()
-            ? body.action.trim()
-            : 'login',
-        success: Boolean(body.success),
-        failureReason:
-          typeof body.failure_reason === 'string' && body.failure_reason.trim()
-            ? body.failure_reason.trim()
-            : null,
-        ipAddress:
-          typeof body.ip_address === 'string' && body.ip_address.trim()
-            ? body.ip_address.trim()
-            : null,
-        userAgent:
-          typeof body.user_agent === 'string' && body.user_agent.trim()
-            ? body.user_agent.trim()
-            : null,
-        metadata:
-          body.metadata &&
-          typeof body.metadata === 'object' &&
-          !Array.isArray(body.metadata)
-            ? (body.metadata as any)
-            : undefined,
-      },
-    });
-
-    return {
-      success: true,
-      activity: {
-        id: created.id,
-        user_id: created.userId ? String(created.userId) : null,
-        email: created.email ?? null,
-        action: created.action,
-        success: created.success,
-        failure_reason: created.failureReason ?? null,
-        ip_address: created.ipAddress ?? null,
-        user_agent: created.userAgent ?? null,
-        created_at: created.createdAt.toISOString(),
-      },
-    };
-  }
 
   @Get('auth/activity')
   @Public(false)
@@ -500,7 +435,9 @@ export class CommonExtraController {
           })
         )?.chapterNumber
       : null;
-    const safeCoursePart = courseNumber ? `course-${courseNumber}` : 'unassigned';
+    const safeCoursePart = courseNumber
+      ? `course-${courseNumber}`
+      : 'unassigned';
     const safeChapterPart = chapterNumber
       ? `chapter-${chapterNumber}`
       : 'unassigned';
@@ -570,9 +507,7 @@ export class CommonExtraController {
           id: cert.id,
           short_id: StudentExtraController.shortCertId(cert.id),
           student_name:
-            cert.student?.profile?.fullName ??
-            cert.student?.email ??
-            'Student',
+            cert.student?.profile?.fullName ?? cert.student?.email ?? 'Student',
           course_title: cert.course?.title ?? '',
           certificate_name: cert.certificateName,
           issued_at: cert.issuedAt.toISOString(),

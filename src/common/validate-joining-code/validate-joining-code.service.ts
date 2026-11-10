@@ -120,6 +120,29 @@ export class ValidateJoiningCodeService {
       return { success: false, error: 'Email and password are required' };
     }
 
+    // Claim the use atomically BEFORE creating the account. A check-then-increment
+    // from a stale read lets concurrent requests all pass; the conditional
+    // updateMany lets only `cap` of them win. Released below if signup fails.
+    const cap =
+      joinCode.usageType === 'single'
+        ? Math.min(1, joinCode.maxUses ?? 1)
+        : joinCode.maxUses;
+    let claimed = false;
+    if (cap != null) {
+      const res = await this.db.joinCode.updateMany({
+        where: { id: joinCode.id, isActive: true, usedCount: { lt: cap } },
+        data: { usedCount: { increment: 1 } },
+      });
+      if (res.count === 0) {
+        return {
+          success: false,
+          error: 'This joining code has reached its maximum uses',
+          message: 'This joining code has reached its maximum uses',
+        };
+      }
+      claimed = true;
+    }
+
     try {
       // Run all DB operations inside the school's tenant context.
       // This endpoint is @Public() so TenantContextInterceptor never runs,
@@ -172,18 +195,6 @@ export class ValidateJoiningCodeService {
           },
         });
 
-        if (joinCode.usageType === 'single') {
-          await this.db.joinCode.update({
-            where: { id: joinCode.id },
-            data: { usedCount: joinCode.usedCount + 1 },
-          });
-        } else if (joinCode.maxUses != null) {
-          await this.db.joinCode.update({
-            where: { id: joinCode.id },
-            data: { usedCount: joinCode.usedCount + 1 },
-          });
-        }
-
         return {
           success: true,
           school_name: joinCode.school?.name,
@@ -193,6 +204,14 @@ export class ValidateJoiningCodeService {
         };
       });
     } catch (err: unknown) {
+      if (claimed) {
+        await this.db.joinCode
+          .updateMany({
+            where: { id: joinCode.id, usedCount: { gt: 0 } },
+            data: { usedCount: { decrement: 1 } },
+          })
+          .catch(() => undefined); // best effort: a failed signup must not burn the use
+      }
       const msg = err instanceof Error ? err.message : 'Registration failed';
       const isDuplicate =
         typeof msg === 'string' && msg.toLowerCase().includes('already in use');

@@ -28,8 +28,14 @@ export class RankingService {
     studentId: number,
     courseId?: string | null,
   ): Promise<void> {
+    // Only assignments this student has submitted to can contribute (the loop below
+    // skips the rest), so never scan every assignment on the platform: with no
+    // courseId that was a table-wide read triggered by every single submit.
     const assignments = await this.db.assignment.findMany({
-      where: courseId ? { courseId } : undefined,
+      where: {
+        ...(courseId ? { courseId } : {}),
+        submissions: { some: { studentId } },
+      },
       select: {
         id: true,
         courseId: true,

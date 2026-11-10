@@ -64,6 +64,9 @@ export class AdminTeachersController {
   }
 
   @Put(':id')
+  // Writes email / password / tenantId / isActive on ANY user id, so it must not
+  // inherit the class-level school_admin allowance.
+  @Roles(Role.admin)
   update(
     @Param('id') id: string,
     @Body() body: Record<string, unknown>,

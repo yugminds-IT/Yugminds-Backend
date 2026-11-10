@@ -42,6 +42,24 @@ import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 // Enrollment rows outlive unpublish/trash; students only reach live courses.
 const LIVE_COURSE = { isPublished: true, deletedAt: null };
 
+/** Allowed student submission uploads: extension -> the Content-Type we store (never the client's). */
+const SUBMISSION_FILE_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  txt: 'text/plain',
+  zip: 'application/zip',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+};
+
 @Controller('student')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.student)
@@ -346,12 +364,23 @@ export class StudentExtraController {
     },
   ) {
     if (!file) throw new BadRequestException('file is required');
-    const mime = file.mimetype || 'application/octet-stream';
+    // The stored Content-Type comes from OUR extension allowlist, never from the
+    // client: a student could otherwise upload text/html or image/svg+xml into the
+    // public bucket. Everything except plain images is served as a download.
+    const ext = (file.originalname.split('.').pop() ?? '').toLowerCase();
+    const mime = SUBMISSION_FILE_TYPES[ext];
+    if (!mime) {
+      throw new BadRequestException(
+        `File type ".${ext}" is not allowed. Allowed: ${Object.keys(SUBMISSION_FILE_TYPES).join(', ')}`,
+      );
+    }
     const key = this.storage.buildKey(
       `assignment-submissions/${user.id}`,
       file.originalname,
     );
-    const fileUrl = await this.storage.uploadBuffer(key, file.buffer, mime);
+    const fileUrl = await this.storage.uploadBuffer(key, file.buffer, mime, {
+      contentDisposition: mime.startsWith('image/') ? 'inline' : 'attachment',
+    });
     return {
       success: true,
       file: {
@@ -1411,16 +1440,9 @@ export class StudentExtraController {
 
     // DAILY assignments are school-scoped — verify school membership, not course enrollment
     if (assignment.assignmentType === 'DAILY') {
-      if (assignment.schoolId) {
-        const schoolMember = await this.db.studentSchool.findFirst({
-          where: {
-            studentId: user.id,
-            schoolId: assignment.schoolId,
-            isActive: true,
-          },
-        });
-        if (!schoolMember) throw new NotFoundException('Assignment not found');
-      }
+      // Same publish + audience rule as the list, not just school membership.
+      if (!(await this.dailyAssignments.isVisibleToStudent(user.id, assignment)))
+        throw new NotFoundException('Assignment not found');
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
       if (!courseId) throw new NotFoundException('Assignment not found');
@@ -1744,16 +1766,9 @@ export class StudentExtraController {
 
     // DAILY assignments: verify school membership. COURSE assignments: verify enrollment.
     if (assignment.assignmentType === 'DAILY') {
-      if (assignment.schoolId) {
-        const schoolMember = await this.db.studentSchool.findFirst({
-          where: {
-            studentId: user.id,
-            schoolId: assignment.schoolId,
-            isActive: true,
-          },
-        });
-        if (!schoolMember) throw new NotFoundException('Assignment not found');
-      }
+      // Same publish + audience rule as the list, not just school membership.
+      if (!(await this.dailyAssignments.isVisibleToStudent(user.id, assignment)))
+        throw new NotFoundException('Assignment not found');
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
       if (!courseId) throw new NotFoundException('Assignment not found');
@@ -2074,6 +2089,63 @@ export class StudentExtraController {
     return this.fetchProgress(user.id, courseId);
   }
 
+  /**
+   * Progress writes are client-reported, so validate what they refer to and never
+   * let a client assert more than the server can see: ids must belong to the
+   * course, the chapter must be unlocked, and a chapter-level "completed" is only
+   * accepted once every content item in it already has a completed row.
+   * Returns the (possibly capped) value to store.
+   */
+  private async validateProgressWrite(
+    studentId: number,
+    courseId: string,
+    chapterId: string | null | undefined,
+    contentId: string | null | undefined,
+    value: number,
+  ): Promise<number> {
+    if (!chapterId) {
+      if (contentId) throw new BadRequestException('chapterId required');
+      return value;
+    }
+    const chapter = await this.db.chapter.findFirst({
+      where: { id: chapterId, courseId },
+      select: { id: true },
+    });
+    if (!chapter)
+      throw new BadRequestException('Chapter does not belong to this course');
+    const unlock = (await this.computeChapterUnlockStates(studentId, courseId)).get(
+      chapterId,
+    );
+    if (unlock && !unlock.isUnlocked)
+      throw new BadRequestException('This chapter is locked');
+    if (contentId) {
+      const content = await this.db.chapterContent.findFirst({
+        where: { id: contentId, chapterId },
+        select: { id: true },
+      });
+      if (!content)
+        throw new BadRequestException('Content does not belong to this chapter');
+      return value;
+    }
+    if (value >= 99) {
+      const contents = await this.db.chapterContent.findMany({
+        where: { chapterId },
+        select: { id: true },
+      });
+      const done = await this.db.courseProgress.count({
+        where: {
+          studentId,
+          courseId,
+          chapterId,
+          contentId: { in: contents.map((c) => c.id) },
+          progress: { gte: 99 },
+        },
+      });
+      if (done < contents.length) return 98; // not all contents done: not complete
+    }
+    return value;
+  }
+
   @Get('simple-progress')
   async getSimpleProgress(
     @CurrentUser() user: { id: number },
@@ -2102,12 +2174,18 @@ export class StudentExtraController {
     const courseId = dto.courseId;
     const chapterId = dto.chapterId;
     const contentId = dto.contentId;
-    const value = dto.isCompleted ? 100 : 0;
 
     const enrolled = await this.findLiveEnrollment(user.id, courseId);
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
+    const value = await this.validateProgressWrite(
+      user.id,
+      courseId,
+      chapterId,
+      contentId,
+      dto.isCompleted ? 100 : 0,
+    );
 
     const existing = await (this.db.courseProgress as any).findFirst({
       where: {
@@ -2174,7 +2252,13 @@ export class StudentExtraController {
     if (!enrolled) {
       throw new NotFoundException('Not enrolled in this course');
     }
-    const value = Math.min(100, Math.max(0, progressValue));
+    const value = await this.validateProgressWrite(
+      user.id,
+      courseId,
+      chapterId,
+      null,
+      Math.min(100, Math.max(0, progressValue)),
+    );
     const existing = await this.db.courseProgress.findFirst({
       where: {
         studentId: user.id,

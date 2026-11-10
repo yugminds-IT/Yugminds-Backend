@@ -1,4 +1,5 @@
 import { Body, Controller, Post } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Public } from '../../auth/decorators/public.decorator';
 import { ValidateJoiningCodeService } from './validate-joining-code.service';
 
@@ -7,6 +8,9 @@ export class ValidateJoiningCodeController {
   constructor(private readonly service: ValidateJoiningCodeService) {}
 
   @Public()
+  // Per client IP (the proxy forwards it). Generous enough for a classroom
+  // registering together from one school IP, tight enough to stop code guessing.
+  @Throttle({ default: { limit: 120, ttl: 60000 } })
   @Post()
   async validate(
     @Body()

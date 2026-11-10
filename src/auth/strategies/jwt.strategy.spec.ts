@@ -10,12 +10,33 @@ describe('JwtStrategy session check', () => {
     tenantId: 't1',
     tokenVersion: 0,
   };
-  const build = (alive: boolean) => {
+  const build = (
+    alive: boolean,
+    o: {
+      user?: Record<string, unknown>;
+      school?: { isActive: boolean } | null;
+      cached?: Record<string, unknown> | null;
+    } = {},
+  ) => {
     const sessions = { isAlive: jest.fn().mockResolvedValue(alive) };
     const strat = new JwtStrategy(
       { get: () => 'secret' } as never,
-      { user: { findUnique: jest.fn().mockResolvedValue(user) } } as never,
-      { get: jest.fn().mockResolvedValue(null), set: jest.fn() } as never,
+      {
+        user: {
+          findUnique: jest.fn().mockResolvedValue({ ...user, ...o.user }),
+        },
+        school: {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue(
+              o.school === undefined ? { isActive: true } : o.school,
+            ),
+        },
+      } as never,
+      {
+        get: jest.fn().mockResolvedValue(o.cached ?? null),
+        set: jest.fn(),
+      } as never,
       sessions as never,
     );
     return { strat, sessions };
@@ -56,5 +77,44 @@ describe('JwtStrategy session check', () => {
       strat.validate({ ...payload, impersonatorId: 9 }),
     ).resolves.toMatchObject({ id: 1 });
     expect(sessions.isAlive).not.toHaveBeenCalled();
+  });
+
+  describe('deactivated accounts are rejected per request, not only at login', () => {
+    const live = { ...payload, sid: 's1' };
+
+    it('rejects a deactivated user', async () => {
+      const { strat } = build(true, { user: { isActive: false } });
+      await expect(strat.validate(live)).rejects.toThrow(/inactive/);
+    });
+
+    it('rejects a user of a deactivated school', async () => {
+      const { strat } = build(true, { school: { isActive: false } });
+      await expect(strat.validate(live)).rejects.toThrow(/inactive/);
+    });
+
+    it('still lets a global admin through even if no school is active', async () => {
+      const { strat } = build(true, {
+        user: { role: 'admin', tenantId: null },
+        school: { isActive: false },
+      });
+      await expect(
+        strat.validate({ ...live, role: 'admin' }),
+      ).resolves.toMatchObject({
+        id: 1,
+      });
+    });
+
+    it('rejects from the cache when the cached entry says inactive', async () => {
+      const { strat } = build(true, {
+        cached: {
+          tokenVersion: 0,
+          tenantId: 't1',
+          role: 'teacher',
+          isSuperAdmin: false,
+          active: false,
+        },
+      });
+      await expect(strat.validate(live)).rejects.toThrow(/inactive/);
+    });
   });
 });

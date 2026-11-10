@@ -162,6 +162,49 @@ export class PasswordResetRequestService {
     };
   }
 
+  /**
+   * A school admin may reset only accounts that belong to their school alone:
+   * a student of this school (and no other), or a teacher assigned to this school
+   * and no other. Peer school admins, platform admins, and accounts shared with
+   * another school are the platform admin's to reset: the request's schoolId is
+   * derived from profile/tenant for any role, so equality of schoolId proves nothing.
+   */
+  private async assertSchoolAdminMayReset(
+    target: { id: number; role: string; tenantId: string | null },
+    schoolId: string,
+  ): Promise<void> {
+    const deny = () =>
+      new BadRequestException(
+        'You do not have permission to reset this account. Ask a platform administrator.',
+      );
+    if (target.role === 'student') {
+      const memberships = await this.db.studentSchool.findMany({
+        where: { studentId: target.id, isActive: true },
+        select: { schoolId: true },
+      });
+      if (
+        !memberships.some((m) => m.schoolId === schoolId) ||
+        memberships.some((m) => m.schoolId !== schoolId)
+      )
+        throw deny();
+      return;
+    }
+    if (target.role === 'teacher') {
+      const memberships = await this.db.teacherSchool.findMany({
+        where: { teacherId: target.id },
+        select: { schoolId: true },
+      });
+      if (
+        !memberships.some((m) => m.schoolId === schoolId) ||
+        memberships.some((m) => m.schoolId !== schoolId) ||
+        (target.tenantId != null && target.tenantId !== schoolId)
+      )
+        throw deny();
+      return;
+    }
+    throw deny(); // school_admin / admin accounts
+  }
+
   async update(
     payload: UpdatePayload,
     opts?: UpdateOptions,
@@ -183,6 +226,12 @@ export class PasswordResetRequestService {
     ) {
       throw new BadRequestException(
         'You do not have permission to update this request',
+      );
+    }
+    if (opts?.restrictToSchoolId != null) {
+      await this.assertSchoolAdminMayReset(
+        request.user,
+        opts.restrictToSchoolId,
       );
     }
     if (request.status !== 'pending') {

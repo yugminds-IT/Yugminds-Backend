@@ -59,8 +59,11 @@ export class MonitoringInterceptor implements NestInterceptor {
     // response has genuinely been sent, so res.statusCode is final and
     // correct for both success and error paths.
     res.on('finish', () => {
+      // Label by the matched route template (bounded set), never by raw path text:
+      // anonymous clients control the raw path and could otherwise mint unlimited keys.
+      const routePath = req?.route?.path;
       this.monitoring.record({
-        endpoint,
+        endpoint: routePath ? String(routePath) : '(unmatched)',
         method,
         duration: Date.now() - start,
         statusCode: Number(res.statusCode) || 200,

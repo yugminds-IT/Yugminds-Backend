@@ -294,14 +294,12 @@ export class AdminJoiningCodesService {
     const sectionAbbr = sectionName
       ? deriveSectionAbbreviation(sectionName)
       : undefined;
-    const base = buildJoinCodeCandidate(schoolCode, gradeAbbr, sectionAbbr);
-
+    // Each candidate carries a fresh random suffix, so a collision just retries.
     for (let attempt = 0; attempt < 20; attempt++) {
-      const code = attempt === 0 ? base : `${base}-${attempt + 1}`;
+      const code = buildJoinCodeCandidate(schoolCode, gradeAbbr, sectionAbbr);
       const existing = await this.db.joinCode.findUnique({ where: { code } });
       if (!existing) return code;
     }
-    const raw = Math.random().toString(36).slice(2, 6).toUpperCase();
-    return `${base}-${raw}`;
+    throw new Error('Could not generate a unique joining code');
   }
 }

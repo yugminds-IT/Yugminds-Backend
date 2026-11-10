@@ -10,6 +10,7 @@ import { Observable, Subscription } from 'rxjs';
 import { tenantContext } from './tenant-context';
 import { CurrentUserPayload } from '../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../database/database.service';
+import { isSchoolActive } from '../auth/account-active.util';
 
 @Injectable()
 export class TenantContextInterceptor implements NestInterceptor {
@@ -66,6 +67,13 @@ export class TenantContextInterceptor implements NestInterceptor {
         );
         if (!isMember) {
           throw new ForbiddenException('Not assigned to this school');
+        }
+        // Membership alone isn't enough: a deactivated school stays closed.
+        const schoolOpen = await tenantContext.runSuperAdmin(
+          async () => await isSchoolActive(this.db as any, requestedSchoolId),
+        );
+        if (!schoolOpen) {
+          throw new ForbiddenException('This school has been deactivated');
         }
         return this.bindTenantContext(
           { mode: 'tenant', tenantId: requestedSchoolId },

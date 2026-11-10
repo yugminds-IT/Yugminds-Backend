@@ -17,6 +17,7 @@ import { Roles } from '../../auth/decorators/roles.decorator';
 import { Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
+import { AuthService } from '../../auth/auth.service';
 import { PasswordResetRequestService } from '../../common/password-reset-request/password-reset-request.service';
 import * as bcrypt from 'bcrypt';
 import { deriveFriendlyPassword } from '../../common/utils/password.util';
@@ -26,7 +27,7 @@ import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { getTodayIstDateOnly, getTodayIstDateStr, isSchoolAdminLeaveDeadlinePassed } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, applyApprovedLeaveToAttendance, revertLeaveApprovedAttendance, assertSchoolAdminStageOpen, isEmergencyLeave, leaveStageFields } from '../../common/utils/leave-rules.util';
+import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan, applyApprovedLeaveToAttendance, revertLeaveApprovedAttendance, assertSchoolAdminStageOpen, isEmergencyLeave, leaveStageFields } from '../../common/utils/leave-rules.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import {
   WEEKDAY_NAMES,
@@ -55,6 +56,7 @@ export class SchoolAdminExtraController {
     private readonly realtimeGateway: RealtimeGateway,
     private readonly enrollmentService: EnrollmentService,
     private readonly notificationsService: NotificationsService,
+    private readonly authService: AuthService,
   ) {}
 
 
@@ -1274,6 +1276,10 @@ export class SchoolAdminExtraController {
 
       return { u, p, ss };
     });
+    if (nextEmail && nextEmail !== existing.email) {
+      // Login identifier changed: end the previous holder's sessions.
+      await this.authService.revokeAllAccess(studentId);
+    }
 
     // If grade or section changed, auto-enroll in courses now accessible to
     // the new grade/section (section-gated courses depend on section too).
@@ -1340,6 +1346,7 @@ export class SchoolAdminExtraController {
       where: { id: studentId },
       data: { password: hash, initialPassword: password, mustChangePassword: true },
     });
+    await this.authService.revokeAllAccess(studentId);
     return { success: true };
   }
 
@@ -1368,6 +1375,7 @@ export class SchoolAdminExtraController {
       throw new BadRequestException('Student not found in your school');
 
     if (doHard) {
+      await this.authService.revokeAllAccess(studentId);
       try {
         await this.db.user.delete({ where: { id: studentId } });
       } catch (err: unknown) {
@@ -1389,6 +1397,7 @@ export class SchoolAdminExtraController {
       where: { id: studentId },
       data: { isActive: false },
     });
+    await this.authService.revokeAllAccess(studentId);
     return { success: true, deleted: false, deactivated: true };
   }
 
@@ -2030,6 +2039,31 @@ export class SchoolAdminExtraController {
     return { progress };
   }
 
+  /** Subset of `ids` that are active students of `schoolId` (never other schools' students). */
+  private async activeSchoolStudentIds(
+    schoolId: string,
+    ids: number[],
+  ): Promise<number[]> {
+    if (ids.length === 0) return [];
+    const rows = await this.db.studentSchool.findMany({
+      where: { schoolId, studentId: { in: ids }, isActive: true },
+      select: { studentId: true },
+    });
+    return [...new Set(rows.map((r) => r.studentId))];
+  }
+
+  /** Whether this school has been granted the course (an arbitrary courseId must not be queryable). */
+  private async schoolHasCourse(
+    schoolId: string,
+    courseId: string,
+  ): Promise<boolean> {
+    const access = await this.db.courseAccess.findFirst({
+      where: { schoolId, courseId, course: { deletedAt: null } },
+      select: { courseId: true },
+    });
+    return !!access;
+  }
+
   @Get('courses/progress/students')
   async getCoursesProgressStudents(
     @CurrentUser() user: { id: number },
@@ -2037,6 +2071,8 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId) return { students: [] };
+    if (courseId && !(await this.schoolHasCourse(schoolId, courseId)))
+      return { students: [] };
     const courseIds = courseId
       ? [courseId]
       : (
@@ -2049,7 +2085,10 @@ export class SchoolAdminExtraController {
     const enrollments = await this.db.studentCourse.findMany({
       where: { courseId: { in: courseIds } },
     });
-    const studentIds = Array.from(new Set(enrollments.map((e) => e.studentId)));
+    const studentIds = await this.activeSchoolStudentIds(
+      schoolId,
+      Array.from(new Set(enrollments.map((e) => e.studentId))),
+    );
     if (studentIds.length === 0) return { students: [] };
     const users = await this.db.user.findMany({
       where: {
@@ -2086,6 +2125,8 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId || !courseId) return { students: [], chapters: [] };
+    if (!(await this.schoolHasCourse(schoolId, courseId)))
+      return { students: [], chapters: [] };
     const course = await this.db.course.findFirst({
       where: { id: courseId, deletedAt: null },
     });
@@ -2097,7 +2138,10 @@ export class SchoolAdminExtraController {
         ...(studentIdNum ? { studentId: studentIdNum } : {}),
       },
     });
-    const ids = enrollments.map((e) => e.studentId);
+    const ids = await this.activeSchoolStudentIds(
+      schoolId,
+      enrollments.map((e) => e.studentId),
+    );
     if (ids.length === 0) return { students: [], chapters: [] };
     const [progress, users, studentSchools, chapters, chapterContents] =
       await Promise.all([
@@ -2822,7 +2866,33 @@ export class SchoolAdminExtraController {
       });
       userIds = (await Promise.all(queries)).flat();
     } else {
-      userIds = recipients.map((id) => parseInt(id, 10)).filter((n) => !Number.isNaN(n));
+      // Individual recipients must belong to the caller's own school (same rule as
+      // the teacher/student notification handlers) — never raw user ids.
+      const requested = [
+        ...new Set(
+          recipients
+            .map((id) => parseInt(id, 10))
+            .filter((n) => Number.isInteger(n) && n > 0),
+        ),
+      ];
+      const ownSchoolId = await this.getSchoolId(user.id);
+      if (!ownSchoolId) throw new BadRequestException('School not found');
+      const [teachers, students] = await Promise.all([
+        this.db.teacherSchool.findMany({
+          where: { schoolId: ownSchoolId, teacherId: { in: requested } },
+          select: { teacherId: true },
+        }),
+        this.db.studentSchool.findMany({
+          where: { schoolId: ownSchoolId, studentId: { in: requested } },
+          select: { studentId: true },
+        }),
+      ]);
+      userIds = [
+        ...teachers.map((t) => t.teacherId),
+        ...students.map((s) => s.studentId),
+      ];
+      if (userIds.length === 0)
+        throw new BadRequestException('No valid recipients in your school');
     }
 
     const { sent } = await this.notificationsService.sendBroadcast(user.id, userIds, {
@@ -3467,6 +3537,7 @@ export class SchoolAdminExtraController {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
     if (start > end) throw new BadRequestException('End date must be on or after start date');
+    assertLeaveSpan(start_date, end_date);
     assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
 
     const assigned = await this.db.teacherSchool.findFirst({
@@ -3586,7 +3657,8 @@ export class SchoolAdminExtraController {
         id: String(body?.id ?? '').trim(),
         status: String(body?.status ?? '').trim(),
         notes: body?.notes,
-        approved_by: body?.approved_by ?? String(user.id),
+        // Always the real actor: a client-supplied approved_by would let an admin attribute the approval to someone else.
+        approved_by: String(user.id),
         temp_password: body?.temp_password,
       },
       { restrictToSchoolId: schoolId },

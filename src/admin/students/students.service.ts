@@ -532,14 +532,34 @@ export class AdminStudentsService {
     const grade = (body.grade as string | undefined) ?? null;
     const section = (body.section as string | undefined) ?? null;
 
+    // Credential / identity / active-state changes must end the account's live sessions.
+    // An unchanged email re-sent by the edit form is not an email change.
+    const current = data.email
+      ? await this.db.user.findUnique({
+          where: { id: studentId },
+          select: { email: true },
+        })
+      : null;
+    const emailChanged =
+      !!data.email &&
+      String(data.email).trim().toLowerCase() !==
+        (current?.email ?? '').toLowerCase();
+    const endSessions = !!(
+      data.password ||
+      emailChanged ||
+      data.isActive === false
+    );
+    if (endSessions) data.tokenVersion = { increment: 1 };
+
     if (Object.keys(data).length > 0) {
       await this.db.user.update({
         where: { id: studentId },
         data: data as never,
       });
-      if (data.password) {
+      if (endSessions) {
         await this.refreshTokenStore.revokeAll(studentId);
         await this.sessions.revokeMany('lms', studentId);
+        await this.authCache.invalidate(studentId);
       }
     }
 

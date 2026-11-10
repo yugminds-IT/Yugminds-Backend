@@ -7,6 +7,8 @@ export interface CachedAuthUser {
   tenantId: string | null;
   role: string;
   isSuperAdmin: boolean;
+  /** user.isActive AND (for tenant users) school.isActive; absent in pre-existing entries = active. */
+  active?: boolean;
 }
 
 /**

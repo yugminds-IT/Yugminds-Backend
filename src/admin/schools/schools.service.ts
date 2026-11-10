@@ -382,6 +382,24 @@ export class AdminSchoolsService {
         data: schoolData,
       });
     }
+    if (is_active !== undefined) {
+      // JwtStrategy / refresh now enforce School.isActive; flush the cached auth
+      // entries of everyone tied to this school so the change applies at once
+      // instead of after the 2-minute cache TTL.
+      const [tenantUsers, teachers] = await Promise.all([
+        this.db.user.findMany({ where: { tenantId: id }, select: { id: true } }),
+        this.db.teacherSchool.findMany({
+          where: { schoolId: school.id },
+          select: { teacherId: true },
+        }),
+      ]);
+      await this.authService.invalidateAuthCacheFor([
+        ...new Set([
+          ...tenantUsers.map((u) => u.id),
+          ...teachers.map((t) => t.teacherId),
+        ]),
+      ]);
+    }
 
     // Only touch academic structure when the caller actually sent a grade
     // list — grade/section upserts and the join-code dedup guard above make
@@ -502,10 +520,14 @@ export class AdminSchoolsService {
       if (existing && existing.id !== userId) {
         throw new BadRequestException('That admin email is already in use');
       }
-      await this.db.user.update({
-        where: { id: userId },
-        data: { email: nextEmail },
-      });
+      if (existing?.email !== nextEmail) {
+        await this.db.user.update({
+          where: { id: userId },
+          data: { email: nextEmail },
+        });
+        // Reassigning the admin seat must cut off the previous holder's sessions.
+        await this.authService.revokeAllAccess(userId);
+      }
     }
 
     const fullName =
@@ -984,15 +1006,12 @@ export class AdminSchoolsService {
     const sectionAbbr = sectionName
       ? deriveSectionAbbreviation(sectionName)
       : undefined;
-    const base = buildJoinCodeCandidate(schoolCode, gradeAbbr, sectionAbbr);
-
+    // Each candidate carries a fresh random suffix, so a collision just retries.
     for (let attempt = 0; attempt < 20; attempt++) {
-      const code = attempt === 0 ? base : `${base}-${attempt + 1}`;
+      const code = buildJoinCodeCandidate(schoolCode, gradeAbbr, sectionAbbr);
       const existing = await this.db.joinCode.findUnique({ where: { code } });
       if (!existing) return code;
     }
-    // Astronomically unlikely fallback — keeps this provably terminating.
-    const raw = Math.random().toString(36).slice(2, 6).toUpperCase();
-    return `${base}-${raw}`;
+    throw new Error('Could not generate a unique joining code');
   }
 }

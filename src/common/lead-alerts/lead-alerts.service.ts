@@ -12,7 +12,7 @@ import * as nodemailer from 'nodemailer';
  *   SMTP_HOST / SMTP_PORT  optional, default smtp.hostinger.com / 465
  *
  * It also sends the person who wrote a YugMinds project brief a confirmation
- * with a recap of their brief and what happens next (confirmBrief).
+ * with what happens next (confirmBrief); a fixed template, no echo of their text.
  *
  * Fire-and-forget: a slow or failing mail server never delays or breaks the
  * visitor's submission; failures are logged.
@@ -38,12 +38,7 @@ export class LeadAlertsService {
   }
 
   /** "We've got your brief": sent to the person who wrote it. */
-  confirmBrief(brief: {
-    firstName: string;
-    email: string;
-    project: string;
-    message: string;
-  }): void {
+  confirmBrief(brief: { firstName: string; email: string }): void {
     void this.sendConfirmation(brief).catch((e: unknown) =>
       this.log.warn(`Brief confirmation email failed: ${String(e)}`),
     );
@@ -63,32 +58,32 @@ export class LeadAlertsService {
     return { transport: this.transport, from: user };
   }
 
-  private async sendConfirmation(b: {
-    firstName: string;
-    email: string;
-    project: string;
-    message: string;
-  }) {
+  /**
+   * The confirmation goes to an address nobody has verified, from the company
+   * mailbox. So it is a FIXED template: it never echoes the sender's project or
+   * message text (that would let anyone send arbitrary content in our name to any
+   * victim), and the name is shown only if it looks like a plain name.
+   */
+  private async sendConfirmation(b: { firstName: string; email: string }) {
     const m = this.mailer();
     if (!m) return;
     const team = process.env.LEAD_ALERT_EMAILS?.split(',')[0]?.trim() || m.from;
     const phone = '+91 85003 45655';
+    const name = /^[\p{L}][\p{L} .'-]{0,39}$/u.test(b.firstName.trim())
+      ? b.firstName.trim()
+      : 'there';
     const steps = [
       'A person on our team reads your brief and replies, usually by email or a phone call.',
       'We set up a short call to understand what you need and what it is for.',
       'You get a plan: which of our companies builds it, a timeline and a cost.',
     ];
     const text = [
-      `Hi ${b.firstName},`,
+      `Hi ${name},`,
       '',
       `Thanks for sending us your project brief. It has reached the YugMinds team, and a person (not a bot) will read it.`,
       '',
       'What happens next',
       ...steps.map((s, i) => `${i + 1}. ${s}`),
-      '',
-      'Your brief',
-      `What you need built: ${b.project}`,
-      b.message,
       '',
       `Want to add something, like sketches, links or files? Just reply to this email. If it's urgent, call us on ${phone}.`,
       '',
@@ -103,17 +98,12 @@ export class LeadAlertsService {
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:12px;overflow:hidden">
 <tr><td style="background:#1e3a8a;padding:24px 28px;color:#ffffff">
 <div style="font-size:14px;color:#bfdbfe">YugMinds</div>
-<div style="font-size:24px;font-weight:bold;margin-top:6px">We've got your brief, ${e(b.firstName)}.</div>
+<div style="font-size:24px;font-weight:bold;margin-top:6px">We've got your brief, ${e(name)}.</div>
 </td></tr>
 <tr><td style="padding:24px 28px;font-size:15px;line-height:1.6">
 <p style="margin:0 0 16px">Thanks for sending us your project brief. It has reached the YugMinds team, and a person (not a bot) will read it.</p>
 <p style="margin:0 0 8px;font-weight:bold">What happens next</p>
 <ol style="margin:0 0 20px;padding-left:20px">${steps.map((s) => `<li style="margin:0 0 6px">${e(s)}</li>`).join('')}</ol>
-<div style="background:#eff6ff;border-radius:10px;padding:16px 18px;margin:0 0 20px">
-<p style="margin:0 0 4px;font-size:13px;color:#1d4ed8;font-weight:bold">Your brief</p>
-<p style="margin:0 0 8px;font-weight:bold">${e(b.project)}</p>
-<p style="margin:0;white-space:pre-line;color:#334155">${e(b.message)}</p>
-</div>
 <p style="margin:0 0 16px">Want to add something, like sketches, links or files? Just reply to this email. If it's urgent, call us on <a href="tel:+918500345655" style="color:#1d4ed8">${phone}</a>.</p>
 <p style="margin:0">The YugMinds team</p>
 </td></tr>
@@ -127,7 +117,7 @@ You're getting this one email because you sent us a brief on our website.
       from: `"YugMinds" <${m.from}>`,
       to: b.email,
       replyTo: team,
-      subject: `We've got your brief, ${b.firstName}`,
+      subject: `We've got your brief, ${name}`,
       text,
       html,
     });
