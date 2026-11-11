@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -26,7 +30,9 @@ describe('Admin courses CRUD + publish auto-enrollment', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const courses = res.body?.data?.courses ?? res.body?.courses ?? [];
-    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(true);
+    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(
+      true,
+    );
   });
 
   it('GET /admin/courses/:id returns full detail with chapters array', async () => {
@@ -75,7 +81,8 @@ describe('Admin courses CRUD + publish auto-enrollment', () => {
       .set(...authHeader(fixture.admin.token))
       .send({ name: `QA Empty Course ${Date.now()}` })
       .expect(201);
-    const emptyCourseId: string = createRes.body?.data?.id ?? createRes.body?.id;
+    const emptyCourseId: string =
+      createRes.body?.data?.id ?? createRes.body?.id;
     expect(emptyCourseId).toBeDefined();
 
     const res = await request(app.getHttpServer())

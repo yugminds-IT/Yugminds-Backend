@@ -41,7 +41,7 @@ describe('school-admin students CRUD + tenant scoping', () => {
     );
   });
 
-  it('tenant scoping: a different school-admin does NOT see this fixture\'s students', async () => {
+  it("tenant scoping: a different school-admin does NOT see this fixture's students", async () => {
     const otherAuth: [string, string] = [
       'Authorization',
       `Bearer ${otherFixture.schoolAdmin.token}`,

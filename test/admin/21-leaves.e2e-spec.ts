@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -96,8 +100,8 @@ describe('Admin leave approval -> teacher attendance mutation (cross-role side e
 
   it(
     "the school admin dashboard resolves the SAME admin-approved leave's reviewer name correctly " +
-      '(regression: admin used to store approvedBy as an email; school-admin\'s reviewer lookup does ' +
-      "parseInt(approvedBy, 10) to find the user, so an admin-approved leave always showed " +
+      "(regression: admin used to store approvedBy as an email; school-admin's reviewer lookup does " +
+      'parseInt(approvedBy, 10) to find the user, so an admin-approved leave always showed ' +
       '"Reviewed by: N/A" on the School Admin dashboard even though the school-admin frontend tries to ' +
       'render approver.full_name)',
     async () => {
@@ -106,7 +110,9 @@ describe('Admin leave approval -> teacher attendance mutation (cross-role side e
         .get('/school-admin/leaves')
         .set(...schoolAdminAuth)
         .expect(200);
-      const leave = res.body.leaves.find((l: { id: string }) => l.id === leaveId);
+      const leave = res.body.leaves.find(
+        (l: { id: string }) => l.id === leaveId,
+      );
       expect(leave).toBeDefined();
       expect(leave.status).toBe('Approved');
       expect(leave.approver).not.toBeNull();

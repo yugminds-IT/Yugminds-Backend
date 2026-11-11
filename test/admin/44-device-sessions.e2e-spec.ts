@@ -2,7 +2,11 @@ import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import jwt from 'jsonwebtoken';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { closePool, pool } from './support/db';
 
 /**
@@ -43,21 +47,37 @@ describe('Device sessions (login tracking + revoke)', () => {
       .set('User-Agent', ua)
       .send({ email: who.email, password: who.password })
       .expect(201);
-    const cookie = (res.headers['set-cookie'] as unknown as string[]).find((c) =>
-      c.startsWith('refresh_token='),
+    const cookie = (res.headers['set-cookie'] as unknown as string[]).find(
+      (c) => c.startsWith('refresh_token='),
     )!;
     return {
       access: res.body.tokens.accessToken as string,
       refresh: cookie.split(';')[0].slice('refresh_token='.length),
     };
   };
-  const bearer = (t: string): [string, string] => ['Authorization', `Bearer ${t}`];
+  const bearer = (t: string): [string, string] => [
+    'Authorization',
+    `Bearer ${t}`,
+  ];
   const list = async (t: string) =>
-    (await request(http).get('/auth/sessions').set(...bearer(t)).expect(200)).body
-      .sessions as Array<{ id: string; current: boolean; browser: string; os: string; deviceType: string }>;
+    (
+      await request(http)
+        .get('/auth/sessions')
+        .set(...bearer(t))
+        .expect(200)
+    ).body.sessions as Array<{
+      id: string;
+      current: boolean;
+      browser: string;
+      os: string;
+      deviceType: string;
+    }>;
   const refresh = (rt: string) =>
     request(http).post('/auth/refresh').send({ refreshToken: rt });
-  const me = (t: string) => request(http).get('/auth/sessions').set(...bearer(t));
+  const me = (t: string) =>
+    request(http)
+      .get('/auth/sessions')
+      .set(...bearer(t));
 
   it('lists each login as its own device, flags the current one, and parses the user agent', async () => {
     const laptop = await login(CHROME_MAC);
@@ -77,7 +97,10 @@ describe('Device sessions (login tracking + revoke)', () => {
     const b = await login(SAFARI_IPHONE);
     const bId = (await list(b.access)).find((s) => s.current)!.id;
 
-    await request(http).delete(`/auth/sessions/${bId}`).set(...bearer(a.access)).expect(200);
+    await request(http)
+      .delete(`/auth/sessions/${bId}`)
+      .set(...bearer(a.access))
+      .expect(200);
 
     await me(b.access).expect(401); // access token dies immediately
     await refresh(b.refresh).expect(401); // and can't be refreshed back to life
@@ -88,16 +111,25 @@ describe('Device sessions (login tracking + revoke)', () => {
     const mine = await login(CHROME_MAC, fixture.teachers[0]);
     const theirs = await login(CHROME_MAC, fixture.teachers[1]);
     const theirId = (await list(theirs.access)).find((s) => s.current)!.id;
-    await request(http).delete(`/auth/sessions/${theirId}`).set(...bearer(mine.access)).expect(404);
+    await request(http)
+      .delete(`/auth/sessions/${theirId}`)
+      .set(...bearer(mine.access))
+      .expect(404);
     await me(theirs.access).expect(200);
-    await request(http).delete('/auth/sessions/not-a-uuid').set(...bearer(mine.access)).expect(400);
+    await request(http)
+      .delete('/auth/sessions/not-a-uuid')
+      .set(...bearer(mine.access))
+      .expect(400);
   });
 
   it('revoke-others keeps this device only', async () => {
     const a = await login(CHROME_MAC);
     const b = await login(SAFARI_IPHONE);
     const c = await login(CHROME_MAC);
-    await request(http).post('/auth/sessions/revoke-others').set(...bearer(a.access)).expect(200);
+    await request(http)
+      .post('/auth/sessions/revoke-others')
+      .set(...bearer(a.access))
+      .expect(200);
     await me(a.access).expect(200);
     await me(b.access).expect(401);
     await me(c.access).expect(401);
@@ -107,7 +139,10 @@ describe('Device sessions (login tracking + revoke)', () => {
   it('revoke-all ends every device including the caller', async () => {
     const a = await login(CHROME_MAC);
     const b = await login(SAFARI_IPHONE);
-    await request(http).post('/auth/sessions/revoke-all').set(...bearer(a.access)).expect(200);
+    await request(http)
+      .post('/auth/sessions/revoke-all')
+      .set(...bearer(a.access))
+      .expect(200);
     await me(a.access).expect(401);
     await me(b.access).expect(401);
     await refresh(a.refresh).expect(401);
@@ -117,7 +152,10 @@ describe('Device sessions (login tracking + revoke)', () => {
   it('logout ends only the calling device (other devices stay signed in)', async () => {
     const a = await login(CHROME_MAC);
     const b = await login(SAFARI_IPHONE);
-    await request(http).post('/auth/logout').set(...bearer(a.access)).expect(201);
+    await request(http)
+      .post('/auth/logout')
+      .set(...bearer(a.access))
+      .expect(201);
     await me(a.access).expect(401);
     await refresh(a.refresh).expect(401);
     await me(b.access).expect(200);
@@ -127,13 +165,18 @@ describe('Device sessions (login tracking + revoke)', () => {
     const a = await login(CHROME_MAC);
     const before = (await list(a.access)).find((s) => s.current)!.id;
     const res = await refresh(a.refresh).expect(201);
-    const after = (await list(res.body.tokens.accessToken)).find((s) => s.current)!.id;
+    const after = (await list(res.body.tokens.accessToken)).find(
+      (s) => s.current,
+    )!.id;
     expect(after).toBe(before);
   });
 
   it('changing the password signs out other devices but keeps the caller signed in', async () => {
     const user = fixture.teachers[1];
-    await pool.query('UPDATE "User" SET "mustChangePassword" = false WHERE id = $1', [user.id]);
+    await pool.query(
+      'UPDATE "User" SET "mustChangePassword" = false WHERE id = $1',
+      [user.id],
+    );
     const a = await login(CHROME_MAC, user);
     const b = await login(SAFARI_IPHONE, user);
     const res = await request(http)
@@ -149,7 +192,14 @@ describe('Device sessions (login tracking + revoke)', () => {
   it('rejects tokens with no sid (logins from before this feature)', async () => {
     const u = fixture.teachers[0];
     const old = jwt.sign(
-      { sub: u.id, email: u.email, role: 'teacher', isSuperAdmin: false, tenantId: fixture.schoolId, tokenVersion: 0 },
+      {
+        sub: u.id,
+        email: u.email,
+        role: 'teacher',
+        isSuperAdmin: false,
+        tenantId: fixture.schoolId,
+        tokenVersion: 0,
+      },
       process.env.JWT_ACCESS_SECRET!,
       { expiresIn: '15m' },
     );

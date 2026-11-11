@@ -26,7 +26,7 @@ describe('Student notifications', () => {
     await closePool();
   }, 90000);
 
-  it('GET /student/notifications/recipients only lists teachers in the student\'s own school', async () => {
+  it("GET /student/notifications/recipients only lists teachers in the student's own school", async () => {
     const res = await request(app.getHttpServer())
       .get('/student/notifications/recipients')
       .set(...studentAuth)
@@ -67,7 +67,8 @@ describe('Student notifications', () => {
       .get('/notifications/user')
       .set(...authHeader(fixture.teachers[1].token))
       .expect(200);
-    const otherNotifications = otherInbox.body?.notifications ?? otherInbox.body ?? [];
+    const otherNotifications =
+      otherInbox.body?.notifications ?? otherInbox.body ?? [];
     expect(
       (Array.isArray(otherNotifications) ? otherNotifications : []).some(
         (n: { title: string }) => n.title === uniqueTitle,
@@ -114,7 +115,8 @@ describe('Student notifications', () => {
       .get('/notifications/user')
       .set(...authHeader(fixture.teachers[0].token))
       .expect(200);
-    const notifications = teacherInbox.body?.notifications ?? teacherInbox.body ?? [];
+    const notifications =
+      teacherInbox.body?.notifications ?? teacherInbox.body ?? [];
     const found = (Array.isArray(notifications) ? notifications : []).find(
       (n: { title: string }) => n.title === uniqueTitle,
     );
@@ -139,9 +141,9 @@ describe('Student notifications', () => {
       .set(...authHeader(fixture.teachers[0].token))
       .expect(200);
     const refreshedList = refreshed.body?.notifications ?? refreshed.body ?? [];
-    const refreshedNotif = (Array.isArray(refreshedList) ? refreshedList : []).find(
-      (n: { id: string }) => n.id === found.id,
-    );
+    const refreshedNotif = (
+      Array.isArray(refreshedList) ? refreshedList : []
+    ).find((n: { id: string }) => n.id === found.id);
     expect(refreshedNotif.is_read).toBe(true);
   });
 

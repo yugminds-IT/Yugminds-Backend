@@ -189,7 +189,9 @@ describe('Student assignments — retake scoring rule consistency', () => {
       await request(app.getHttpServer())
         .patch(`/admin/courses/${fixture.courseId}`)
         .set(...adminAuth)
-        .send({ chapters: [{ name: 'QA Assignment Chapter', order_number: 1 }] })
+        .send({
+          chapters: [{ name: 'QA Assignment Chapter', order_number: 1 }],
+        })
         .expect(200);
       const courseRes = await request(app.getHttpServer())
         .get(`/admin/courses/${fixture.courseId}`)

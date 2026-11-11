@@ -3,12 +3,16 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { normalizeSubject } from '../../common/report-subjects';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
-import { getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+import {
+  getTodayIstDateStr,
+  isBeforeAttendanceCutoff,
+} from '../../common/utils/date.util';
 
 @Injectable()
 export class TeacherReportsService {
@@ -57,6 +61,7 @@ export class TeacherReportsService {
       section?: string;
       date: string;
       period_id?: string;
+      subject?: string;
       start_time?: string;
       end_time?: string;
       topics_taught?: string;
@@ -73,6 +78,10 @@ export class TeacherReportsService {
     }
     if (!body.period_id) {
       throw new BadRequestException('period_id is required');
+    }
+    const subject = normalizeSubject(body.subject);
+    if (!subject) {
+      throw new BadRequestException('Pick the subject you taught.');
     }
     const reportDate = new Date(dateStr + 'T12:00:00.000Z');
     if (isNaN(reportDate.getTime())) {
@@ -139,7 +148,6 @@ export class TeacherReportsService {
     const rejectedReportId =
       existing?.status === 'rejected' ? existing.id : null;
 
-
     const computedDuration =
       typeof body.duration_hours === 'number' &&
       !Number.isNaN(body.duration_hours)
@@ -173,11 +181,14 @@ export class TeacherReportsService {
       });
       if (schedule) {
         if (!resolvedGrade && schedule.grade) resolvedGrade = schedule.grade;
-        if (!resolvedSection && schedule.section) resolvedSection = schedule.section;
+        if (!resolvedSection && schedule.section)
+          resolvedSection = schedule.section;
       }
     }
 
     const reportPayload = {
+      subject,
+      subjectSource: 'teacher',
       grade: resolvedGrade,
       section: resolvedSection,
       status: 'submitted' as const,
@@ -191,8 +202,7 @@ export class TeacherReportsService {
           ? body.student_count
           : null,
       durationHours:
-        typeof computedDuration === 'number' &&
-        !Number.isNaN(computedDuration)
+        typeof computedDuration === 'number' && !Number.isNaN(computedDuration)
           ? computedDuration
           : null,
       notes: body.notes?.trim() || null,
@@ -262,9 +272,18 @@ export class TeacherReportsService {
           if (existingAttendance?.status !== 'Leave-Approved') {
             await tx.attendance.upsert({
               where: {
-                teacherId_schoolId_date: { teacherId, schoolId, date: dateOnly },
+                teacherId_schoolId_date: {
+                  teacherId,
+                  schoolId,
+                  date: dateOnly,
+                },
               },
-              create: { teacherId, schoolId, date: dateOnly, status: 'Present' },
+              create: {
+                teacherId,
+                schoolId,
+                date: dateOnly,
+                status: 'Present',
+              },
               update: { status: 'Present' },
             });
             marked = true;
@@ -274,7 +293,6 @@ export class TeacherReportsService {
         return { report: saved, attendanceMarkedPresent: marked };
       },
     );
-
 
     const [schoolAdmins, adminUsers] = await Promise.all([
       this.db.schoolAdmin.findMany({
@@ -300,6 +318,7 @@ export class TeacherReportsService {
         grade: report.grade,
         section: report.section,
         period_id: report.periodId,
+        subject: report.subject,
         start_time: (report as { startTime?: string | null }).startTime ?? null,
         end_time: (report as { endTime?: string | null }).endTime ?? null,
         report_status: toReportUiStatus(report.status),
@@ -377,6 +396,7 @@ export class TeacherReportsService {
         grade: r.grade,
         section: r.section,
         period_id: r.periodId,
+        subject: r.subject,
         start_time: (r as { startTime?: string | null }).startTime ?? null,
         end_time: (r as { endTime?: string | null }).endTime ?? null,
         report_status: toReportUiStatus(r.status),

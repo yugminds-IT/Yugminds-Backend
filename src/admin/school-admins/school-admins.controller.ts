@@ -26,7 +26,11 @@ export class AdminSchoolAdminsController {
     @Query('schoolId') schoolIdCamel?: string,
     @Query('school_id') schoolIdSnake?: string,
   ) {
-    return this.service.list({ search, status, schoolId: schoolIdCamel ?? schoolIdSnake });
+    return this.service.list({
+      search,
+      status,
+      schoolId: schoolIdCamel ?? schoolIdSnake,
+    });
   }
 
   @Post('school-admins')

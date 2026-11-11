@@ -47,7 +47,11 @@ describe('SchoolAdminSchoolService', () => {
   it('returns a per-grade section breakdown alongside the flat sections_offered list', async () => {
     const result = await service.get({ id: 1 });
 
-    expect(result.school.sections_offered).toEqual(['Section A', 'Section B', 'Section C']);
+    expect(result.school.sections_offered).toEqual([
+      'Section A',
+      'Section B',
+      'Section C',
+    ]);
     // The flat list above is what let the Add/Edit student forms offer a
     // section that doesn't exist for the selected grade (e.g. "Section C"
     // while editing a Grade 5 student) — grades must carry the real

@@ -154,17 +154,31 @@ describe('CertificateService', () => {
 
     it('returns the existing certificate when a concurrent call wins the create race', async () => {
       db.chapter.findMany.mockResolvedValue([{ id: 'ch1' }]);
-      db.chapterContent.findMany.mockResolvedValue([{ id: 'c1', chapterId: 'ch1' }]);
+      db.chapterContent.findMany.mockResolvedValue([
+        { id: 'c1', chapterId: 'ch1' },
+      ]);
       db.courseProgress.findMany.mockResolvedValue([
-        { contentId: 'c1', chapterId: 'ch1', progress: 100, completedAt: new Date(), updatedAt: new Date() },
+        {
+          contentId: 'c1',
+          chapterId: 'ch1',
+          progress: 100,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        },
       ]);
       db.studentCertificate.create.mockRejectedValue(
         Object.assign(new Error('Unique constraint'), { code: 'P2002' }),
       );
-      db.studentCertificate.findUniqueOrThrow.mockResolvedValue({ id: 'winner-id' });
+      db.studentCertificate.findUniqueOrThrow.mockResolvedValue({
+        id: 'winner-id',
+      });
 
       const result = await service.issueIfEligible(1, 'course-1');
-      expect(result).toEqual({ issued: true, certificateId: 'winner-id', alreadyExisted: true });
+      expect(result).toEqual({
+        issued: true,
+        certificateId: 'winner-id',
+        alreadyExisted: true,
+      });
       expect(storage.uploadBuffer).not.toHaveBeenCalled();
     });
 

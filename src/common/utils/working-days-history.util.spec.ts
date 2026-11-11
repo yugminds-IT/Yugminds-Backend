@@ -1,4 +1,7 @@
-import { resolveWorkingDaysForDate, WorkingDaysHistoryEntry } from './working-days-history.util';
+import {
+  resolveWorkingDaysForDate,
+  WorkingDaysHistoryEntry,
+} from './working-days-history.util';
 
 const d = (s: string) => new Date(`${s}T00:00:00.000Z`);
 
@@ -18,8 +21,12 @@ describe('resolveWorkingDaysForDate', () => {
     const history: WorkingDaysHistoryEntry[] = [
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4] },
     ];
-    expect(resolveWorkingDaysForDate(history, d('2026-07-01'))).toEqual([1, 2, 3, 4]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-31'))).toEqual([1, 2, 3, 4]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-01'))).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-31'))).toEqual([
+      1, 2, 3, 4,
+    ]);
   });
 
   // The core scenario this whole feature exists for: a mid-month change
@@ -31,9 +38,15 @@ describe('resolveWorkingDaysForDate', () => {
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4] }, // Mon-Thu
       { effectiveFrom: d('2026-07-16'), workingDays: [1, 2, 3, 4, 5] }, // Mon-Fri
     ];
-    expect(resolveWorkingDaysForDate(history, d('2026-07-15'))).toEqual([1, 2, 3, 4]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-16'))).toEqual([1, 2, 3, 4, 5]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-31'))).toEqual([1, 2, 3, 4, 5]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-15'))).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-16'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-31'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
   });
 
   it('resolves correctly across three or more changes', () => {
@@ -42,9 +55,15 @@ describe('resolveWorkingDaysForDate', () => {
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4] },
       { effectiveFrom: d('2026-07-16'), workingDays: [1, 2, 3, 4, 5, 6] },
     ];
-    expect(resolveWorkingDaysForDate(history, d('2026-06-15'))).toEqual([1, 2, 3, 4, 5]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-10'))).toEqual([1, 2, 3, 4]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-20'))).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(resolveWorkingDaysForDate(history, d('2026-06-15'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-10'))).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-20'))).toEqual([
+      1, 2, 3, 4, 5, 6,
+    ]);
   });
 
   it('is order-independent — resolves correctly even if entries arrive unsorted', () => {
@@ -52,8 +71,12 @@ describe('resolveWorkingDaysForDate', () => {
       { effectiveFrom: d('2026-07-16'), workingDays: [1, 2, 3, 4, 5] },
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4] },
     ];
-    expect(resolveWorkingDaysForDate(history, d('2026-07-10'))).toEqual([1, 2, 3, 4]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-20'))).toEqual([1, 2, 3, 4, 5]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-10'))).toEqual([
+      1, 2, 3, 4,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-20'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
   });
 
   it('a backdated correction changes the resolved pattern for dates in its range', () => {
@@ -65,8 +88,14 @@ describe('resolveWorkingDaysForDate', () => {
       { effectiveFrom: d('2026-07-10'), workingDays: [1, 2, 3] }, // backdated correction, added later
       { effectiveFrom: d('2026-07-20'), workingDays: [1, 2, 3, 4, 5] },
     ];
-    expect(resolveWorkingDaysForDate(history, d('2026-07-05'))).toEqual([1, 2, 3, 4, 5]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-15'))).toEqual([1, 2, 3]);
-    expect(resolveWorkingDaysForDate(history, d('2026-07-25'))).toEqual([1, 2, 3, 4, 5]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-05'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-15'))).toEqual([
+      1, 2, 3,
+    ]);
+    expect(resolveWorkingDaysForDate(history, d('2026-07-25'))).toEqual([
+      1, 2, 3, 4, 5,
+    ]);
   });
 });

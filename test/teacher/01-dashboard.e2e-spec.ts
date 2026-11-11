@@ -1,7 +1,7 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from '../admin/support/app';
-import { mintAccessToken, authHeader } from '../admin/support/auth';
+import { authHeader } from '../admin/support/auth';
 import { closePool } from '../admin/support/db';
 import {
   createQaFixture,

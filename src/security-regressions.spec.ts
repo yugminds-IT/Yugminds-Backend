@@ -26,10 +26,9 @@ describe('security regressions (audit run-1)', () => {
   it('GET /get-role ignores a client-supplied userId and returns only the caller', async () => {
     const service = { getRole: jest.fn().mockResolvedValue({}) };
     const ctl = new GetRoleController(service as never);
-    await (ctl.getRole as (u: { id: number }, extra?: unknown) => Promise<unknown>)(
-      { id: 5 },
-      '999',
-    );
+    await (
+      ctl.getRole as (u: { id: number }, extra?: unknown) => Promise<unknown>
+    )({ id: 5 }, '999');
     expect(service.getRole).toHaveBeenCalledWith('5');
   });
 
@@ -40,11 +39,15 @@ describe('security regressions (audit run-1)', () => {
         teacherSchool: {
           findMany: jest
             .fn()
-            .mockResolvedValue(teacherSchoolIds.map((schoolId) => ({ schoolId }))),
+            .mockResolvedValue(
+              teacherSchoolIds.map((schoolId) => ({ schoolId })),
+            ),
         },
         chapter: { findUnique: jest.fn().mockResolvedValue(null) },
         courseAccess: {
-          findFirst: jest.fn().mockResolvedValue(accessibleCourse ? { id: 1 } : null),
+          findFirst: jest
+            .fn()
+            .mockResolvedValue(accessibleCourse ? { id: 1 } : null),
         },
       };
       return ctl;

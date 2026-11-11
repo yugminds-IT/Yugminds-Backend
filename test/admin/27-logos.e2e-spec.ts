@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -30,7 +34,10 @@ describe('Admin logos CRUD (fixture school, soft + hard delete)', () => {
       .post('/admin/logos')
       .set(...authHeader(fixture.admin.token))
       .field('school_id', fixture.schoolId)
-      .attach('file', SVG, { filename: 'logo.svg', contentType: 'image/svg+xml' })
+      .attach('file', SVG, {
+        filename: 'logo.svg',
+        contentType: 'image/svg+xml',
+      })
       .expect(201);
     logoId = res.body?.id ?? res.body?.data?.id;
     expect(logoId).toBeDefined();

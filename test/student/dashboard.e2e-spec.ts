@@ -64,7 +64,7 @@ describe('Student dashboard overview', () => {
   it(
     'completing every chapter in the course flips both the stat cards and ' +
       'the Active Courses list to "completed" in agreement, and the ' +
-      "course stops appearing as \"Jump back in / Resume\" " +
+      'course stops appearing as "Jump back in / Resume" ' +
       '(regression guard for the completed-course-still-resumable bug)',
     async () => {
       const chapterRes = await request(app.getHttpServer())

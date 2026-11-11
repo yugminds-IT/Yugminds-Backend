@@ -26,7 +26,10 @@ export class StudentDailyAssignmentsService {
     // Resolve grade/section records so we can match publishedGradeIds/publishedSectionIds.
     const gradeRecord = studentSchool.grade
       ? await this.db.grade.findFirst({
-          where: { schoolId: studentSchool.schoolId, name: studentSchool.grade },
+          where: {
+            schoolId: studentSchool.schoolId,
+            name: studentSchool.grade,
+          },
           select: { id: true },
         })
       : null;

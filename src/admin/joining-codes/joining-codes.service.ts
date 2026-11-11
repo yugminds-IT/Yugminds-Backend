@@ -66,8 +66,7 @@ export class AdminJoiningCodesService {
     // which checks usageType directly), but keeps the admin-facing
     // "times_used / max_uses" display honest for single-use codes instead
     // of showing a blank cap on a code that's actually one-time-only.
-    const maxUses =
-      maxUsesRaw ?? (usageType === 'single' ? 1 : null);
+    const maxUses = maxUsesRaw ?? (usageType === 'single' ? 1 : null);
     // Codes never expired before (create() never set expiresAt at all,
     // despite the UI telling admins "codes expire after 1 year") — default
     // to a real 1-year expiration so that claim is actually true. Admins
@@ -84,13 +83,21 @@ export class AdminJoiningCodesService {
     if (!school) {
       throw new BadRequestException('School not found for given id');
     }
-    const schoolCode = await this.ensureSchoolCode(school.id, school.name, school.schoolCode);
+    const schoolCode = await this.ensureSchoolCode(
+      school.id,
+      school.name,
+      school.schoolCode,
+    );
 
     // Kept for backward compatibility with existing frontend code that reads
     // `codes[gradeName]` for the whole-grade case (still exactly one entry
     // per grade there). Section-scoped codes are also listed in `results`.
     const created: Record<string, string> = {};
-    const results: Array<{ grade: string; section: string | null; code: string }> = [];
+    const results: Array<{
+      grade: string;
+      section: string | null;
+      code: string;
+    }> = [];
 
     for (const grade of grades) {
       const gradeName = String(grade);
@@ -106,7 +113,11 @@ export class AdminJoiningCodesService {
             where: { gradeId: gradeRow.id, name: sectionName },
             select: { id: true },
           });
-          const code = await this.generateUniqueCode(schoolCode, gradeName, sectionName);
+          const code = await this.generateUniqueCode(
+            schoolCode,
+            gradeName,
+            sectionName,
+          );
           await this.db.joinCode.create({
             data: {
               schoolId,

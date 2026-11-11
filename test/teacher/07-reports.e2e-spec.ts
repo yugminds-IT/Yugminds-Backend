@@ -151,7 +151,7 @@ describe('Teacher reports', () => {
   });
 
   it(
-    'response includes attendance_marked_present, reflecting whether the day\'s scheduled ' +
+    "response includes attendance_marked_present, reflecting whether the day's scheduled " +
       'periods were fully covered by this submission (not just an unconditional "true")',
     async () => {
       const res = await request(app.getHttpServer())

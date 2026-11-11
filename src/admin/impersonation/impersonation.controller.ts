@@ -1,4 +1,10 @@
-import { Body, Controller, Post, UseGuards, BadRequestException } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Post,
+  UseGuards,
+  BadRequestException,
+} from '@nestjs/common';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Role } from '@prisma/client';
@@ -19,6 +25,9 @@ export class ImpersonationController {
   ) {
     const targetId = parseInt(String(body?.user_id ?? ''), 10);
     if (!targetId) throw new BadRequestException('user_id is required');
-    return this.auth.impersonate({ id: admin.id, email: admin.email }, targetId);
+    return this.auth.impersonate(
+      { id: admin.id, email: admin.email },
+      targetId,
+    );
   }
 }

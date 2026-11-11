@@ -211,9 +211,9 @@ describe('school-admin password-reset-requests: cross-school isolation', () => {
       .set(...authA)
       .query({ status: 'pending' })
       .expect(200);
-    expect(
-      listAsA.body.requests.some((r: any) => r.id === requestId),
-    ).toBe(false);
+    expect(listAsA.body.requests.some((r: any) => r.id === requestId)).toBe(
+      false,
+    );
 
     // School A's pending-count must not include it either.
     const countAsA = await request(app.getHttpServer())

@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader, mintAccessToken } from './support/auth';
 import { closePool } from './support/db';
 
@@ -54,7 +58,8 @@ describe('Admin teacher-attendance', () => {
     const expectedAverage =
       rated.length > 0
         ? Math.round(
-            rated.reduce((sum, m) => sum + m.attendance_percentage, 0) / rated.length,
+            rated.reduce((sum, m) => sum + m.attendance_percentage, 0) /
+              rated.length,
           )
         : 0;
 
@@ -62,7 +67,9 @@ describe('Admin teacher-attendance', () => {
   });
 
   it('rejects unauthenticated requests', async () => {
-    await request(app.getHttpServer()).get('/admin/teacher-attendance').expect(401);
+    await request(app.getHttpServer())
+      .get('/admin/teacher-attendance')
+      .expect(401);
   });
 
   it('rejects non-admin roles', async () => {

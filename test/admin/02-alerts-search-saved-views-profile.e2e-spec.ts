@@ -82,7 +82,9 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         .set(...adminAuth)
         .expect(200);
       expect(Array.isArray(res.body)).toBe(true);
-      expect(res.body.some((v: { id: string }) => v.id === createdId)).toBe(true);
+      expect(res.body.some((v: { id: string }) => v.id === createdId)).toBe(
+        true,
+      );
     });
 
     it('deletes the view', async () => {
@@ -94,7 +96,9 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         .get(`/admin/saved-views?table_key=${tableKey}`)
         .set(...adminAuth)
         .expect(200);
-      expect(res.body.some((v: { id: string }) => v.id === createdId)).toBe(false);
+      expect(res.body.some((v: { id: string }) => v.id === createdId)).toBe(
+        false,
+      );
     });
   });
 
@@ -121,7 +125,9 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         .get('/admin/profile')
         .set(...adminAuth)
         .expect(200);
-      expect(check.body?.data?.full_name ?? check.body?.full_name).toBe(tempName);
+      expect(check.body?.data?.full_name ?? check.body?.full_name).toBe(
+        tempName,
+      );
 
       if (originalFullName) {
         await request(app.getHttpServer())
@@ -165,7 +171,9 @@ describe('Admin alerts / search / saved-views / profile (self-scoped, safe)', ()
         await request(app.getHttpServer())
           .patch('/admin/profile')
           .set(...adminAuth)
-          .send({ email: `__qa_test_should_not_apply_${Date.now()}@example.test` })
+          .send({
+            email: `__qa_test_should_not_apply_${Date.now()}@example.test`,
+          })
           .expect(200);
 
         const after = await request(app.getHttpServer())

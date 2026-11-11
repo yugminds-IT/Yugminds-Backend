@@ -11,6 +11,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { lastLoginByUser } from '../../admin/last-login';
 import { SkipThrottle } from '@nestjs/throttler';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
@@ -26,8 +27,21 @@ import { DataImportDto } from './dto/data-import.dto';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
-import { getTodayIstDateOnly, getTodayIstDateStr, isSchoolAdminLeaveDeadlinePassed } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan, applyApprovedLeaveToAttendance, revertLeaveApprovedAttendance, assertSchoolAdminStageOpen, isEmergencyLeave, leaveStageFields } from '../../common/utils/leave-rules.util';
+import {
+  getTodayIstDateOnly,
+  getTodayIstDateStr,
+  isSchoolAdminLeaveDeadlinePassed,
+} from '../../common/utils/date.util';
+import {
+  EMERGENCY_LEAVE_TYPE,
+  assertEmergencyLeaveAllowed,
+  assertLeaveSpan,
+  applyApprovedLeaveToAttendance,
+  revertLeaveApprovedAttendance,
+  assertSchoolAdminStageOpen,
+  isEmergencyLeave,
+  leaveStageFields,
+} from '../../common/utils/leave-rules.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import {
   WEEKDAY_NAMES,
@@ -35,7 +49,6 @@ import {
 } from '../../common/utils/weekdays.util';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
 import { toReportUiStatus } from '../../common/utils/report-status.util';
-
 
 function currentAcademicYear(): string {
   const now = new Date();
@@ -58,7 +71,6 @@ export class SchoolAdminExtraController {
     private readonly notificationsService: NotificationsService,
     private readonly authService: AuthService,
   ) {}
-
 
   /** Resolve school ID for the current school admin. */
   private async getSchoolId(userId: number): Promise<string | null> {
@@ -386,7 +398,9 @@ export class SchoolAdminExtraController {
     if (items.length === 0)
       throw new BadRequestException('rooms must be a non-empty array');
     if (items.length > 100)
-      throw new BadRequestException('Cannot create more than 100 rooms at once');
+      throw new BadRequestException(
+        'Cannot create more than 100 rooms at once',
+      );
     const roomNumbers = items.map((r) => String(r?.room_number ?? '').trim());
     if (roomNumbers.some((n) => !n))
       throw new BadRequestException('room_number is required for every room');
@@ -686,6 +700,7 @@ export class SchoolAdminExtraController {
     });
 
     const teacherIds = teacherSchools.map((ts) => ts.teacherId);
+    const lastLogin = await lastLoginByUser(this.db, teacherIds);
     const since = new Date();
     since.setDate(since.getDate() - 30);
 
@@ -746,6 +761,7 @@ export class SchoolAdminExtraController {
         })();
         return {
           id: String(u?.id ?? ts.teacherId),
+          last_login: lastLogin.get(ts.teacherId)?.toISOString() ?? null,
           teacher_id: `TCH-${String(u?.id ?? ts.teacherId).slice(0, 8)}`,
           full_name: p?.fullName ?? u?.email ?? '',
           email: u?.email ?? '',
@@ -849,6 +865,7 @@ export class SchoolAdminExtraController {
 
     const where = {
       role: Role.student,
+      deletedAt: null, // trashed students are not listed
       studentSchools: { some: studentSchoolWhere },
       ...(query
         ? {
@@ -877,11 +894,16 @@ export class SchoolAdminExtraController {
       },
       orderBy: { createdAt: 'desc' },
     });
+    const lastLogin = await lastLoginByUser(
+      this.db,
+      users.map((u) => u.id),
+    );
     const students = users.map((u) => {
       const ss = (u.studentSchools ?? []).find((s) => s.schoolId === schoolId);
       const profileId = u.profile?.id ?? null;
       return {
         id: u.id,
+        last_login: lastLogin.get(u.id)?.toISOString() ?? null,
         grade: ss?.grade ?? null,
         section: ss?.section ?? null,
         joining_code: ss?.joiningCode ?? null,
@@ -1344,7 +1366,11 @@ export class SchoolAdminExtraController {
     const hash = await bcrypt.hash(password, 10);
     await this.db.user.update({
       where: { id: studentId },
-      data: { password: hash, initialPassword: password, mustChangePassword: true },
+      data: {
+        password: hash,
+        initialPassword: password,
+        mustChangePassword: true,
+      },
     });
     await this.authService.revokeAllAccess(studentId);
     return { success: true };
@@ -1375,14 +1401,20 @@ export class SchoolAdminExtraController {
       throw new BadRequestException('Student not found in your school');
 
     if (doHard) {
+      // Soft delete: lands in the admin Trash so it can be restored.
+      await this.db.user.update({
+        where: { id: studentId },
+        data: {
+          deletedAt: new Date(),
+          isActive: false,
+          tokenVersion: { increment: 1 },
+        },
+      });
+      await this.db.studentSchool.updateMany({
+        where: { studentId },
+        data: { isActive: false },
+      });
       await this.authService.revokeAllAccess(studentId);
-      try {
-        await this.db.user.delete({ where: { id: studentId } });
-      } catch (err: unknown) {
-        // P2025 = record not found (already deleted) - treat as success
-        const code = (err as { code?: string })?.code;
-        if (code !== 'P2025') throw err;
-      }
       return { success: true, deleted: true };
     }
 
@@ -1772,7 +1804,9 @@ export class SchoolAdminExtraController {
       ).sort();
       const grade_access = a.gradeAccess.map((g) => ({
         grade: g.gradeName,
-        sections: (g.sectionAccess ?? []).map((s) => s.sectionName).filter(Boolean),
+        sections: (g.sectionAccess ?? [])
+          .map((s) => s.sectionName)
+          .filter(Boolean),
       }));
       return {
         id: a.course.id,
@@ -1843,7 +1877,10 @@ export class SchoolAdminExtraController {
 
     const enrollments = realStudentIds.length
       ? await this.db.studentCourse.findMany({
-          where: { courseId: { in: courseIds }, studentId: { in: realStudentIds } },
+          where: {
+            courseId: { in: courseIds },
+            studentId: { in: realStudentIds },
+          },
         })
       : [];
     const allStudentIds = Array.from(
@@ -1871,7 +1908,8 @@ export class SchoolAdminExtraController {
     ]);
     const chaptersByCourse = new Map<string, Array<{ id: string }>>();
     for (const ch of chapters) {
-      if (!chaptersByCourse.has(ch.courseId)) chaptersByCourse.set(ch.courseId, []);
+      if (!chaptersByCourse.has(ch.courseId))
+        chaptersByCourse.set(ch.courseId, []);
       chaptersByCourse.get(ch.courseId)!.push({ id: ch.id });
     }
     const chapterToCourse = new Map(chapters.map((ch) => [ch.id, ch.courseId]));
@@ -2149,7 +2187,12 @@ export class SchoolAdminExtraController {
           where: { courseId, studentId: { in: ids } },
         }),
         this.db.user.findMany({
-          where: { id: { in: ids }, role: Role.student, isActive: true, deletedAt: null },
+          where: {
+            id: { in: ids },
+            role: Role.student,
+            isActive: true,
+            deletedAt: null,
+          },
           include: { profile: true },
         }),
         this.db.studentSchool.findMany({
@@ -2185,7 +2228,11 @@ export class SchoolAdminExtraController {
       // figure, not be excluded from the average (raw per.reduce() only
       // averaged the rows that existed, silently inflating students who'd
       // only opened a handful of items).
-      const computed = computeCourseProgress(chapterShape, chapterContents, per);
+      const computed = computeCourseProgress(
+        chapterShape,
+        chapterContents,
+        per,
+      );
       return {
         id: String(u.id),
         full_name: u.profile?.fullName ?? u.email,
@@ -2464,13 +2511,16 @@ export class SchoolAdminExtraController {
     // Conflict checks: same room or teacher in same day+period+academic year
     // (previously unscoped by year, so the same teacher/day/period in a
     // DIFFERENT academic year falsely collided with an unrelated schedule).
-    const conflictFilters = [
-      { teacherId },
-      ...(roomId ? [{ roomId }] : []),
-    ];
+    const conflictFilters = [{ teacherId }, ...(roomId ? [{ roomId }] : [])];
     if (conflictFilters.length > 0) {
       const conflict = await this.db.classSchedule.findFirst({
-        where: { schoolId, dayOfWeek, periodId, academicYear, OR: conflictFilters },
+        where: {
+          schoolId,
+          dayOfWeek,
+          periodId,
+          academicYear,
+          OR: conflictFilters,
+        },
       });
       if (conflict)
         throw new BadRequestException(
@@ -2794,8 +2844,14 @@ export class SchoolAdminExtraController {
   ) {
     const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
     const skip = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
-    const m = (mode ?? 'received').trim().toLowerCase() as 'received' | 'sent' | 'all';
-    const s = (status ?? 'all').trim().toLowerCase() as 'all' | 'read' | 'unread';
+    const m = (mode ?? 'received').trim().toLowerCase() as
+      | 'received'
+      | 'sent'
+      | 'all';
+    const s = (status ?? 'all').trim().toLowerCase() as
+      | 'all'
+      | 'read'
+      | 'unread';
 
     // For sent/all views, scope to this school's members only.
     let allowedRecipientIds: number[] | undefined;
@@ -2803,8 +2859,14 @@ export class SchoolAdminExtraController {
       const schoolId = schoolIdParam ?? (await this.getSchoolId(user.id));
       if (schoolId) {
         const [teacherRows, studentRows] = await Promise.all([
-          this.db.teacherSchool.findMany({ where: { schoolId }, select: { teacherId: true } }),
-          this.db.studentSchool.findMany({ where: { schoolId }, select: { studentId: true } }),
+          this.db.teacherSchool.findMany({
+            where: { schoolId },
+            select: { teacherId: true },
+          }),
+          this.db.studentSchool.findMany({
+            where: { schoolId },
+            select: { studentId: true },
+          }),
         ]);
         allowedRecipientIds = Array.from(
           new Set<number>([
@@ -2815,14 +2877,17 @@ export class SchoolAdminExtraController {
       }
     }
 
-    const { items, total } = await this.notificationsService.listWithProfiles(user.id, {
-      mode: m,
-      limit: take,
-      offset: skip,
-      search,
-      status: s,
-      allowedRecipientIds,
-    });
+    const { items, total } = await this.notificationsService.listWithProfiles(
+      user.id,
+      {
+        mode: m,
+        limit: take,
+        offset: skip,
+        search,
+        status: s,
+        allowedRecipientIds,
+      },
+    );
     return { notifications: items, total };
   }
 
@@ -2854,12 +2919,18 @@ export class SchoolAdminExtraController {
       const queries = recipients.map((r) => {
         if (r === 'role:teacher') {
           return this.db.teacherSchool
-            .findMany({ where: { schoolId: schoolId ?? undefined }, select: { teacherId: true } })
+            .findMany({
+              where: { schoolId: schoolId ?? undefined },
+              select: { teacherId: true },
+            })
             .then((rows) => rows.map((t) => t.teacherId));
         }
         if (r === 'role:student') {
           return this.db.studentSchool
-            .findMany({ where: { schoolId: schoolId ?? undefined }, select: { studentId: true } })
+            .findMany({
+              where: { schoolId: schoolId ?? undefined },
+              select: { studentId: true },
+            })
             .then((rows) => rows.map((s) => s.studentId));
         }
         return Promise.resolve([] as number[]);
@@ -2895,12 +2966,16 @@ export class SchoolAdminExtraController {
         throw new BadRequestException('No valid recipients in your school');
     }
 
-    const { sent } = await this.notificationsService.sendBroadcast(user.id, userIds, {
-      title,
-      message,
-      type: body?.type,
-      allowReplies: body?.allowReplies,
-    });
+    const { sent } = await this.notificationsService.sendBroadcast(
+      user.id,
+      userIds,
+      {
+        title,
+        message,
+        type: body?.type,
+        allowReplies: body?.allowReplies,
+      },
+    );
     return { sent, success: true };
   }
 
@@ -2912,32 +2987,58 @@ export class SchoolAdminExtraController {
     const schoolId = schoolIdParam ?? (await this.getSchoolId(user.id));
     if (!schoolId) return { roles: [], users: [] };
 
-    const [teacherCount, studentCount, teacherUsers, studentUsers] = await Promise.all([
-      this.db.teacherSchool.count({ where: { schoolId } }),
-      this.db.studentSchool.count({ where: { schoolId } }),
-      this.db.teacherSchool.findMany({ where: { schoolId } }),
-      this.db.studentSchool.findMany({
-        where: { schoolId },
-        include: { student: { include: { profile: true } } },
-      }),
-    ]);
+    const [teacherCount, studentCount, teacherUsers, studentUsers] =
+      await Promise.all([
+        this.db.teacherSchool.count({
+          where: { schoolId, teacher: { deletedAt: null } },
+        }),
+        this.db.studentSchool.count({
+          where: { schoolId, student: { deletedAt: null } },
+        }),
+        this.db.teacherSchool.findMany({
+          where: { schoolId, teacher: { deletedAt: null } },
+        }),
+        this.db.studentSchool.findMany({
+          where: { schoolId, student: { deletedAt: null } },
+          include: { student: { include: { profile: true } } },
+        }),
+      ]);
 
     const roles = [
-      teacherCount > 0 ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount } : null,
-      studentCount > 0 ? { id: 'role:student', name: 'All Students', count: studentCount } : null,
-    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
+      teacherCount > 0
+        ? { id: 'role:teacher', name: 'All Teachers', count: teacherCount }
+        : null,
+      studentCount > 0
+        ? { id: 'role:student', name: 'All Students', count: studentCount }
+        : null,
+    ].filter(
+      (r): r is { id: string; name: string; count: number } => r !== null,
+    );
 
-    const teacherIds = Array.from(new Set(teacherUsers.map((t) => t.teacherId)));
-    const teachers = teacherIds.length > 0
-      ? await this.db.user.findMany({ where: { id: { in: teacherIds } }, include: { profile: true } })
-      : [];
+    const teacherIds = Array.from(
+      new Set(teacherUsers.map((t) => t.teacherId)),
+    );
+    const teachers =
+      teacherIds.length > 0
+        ? await this.db.user.findMany({
+            where: { id: { in: teacherIds } },
+            include: { profile: true },
+          })
+        : [];
     const teacherById = new Map(teachers.map((t) => [t.id, t]));
 
     const users = [
       ...teacherUsers
         .map((ts) => {
           const t = teacherById.get(ts.teacherId);
-          return t ? { id: String(t.id), name: t.profile?.fullName ?? t.email, email: t.email, role: 'teacher' as const } : null;
+          return t
+            ? {
+                id: String(t.id),
+                name: t.profile?.fullName ?? t.email,
+                email: t.email,
+                role: 'teacher' as const,
+              }
+            : null;
         })
         .filter((u): u is NonNullable<typeof u> => u !== null),
       ...studentUsers.map((ss) => ({
@@ -2961,7 +3062,6 @@ export class SchoolAdminExtraController {
 
   // Reports - TeacherReport (school-scoped)
 
-
   @Get('reports')
   async getReports(
     @CurrentUser() user: { id: number },
@@ -2970,7 +3070,10 @@ export class SchoolAdminExtraController {
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId)
-      return { reports: [], stats: { total: 0, pending: 0, approved: 0, rejected: 0 } };
+      return {
+        reports: [],
+        stats: { total: 0, pending: 0, approved: 0, rejected: 0 },
+      };
     // Cap raised to 500: the reports management page derives its own
     // Total/Pending/Approved/Rejected counts and per-teacher coverage from this
     // list, so a 100-row ceiling produced wrong numbers for busy schools.
@@ -2993,8 +3096,12 @@ export class SchoolAdminExtraController {
         this.db.teacherReport.count({
           where: { schoolId, status: { in: ['submitted', 'reviewed'] } },
         }),
-        this.db.teacherReport.count({ where: { schoolId, status: 'approved' } }),
-        this.db.teacherReport.count({ where: { schoolId, status: 'rejected' } }),
+        this.db.teacherReport.count({
+          where: { schoolId, status: 'approved' },
+        }),
+        this.db.teacherReport.count({
+          where: { schoolId, status: 'rejected' },
+        }),
       ]);
     const teacherIds = Array.from(new Set(reports.map((r) => r.teacherId)));
     const teachers =
@@ -3018,6 +3125,7 @@ export class SchoolAdminExtraController {
           period_id: r.periodId,
           status: toReportUiStatus(r.status as string),
           topics_taught: r.topicsTaught ?? '',
+          subject: r.subject ?? '',
           activities: r.activities ?? '',
           student_count: r.studentCount ?? 0,
           duration_hours: r.durationHours ?? 0,
@@ -3063,6 +3171,7 @@ export class SchoolAdminExtraController {
         period_id: report.periodId,
         status: toReportUiStatus(report.status as string),
         topics_taught: report.topicsTaught ?? '',
+        subject: report.subject ?? '',
         activities: report.activities ?? '',
         student_count: report.studentCount ?? 0,
         duration_hours: report.durationHours ?? 0,
@@ -3166,7 +3275,7 @@ export class SchoolAdminExtraController {
     ];
     try {
       await this.realtimeGateway.emitDashboardStatsForUsers(emitTargets);
-    } catch (emitErr: unknown) {
+    } catch {
       // Approval already persisted — never surface emit failures as HTTP 401.
     }
     return { success: true };
@@ -3265,8 +3374,7 @@ export class SchoolAdminExtraController {
         // reject — see updateLeave), so it doubles as the "reviewed by"
         // identity for a rejected leave too.
         reviewed_by: l.status === 'rejected' ? (l.approvedBy ?? null) : null,
-        reviewed_at:
-          l.status === 'rejected' ? l.updatedAt.toISOString() : null,
+        reviewed_at: l.status === 'rejected' ? l.updatedAt.toISOString() : null,
         profiles: {
           id: String(l.teacherId),
           full_name: l.teacher?.profile?.fullName ?? l.teacher?.email ?? '',
@@ -3353,7 +3461,9 @@ export class SchoolAdminExtraController {
     });
     if (!leave) throw new BadRequestException('Leave not found');
     if (leave.status === 'cancelled') {
-      throw new BadRequestException('This leave request was cancelled by the teacher.');
+      throw new BadRequestException(
+        'This leave request was cancelled by the teacher.',
+      );
     }
     // School admins can only act on a leave until 11pm IST the day before it
     // starts (same day for a leave starting today); after that only a system
@@ -3395,7 +3505,9 @@ export class SchoolAdminExtraController {
     const emergency = isEmergencyLeave(leave);
     if (emergency) {
       if (statusRaw === 'pending') {
-        throw new BadRequestException('An emergency leave can only be approved or rejected.');
+        throw new BadRequestException(
+          'An emergency leave can only be approved or rejected.',
+        );
       }
       assertSchoolAdminStageOpen(leave);
     }
@@ -3438,7 +3550,11 @@ export class SchoolAdminExtraController {
     // otherwise those Attendance rows stayed permanently stuck showing the
     // teacher as on approved leave for a leave that's no longer approved.
     if (status === 'rejected') {
-      await revertLeaveApprovedAttendance(this.db, updated, getTodayIstDateStr());
+      await revertLeaveApprovedAttendance(
+        this.db,
+        updated,
+        getTodayIstDateStr(),
+      );
     }
 
     // Notify the teacher when their leave is approved or rejected (in-app).
@@ -3473,7 +3589,8 @@ export class SchoolAdminExtraController {
     if (emergency && statusRaw === 'approved' && status === 'pending') {
       await this.notificationsService.sendOne(user.id, updated.teacherId, {
         title: 'Emergency leave: approved by school admin',
-        message: 'Your school admin approved your emergency leave. It is now waiting for the admin\'s approval — please contact the admin to request it.',
+        message:
+          "Your school admin approved your emergency leave. It is now waiting for the admin's approval — please contact the admin to request it.",
         type: 'system_alert',
         allowReplies: false,
       });
@@ -3485,7 +3602,8 @@ export class SchoolAdminExtraController {
         admins.map((a) =>
           this.notificationsService.sendOne(user.id, a.id, {
             title: 'Emergency leave awaiting your approval',
-            message: 'A school admin approved a teacher\'s emergency leave. Your approval is needed to finalise it.',
+            message:
+              "A school admin approved a teacher's emergency leave. Your approval is needed to finalise it.",
             type: 'system_alert',
             allowReplies: false,
           }),
@@ -3522,21 +3640,29 @@ export class SchoolAdminExtraController {
   async createEmergencyLeave(
     @CurrentUser() user: { id: number },
     @Body()
-    body: { teacher_id?: number | string; start_date?: string; end_date?: string; reason?: string },
+    body: {
+      teacher_id?: number | string;
+      start_date?: string;
+      end_date?: string;
+      reason?: string;
+    },
   ) {
     const schoolId = await this.getSchoolId(user.id);
     if (!schoolId) throw new BadRequestException('School not found');
     const teacherId = Number(body?.teacher_id);
     const { start_date, end_date, reason } = body ?? {};
     if (!Number.isInteger(teacherId) || !start_date || !end_date) {
-      throw new BadRequestException('teacher_id, start_date and end_date are required');
+      throw new BadRequestException(
+        'teacher_id, start_date and end_date are required',
+      );
     }
     const start = new Date(start_date + 'T00:00:00.000Z');
     const end = new Date(end_date + 'T23:59:59.999Z');
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
-    if (start > end) throw new BadRequestException('End date must be on or after start date');
+    if (start > end)
+      throw new BadRequestException('End date must be on or after start date');
     assertLeaveSpan(start_date, end_date);
     assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
 
@@ -3544,7 +3670,8 @@ export class SchoolAdminExtraController {
       where: { teacherId, schoolId },
       select: { schoolId: true },
     });
-    if (!assigned) throw new BadRequestException('Teacher is not assigned to this school');
+    if (!assigned)
+      throw new BadRequestException('Teacher is not assigned to this school');
 
     const overlap = await this.db.teacherLeave.findFirst({
       where: {
@@ -3557,7 +3684,9 @@ export class SchoolAdminExtraController {
       select: { id: true },
     });
     if (overlap) {
-      throw new BadRequestException('This teacher already has a pending or approved leave overlapping these dates.');
+      throw new BadRequestException(
+        'This teacher already has a pending or approved leave overlapping these dates.',
+      );
     }
 
     // The school admin filing it IS stage 1 (approved). It stays pending until
@@ -3598,7 +3727,11 @@ export class SchoolAdminExtraController {
         }),
       ),
     );
-    await this.realtimeGateway.emitDashboardStatsForUsers([teacherId, user.id, ...admins.map((a) => a.id)]);
+    await this.realtimeGateway.emitDashboardStatsForUsers([
+      teacherId,
+      user.id,
+      ...admins.map((a) => a.id),
+    ]);
     return { success: true, leave_id: leave.id };
   }
 
@@ -3748,7 +3881,9 @@ export class SchoolAdminExtraController {
           continue;
         }
         const rawPassword = String(r.password ?? '').trim();
-        const effectivePassword = rawPassword || deriveFriendlyPassword(r.full_name as string | undefined);
+        const effectivePassword =
+          rawPassword ||
+          deriveFriendlyPassword(r.full_name as string | undefined);
         const hash = await bcrypt.hash(effectivePassword, 10);
         try {
           await this.db.$transaction(async (tx) => {

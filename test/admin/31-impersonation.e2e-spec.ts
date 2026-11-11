@@ -2,7 +2,11 @@ import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -45,7 +49,7 @@ describe('Admin impersonation', () => {
       .then((r) => expect([200, 404]).toContain(r.status));
   });
 
-  it('the admin\'s own token still works after impersonating (session untouched)', async () => {
+  it("the admin's own token still works after impersonating (session untouched)", async () => {
     await request(app.getHttpServer())
       .get('/admin/stats')
       .set(...authHeader(fixture.admin.token))

@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -74,20 +78,25 @@ describe('Admin assignment-analytics per-school scoping', () => {
     // assignments coexisting in the same live database during this test).
     expect(fixtureRow.assignments_created).toBe(2);
 
-    const totalPlatformAssignments = res.body?.analytics?.summary?.total_assignments;
+    const totalPlatformAssignments =
+      res.body?.analytics?.summary?.total_assignments;
     if (typeof totalPlatformAssignments === 'number') {
       // Only meaningful when other assignments exist elsewhere on the
       // platform (true for this live/shared DB) — guards against a
       // regression back to "every row shows the platform total."
-      expect(fixtureRow.assignments_created).toBeLessThan(totalPlatformAssignments);
+      expect(fixtureRow.assignments_created).toBeLessThan(
+        totalPlatformAssignments,
+      );
     }
 
     if (createdIds.length) {
-      await pool.query('DELETE FROM "Assignment" WHERE id = ANY($1)', [createdIds]);
+      await pool.query('DELETE FROM "Assignment" WHERE id = ANY($1)', [
+        createdIds,
+      ]);
     }
   });
 
-  it('excludes unpublished (draft) assignments from assignments_created/total_assignments, matching /school-admin/leaderboard\'s own isPublished filter', async () => {
+  it("excludes unpublished (draft) assignments from assignments_created/total_assignments, matching /school-admin/leaderboard's own isPublished filter", async () => {
     const teacherAuth = authHeader(fixture.teachers[0].token);
 
     const before = await request(app.getHttpServer())
@@ -155,7 +164,8 @@ describe('Admin assignment-analytics per-school scoping', () => {
           questions: [],
         })
         .expect(201);
-      const assignmentId: string = createRes.body?.assignment?.id ?? createRes.body?.id;
+      const assignmentId: string =
+        createRes.body?.assignment?.id ?? createRes.body?.id;
       expect(assignmentId).toBeDefined();
 
       try {
@@ -187,10 +197,13 @@ describe('Admin assignment-analytics per-school scoping', () => {
         // (3/10 = 30%), not the higher-scoring first attempt (9/10 = 90%).
         expect(schoolRow.average_score_percentage).toBeCloseTo(30, 0);
       } finally {
-        await pool.query('DELETE FROM "AssignmentSubmission" WHERE "assignmentId" = $1', [
+        await pool.query(
+          'DELETE FROM "AssignmentSubmission" WHERE "assignmentId" = $1',
+          [assignmentId],
+        );
+        await pool.query('DELETE FROM "Assignment" WHERE id = $1', [
           assignmentId,
         ]);
-        await pool.query('DELETE FROM "Assignment" WHERE id = $1', [assignmentId]);
       }
     },
   );

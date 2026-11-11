@@ -59,8 +59,11 @@ describe('Admin community CMS: item CRUD + versioning (fixture-only, not feature
       .get(`/admin/community/items/${itemId}/versions`)
       .set(...adminAuth)
       .expect(200);
-    const versionList = versions.body?.data ?? versions.body?.versions ?? versions.body;
-    expect(Array.isArray(versionList) ? versionList.length : 0).toBeGreaterThan(0);
+    const versionList =
+      versions.body?.data ?? versions.body?.versions ?? versions.body;
+    expect(Array.isArray(versionList) ? versionList.length : 0).toBeGreaterThan(
+      0,
+    );
   });
 
   it('GET /admin/community/items/:id reflects the update', async () => {

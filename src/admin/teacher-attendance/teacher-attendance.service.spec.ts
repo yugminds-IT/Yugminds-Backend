@@ -23,12 +23,17 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
   beforeEach(async () => {
     db = {
       teacherSchool: {
-        findMany: jest.fn().mockResolvedValue([{ teacherId: 1, schoolId: 'school-a' }]),
+        findMany: jest
+          .fn()
+          .mockResolvedValue([{ teacherId: 1, schoolId: 'school-a' }]),
       },
       // Mon-Sat working pattern (0=Sun..6=Sat), in effect well before the range.
       teacherWorkingDaysHistory: {
         findMany: jest.fn().mockResolvedValue([
-          { effectiveFrom: new Date('2026-01-01T00:00:00.000Z'), workingDays: [1, 2, 3, 4, 5, 6] },
+          {
+            effectiveFrom: new Date('2026-01-01T00:00:00.000Z'),
+            workingDays: [1, 2, 3, 4, 5, 6],
+          },
         ]),
       },
       attendance: {
@@ -48,7 +53,9 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
       ],
     }).compile();
 
-    service = module.get<AdminTeacherAttendanceService>(AdminTeacherAttendanceService);
+    service = module.get<AdminTeacherAttendanceService>(
+      AdminTeacherAttendanceService,
+    );
   });
 
   it(
@@ -58,7 +65,10 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
       'on the 26th also stamped the 27th-31st Unreported before they occurred, all sharing ' +
       'one identical createdAt since they were inserted in the same request)',
     async () => {
-      await service.markMissing({ start_date: '2026-07-20', end_date: '2026-07-31' });
+      await service.markMissing({
+        start_date: '2026-07-20',
+        end_date: '2026-07-31',
+      });
 
       const createdDates = db.attendance.create.mock.calls.map(
         (call) => call[0].data.date.toISOString().split('T')[0],
@@ -75,7 +85,10 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
   );
 
   it('is a no-op (creates nothing, returns a zeroed summary) when start_date is already after "today"', async () => {
-    const result = await service.markMissing({ start_date: '2026-08-01', end_date: '2026-08-31' });
+    const result = await service.markMissing({
+      start_date: '2026-08-01',
+      end_date: '2026-08-31',
+    });
     expect(db.attendance.create).not.toHaveBeenCalled();
     expect(result.summary).toEqual({
       records_created: 0,
@@ -86,18 +99,31 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
   });
 
   it('still processes the full requested range when end_date is already in the past', async () => {
-    await service.markMissing({ start_date: '2026-07-01', end_date: '2026-07-04' });
+    await service.markMissing({
+      start_date: '2026-07-01',
+      end_date: '2026-07-04',
+    });
     const createdDates = db.attendance.create.mock.calls.map(
       (call) => call[0].data.date.toISOString().split('T')[0],
     );
     // Jul 1 2026 is a Wednesday — Wed/Thu/Fri/Sat all working days per the
     // Mon-Sat pattern, none in the future relative to the frozen "today".
-    expect(createdDates.sort()).toEqual(['2026-07-01', '2026-07-02', '2026-07-03', '2026-07-04']);
+    expect(createdDates.sort()).toEqual([
+      '2026-07-01',
+      '2026-07-02',
+      '2026-07-03',
+      '2026-07-04',
+    ]);
   });
 
   it('stamps settled days Absent (rule: no report by 8pm = Absent), never Unreported', async () => {
-    await service.markMissing({ start_date: '2026-07-01', end_date: '2026-07-04' });
-    const statuses = new Set(db.attendance.create.mock.calls.map((c) => c[0].data.status));
+    await service.markMissing({
+      start_date: '2026-07-01',
+      end_date: '2026-07-04',
+    });
+    const statuses = new Set(
+      db.attendance.create.mock.calls.map((c) => c[0].data.status),
+    );
     expect([...statuses]).toEqual(['Absent']);
   });
 });

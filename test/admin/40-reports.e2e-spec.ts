@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader, mintAccessToken } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -62,18 +66,24 @@ describe('Admin reports + teacher-reports', () => {
 
   it('GET /admin/teacher-reports search matches topics_taught', async () => {
     const res = await request(app.getHttpServer())
-      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&search=QA%20topics`)
+      .get(
+        `/admin/teacher-reports?school_id=${fixture.schoolId}&search=QA%20topics`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const reports = res.body?.reports ?? [];
     expect(reports.some((r: { id: string }) => r.id === reportId)).toBe(true);
 
     const missRes = await request(app.getHttpServer())
-      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&search=zzz-no-match-zzz`)
+      .get(
+        `/admin/teacher-reports?school_id=${fixture.schoolId}&search=zzz-no-match-zzz`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const missReports = missRes.body?.reports ?? [];
-    expect(missReports.some((r: { id: string }) => r.id === reportId)).toBe(false);
+    expect(missReports.some((r: { id: string }) => r.id === reportId)).toBe(
+      false,
+    );
   });
 
   it('PATCH /admin/teacher-reports updates status and admin_notes, and the read reflects it', async () => {
@@ -100,25 +110,35 @@ describe('Admin reports + teacher-reports', () => {
   it('GET /admin/teacher-reports filters by status', async () => {
     // The previous test left reportId as 'approved'.
     const approvedRes = await request(app.getHttpServer())
-      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved`)
+      .get(
+        `/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     expect(
-      (approvedRes.body?.reports ?? []).some((r: { id: string }) => r.id === reportId),
+      (approvedRes.body?.reports ?? []).some(
+        (r: { id: string }) => r.id === reportId,
+      ),
     ).toBe(true);
 
     const rejectedRes = await request(app.getHttpServer())
-      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=rejected`)
+      .get(
+        `/admin/teacher-reports?school_id=${fixture.schoolId}&status=rejected`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     expect(
-      (rejectedRes.body?.reports ?? []).some((r: { id: string }) => r.id === reportId),
+      (rejectedRes.body?.reports ?? []).some(
+        (r: { id: string }) => r.id === reportId,
+      ),
     ).toBe(false);
   });
 
   it('GET /admin/teacher-reports returns real stats independent of the status filter and the list cap', async () => {
     const res = await request(app.getHttpServer())
-      .get(`/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved&limit=1`)
+      .get(
+        `/admin/teacher-reports?school_id=${fixture.schoolId}&status=approved&limit=1`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     expect(res.body.reports.length).toBe(1);
@@ -127,7 +147,10 @@ describe('Admin reports + teacher-reports', () => {
     expect(res.body.stats.total).toBeGreaterThanOrEqual(1);
     expect(res.body.stats.approved).toBeGreaterThanOrEqual(1);
     expect(
-      res.body.stats.submitted + res.body.stats.reviewed + res.body.stats.approved + res.body.stats.rejected,
+      res.body.stats.submitted +
+        res.body.stats.reviewed +
+        res.body.stats.approved +
+        res.body.stats.rejected,
     ).toBe(res.body.stats.total);
   });
 
@@ -173,7 +196,9 @@ describe('Admin reports + teacher-reports', () => {
   });
 
   it('rejects unauthenticated requests', async () => {
-    await request(app.getHttpServer()).get('/admin/teacher-reports').expect(401);
+    await request(app.getHttpServer())
+      .get('/admin/teacher-reports')
+      .expect(401);
     await request(app.getHttpServer()).get('/admin/reports').expect(401);
   });
 

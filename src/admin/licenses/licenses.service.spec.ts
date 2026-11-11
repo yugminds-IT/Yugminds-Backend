@@ -29,7 +29,8 @@ describe('AdminLicensesService', () => {
   afterAll(() => {
     if (REAL_ENV === undefined) delete process.env.ROBOCODERS_LICENSE_SECRET;
     else process.env.ROBOCODERS_LICENSE_SECRET = REAL_ENV;
-    if (REAL_BUILD === undefined) delete process.env.ROBOCODERS_BUILD_LICENSE_NUMBER;
+    if (REAL_BUILD === undefined)
+      delete process.env.ROBOCODERS_BUILD_LICENSE_NUMBER;
     else process.env.ROBOCODERS_BUILD_LICENSE_NUMBER = REAL_BUILD;
   });
 
@@ -112,14 +113,18 @@ describe('AdminLicensesService', () => {
     it('queries without a schoolId filter when none is given (all-schools mode)', async () => {
       await service.list({});
       expect(db.robocodersLicense.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.not.objectContaining({ schoolId: expect.anything() }) }),
+        expect.objectContaining({
+          where: expect.not.objectContaining({ schoolId: expect.anything() }),
+        }),
       );
     });
 
     it('applies a schoolId filter when given', async () => {
       await service.list({ schoolId: 'school-1' });
       expect(db.robocodersLicense.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ schoolId: 'school-1' }) }),
+        expect.objectContaining({
+          where: expect.objectContaining({ schoolId: 'school-1' }),
+        }),
       );
     });
 

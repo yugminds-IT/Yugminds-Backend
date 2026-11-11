@@ -79,6 +79,17 @@ describe('JwtStrategy session check', () => {
     expect(sessions.isAlive).not.toHaveBeenCalled();
   });
 
+  it('keeps the impersonator on the user, so what an admin does as someone else can be traced to the admin', async () => {
+    const { strat } = build(false);
+    await expect(
+      strat.validate({ ...payload, impersonatorId: 9 }),
+    ).resolves.toMatchObject({ id: 1, impersonatorId: 9 });
+    const normal = build(true);
+    expect(
+      (await normal.strat.validate({ ...payload, sid: 's1' })).impersonatorId,
+    ).toBeUndefined();
+  });
+
   describe('deactivated accounts are rejected per request, not only at login', () => {
     const live = { ...payload, sid: 's1' };
 

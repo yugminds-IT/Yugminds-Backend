@@ -15,13 +15,15 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
+import { buildReportPdf } from '../../common/reports/report-pdf';
+import { buildReportDoc, reportFileName } from './report-data';
 import { SkipThrottle } from '@nestjs/throttler';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
-import { Prisma, Role } from '@prisma/client';
+import { Role } from '@prisma/client';
 import { AdminCoursesService } from '../courses/courses.service';
 import { PasswordResetRequestService } from '../../common/password-reset-request/password-reset-request.service';
 import { MonitoringService } from '../../common/monitoring/monitoring.service';
@@ -59,208 +61,6 @@ export class AdminExtraController {
     private readonly logosService: AdminLogosService,
   ) {}
 
-  // Styled PDF generator using pdfkit — produces a professional report with logo, header, tables, footer.
-  private buildStyledPdf(opts: {
-    title: string;
-    subtitle: string;
-    generatedAt: Date;
-    filters: Record<string, string>;
-    summaryStats: Array<{ label: string; value: string | number }>;
-    tableColumns: string[];
-    tableRows: string[][];
-  }): Promise<Buffer> {
-    return new Promise((resolve, reject) => {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const PDFDocument = require('pdfkit');
-      const path = require('path');
-      const fs = require('fs');
-
-      const doc = new PDFDocument({ margin: 50, size: 'A4' });
-      const chunks: Buffer[] = [];
-      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
-      doc.on('end', () => resolve(Buffer.concat(chunks)));
-      doc.on('error', reject);
-
-      // ── Brand colours ─────────────────────────────────────────────────────────
-      const PRIMARY   = '#1e3a5f'; // dark navy
-      const ACCENT    = '#0ea5e9'; // sky blue
-      const LIGHT_BG  = '#f0f7ff'; // very light blue
-      const TEXT_DARK = '#1a202c';
-      const TEXT_MID  = '#4a5568';
-      const TEXT_LITE = '#718096';
-      const WHITE     = '#ffffff';
-      const ROW_ALT   = '#f7fafc';
-      const BORDER    = '#e2e8f0';
-
-      const PAGE_W = doc.page.width;
-      const PAGE_H = doc.page.height;
-      const MARGIN = 50;
-      const CONTENT_W = PAGE_W - MARGIN * 2;
-
-      // ── Helper: draw a filled rounded rect ────────────────────────────────────
-      const fillRect = (x: number, y: number, w: number, h: number, colour: string, r = 0) => {
-        doc.save().roundedRect(x, y, w, h, r).fill(colour).restore();
-      };
-
-      // ── HEADER BAND ───────────────────────────────────────────────────────────
-      fillRect(0, 0, PAGE_W, 90, PRIMARY);
-
-      // Logo (if file exists)
-      const logoPath = path.join(__dirname, '..', '..', '..', 'assets', 'yugminds-logo.png');
-      if (fs.existsSync(logoPath)) {
-        try {
-          doc.image(logoPath, MARGIN, 18, { height: 54, fit: [160, 54] });
-        } catch { /* skip logo on error */ }
-      }
-
-      // Right side: platform name + report title
-      doc
-        .fillColor(WHITE)
-        .font('Helvetica-Bold')
-        .fontSize(18)
-        .text('Yugminds Education Platform', 0, 22, { align: 'right' })
-        .font('Helvetica')
-        .fontSize(10)
-        .fillColor(ACCENT)
-        .text(opts.title, 0, 46, { align: 'right' });
-
-      // Accent stripe below header
-      fillRect(0, 90, PAGE_W, 4, ACCENT);
-
-      let y = 114;
-
-      // ── META ROW ──────────────────────────────────────────────────────────────
-      fillRect(MARGIN, y, CONTENT_W, 44, LIGHT_BG, 6);
-
-      const formattedDate = opts.generatedAt.toLocaleDateString('en-IN', {
-        day: '2-digit', month: 'long', year: 'numeric',
-      });
-      const formattedTime = opts.generatedAt.toLocaleTimeString('en-IN', {
-        hour: '2-digit', minute: '2-digit', hour12: true,
-      });
-
-      const filterStr = Object.entries(opts.filters)
-        .filter(([k]) => k !== 'type')
-        .map(([k, v]) => `${k}: ${v}`)
-        .join('  |  ') || 'All records';
-
-      doc
-        .fillColor(TEXT_MID)
-        .font('Helvetica')
-        .fontSize(9)
-        .text(`Generated: ${formattedDate} at ${formattedTime}`, MARGIN + 12, y + 8)
-        .text(`Filters applied: ${filterStr}`, MARGIN + 12, y + 22);
-
-      y += 60;
-
-      // ── SUBTITLE ─────────────────────────────────────────────────────────────
-      doc
-        .fillColor(PRIMARY)
-        .font('Helvetica-Bold')
-        .fontSize(15)
-        .text(opts.subtitle, MARGIN, y);
-      y += 22;
-      fillRect(MARGIN, y, 48, 3, ACCENT, 2);
-      y += 16;
-
-      // ── SUMMARY STATS CARDS ───────────────────────────────────────────────────
-      if (opts.summaryStats.length > 0) {
-        const cardW = Math.floor(CONTENT_W / opts.summaryStats.length) - 8;
-        opts.summaryStats.forEach((stat, i) => {
-          const cx = MARGIN + i * (cardW + 8);
-          fillRect(cx, y, cardW, 52, WHITE, 6);
-          // Border
-          doc.save().roundedRect(cx, y, cardW, 52, 6).stroke(BORDER).restore();
-          doc
-            .fillColor(ACCENT)
-            .font('Helvetica-Bold')
-            .fontSize(20)
-            .text(String(stat.value), cx + 10, y + 8, { width: cardW - 20 });
-          doc
-            .fillColor(TEXT_LITE)
-            .font('Helvetica')
-            .fontSize(8)
-            .text(stat.label.toUpperCase(), cx + 10, y + 32, { width: cardW - 20 });
-        });
-        y += 68;
-      }
-
-      // ── DATA TABLE ────────────────────────────────────────────────────────────
-      if (opts.tableColumns.length > 0) {
-        const colCount = opts.tableColumns.length;
-        const colW = Math.floor(CONTENT_W / colCount);
-
-        // Table header row
-        fillRect(MARGIN, y, CONTENT_W, 24, PRIMARY, 4);
-        opts.tableColumns.forEach((col, i) => {
-          doc
-            .fillColor(WHITE)
-            .font('Helvetica-Bold')
-            .fontSize(8)
-            .text(col.toUpperCase(), MARGIN + i * colW + 8, y + 7, { width: colW - 12, ellipsis: true });
-        });
-        y += 24;
-
-        // Table body rows
-        const ROW_H = 20;
-        opts.tableRows.forEach((row, rowIdx) => {
-          // Page break check
-          if (y + ROW_H > PAGE_H - 70) {
-            doc.addPage();
-            y = MARGIN;
-            // Reprint header on new page
-            fillRect(MARGIN, y, CONTENT_W, 24, PRIMARY, 4);
-            opts.tableColumns.forEach((col, i) => {
-              doc
-                .fillColor(WHITE)
-                .font('Helvetica-Bold')
-                .fontSize(8)
-                .text(col.toUpperCase(), MARGIN + i * colW + 8, y + 7, { width: colW - 12, ellipsis: true });
-            });
-            y += 24;
-          }
-
-          const rowBg = rowIdx % 2 === 0 ? WHITE : ROW_ALT;
-          fillRect(MARGIN, y, CONTENT_W, ROW_H, rowBg);
-          // Bottom border
-          doc.save().moveTo(MARGIN, y + ROW_H).lineTo(MARGIN + CONTENT_W, y + ROW_H).stroke(BORDER).restore();
-
-          row.forEach((cell, i) => {
-            doc
-              .fillColor(TEXT_DARK)
-              .font('Helvetica')
-              .fontSize(8)
-              .text(String(cell ?? '—'), MARGIN + i * colW + 8, y + 5, { width: colW - 12, ellipsis: true });
-          });
-          y += ROW_H;
-        });
-
-        if (opts.tableRows.length === 0) {
-          fillRect(MARGIN, y, CONTENT_W, 36, ROW_ALT);
-          doc
-            .fillColor(TEXT_LITE)
-            .font('Helvetica')
-            .fontSize(10)
-            .text('No records found for the selected filters.', MARGIN, y + 11, { width: CONTENT_W, align: 'center' });
-          y += 36;
-        }
-      }
-
-      // ── FOOTER ────────────────────────────────────────────────────────────────
-      const footerY = PAGE_H - 46;
-      fillRect(0, footerY, PAGE_W, 46, PRIMARY);
-      doc
-        .fillColor(WHITE)
-        .font('Helvetica')
-        .fontSize(8)
-        .text('Yugminds Education Platform  ·  www.yugminds.com  ·  Confidential — for school use only', 0, footerY + 10, { align: 'center' })
-        .fillColor(ACCENT)
-        .text(`Generated on ${formattedDate}`, 0, footerY + 26, { align: 'center' });
-
-      doc.end();
-    });
-  }
-
   // Monitoring / analytics / stats
 
   @Get('student-progress')
@@ -280,7 +80,11 @@ export class AdminExtraController {
     // /admin/students lists — without isActive/deletedAt here, the summary
     // below would count courses/progress for deactivated or trashed
     // students who never appear in the table this page renders.
-    const studentWhere: any = { role: Role.student, isActive: true, deletedAt: null };
+    const studentWhere: any = {
+      role: Role.student,
+      isActive: true,
+      deletedAt: null,
+    };
     if (studentId) {
       studentWhere.id = parseInt(studentId, 10) || 0;
     }
@@ -431,7 +235,8 @@ export class AdminExtraController {
     const schoolById = new Map(schools.map((s) => [s.id, s]));
     const chaptersByCourse = new Map<string, Array<{ id: string }>>();
     for (const ch of chapters) {
-      if (!chaptersByCourse.has(ch.courseId)) chaptersByCourse.set(ch.courseId, []);
+      if (!chaptersByCourse.has(ch.courseId))
+        chaptersByCourse.set(ch.courseId, []);
       chaptersByCourse.get(ch.courseId)!.push({ id: ch.id });
     }
     const chapterToCourse = new Map(chapters.map((ch) => [ch.id, ch.courseId]));
@@ -661,11 +466,19 @@ export class AdminExtraController {
       schoolId ? Promise.resolve(1) : this.db.school.count(),
       this.db.course.count({ where: { deletedAt: null } }),
       this.db.studentCourse.findMany({
-        where: { ...studentScope, ...courseScope, courseId: { in: activeCourseIds } },
+        where: {
+          ...studentScope,
+          ...courseScope,
+          courseId: { in: activeCourseIds },
+        },
         select: { studentId: true, courseId: true },
       }),
       this.db.courseProgress.findMany({
-        where: { ...studentScope, ...courseScope, courseId: { in: activeCourseIds } },
+        where: {
+          ...studentScope,
+          ...courseScope,
+          courseId: { in: activeCourseIds },
+        },
         select: {
           studentId: true,
           courseId: true,
@@ -717,7 +530,8 @@ export class AdminExtraController {
     for (const cc of summaryContents) {
       const cid = summaryChapterToCourse.get(cc.chapterId);
       if (!cid) continue;
-      if (!summaryContentsByCourse.has(cid)) summaryContentsByCourse.set(cid, []);
+      if (!summaryContentsByCourse.has(cid))
+        summaryContentsByCourse.set(cid, []);
       summaryContentsByCourse.get(cid)!.push(cc);
     }
 
@@ -727,7 +541,8 @@ export class AdminExtraController {
     >();
     for (const p of allProgressInScope) {
       const key = `${p.studentId}:${p.courseId}`;
-      if (!progressByStudentCourse.has(key)) progressByStudentCourse.set(key, []);
+      if (!progressByStudentCourse.has(key))
+        progressByStudentCourse.set(key, []);
       progressByStudentCourse.get(key)!.push(p);
     }
 
@@ -742,14 +557,16 @@ export class AdminExtraController {
         summaryContentsByCourse.get(sc.courseId) ?? [],
         progressByStudentCourse.get(key) ?? [],
       );
-      if (!coursesByStudent.has(sc.studentId)) coursesByStudent.set(sc.studentId, []);
-      coursesByStudent
-        .get(sc.studentId)!
-        .push({ percentage: computed.progressPercentage, status: computed.status });
+      if (!coursesByStudent.has(sc.studentId))
+        coursesByStudent.set(sc.studentId, []);
+      coursesByStudent.get(sc.studentId)!.push({
+        percentage: computed.progressPercentage,
+        status: computed.status,
+      });
     }
 
-    const activeStudentsCount = [...coursesByStudent.values()].filter((courses) =>
-      courses.some((c) => c.percentage > 0),
+    const activeStudentsCount = [...coursesByStudent.values()].filter(
+      (courses) => courses.some((c) => c.percentage > 0),
     ).length;
     // A student "completed" when every course they're enrolled in (in scope)
     // reached 'completed' status — checking the derived status (which
@@ -758,7 +575,8 @@ export class AdminExtraController {
     // report 100% from a single stray progress row with nothing to actually
     // complete.
     const completedStudentsCount = [...coursesByStudent.values()].filter(
-      (courses) => courses.length > 0 && courses.every((c) => c.status === 'completed'),
+      (courses) =>
+        courses.length > 0 && courses.every((c) => c.status === 'completed'),
     ).length;
     const perStudentAverages = [...coursesByStudent.values()].map(
       (courses) =>
@@ -826,6 +644,24 @@ export class AdminExtraController {
       limit,
       status,
     });
+  }
+
+  @Patch('teacher-reports/bulk')
+  async bulkUpdateTeacherReports(
+    @Body() body: { ids?: string[]; status?: string },
+  ) {
+    const ids = Array.isArray(body?.ids)
+      ? body.ids.filter((x) => typeof x === 'string')
+      : [];
+    if (ids.length === 0) throw new BadRequestException('ids is required');
+    if (body?.status !== 'approved' && body?.status !== 'rejected') {
+      throw new BadRequestException("status must be 'approved' or 'rejected'");
+    }
+    const { count } = await this.db.teacherReport.updateMany({
+      where: { id: { in: ids } },
+      data: { status: body.status },
+    });
+    return { success: true, updated: count };
   }
 
   @Patch('teacher-reports')
@@ -1123,10 +959,7 @@ export class AdminExtraController {
     @Query('search') search?: string,
     @Query('status') status?: string,
   ) {
-    const take = Math.min(
-      Math.max(parseInt(limit ?? '50', 10) || 50, 1),
-      100,
-    );
+    const take = Math.min(Math.max(parseInt(limit ?? '50', 10) || 50, 1), 100);
     const skip = Math.max(parseInt(offset ?? '0', 10) || 0, 0);
     const m = mode === 'sent' ? 'sent' : 'received';
     const s = status === 'read' || status === 'unread' ? status : 'all';
@@ -1212,9 +1045,7 @@ export class AdminExtraController {
         },
       };
       const results = await Promise.all(
-        recipients
-          .filter((r) => r in roleFilters)
-          .map((r) => roleFilters[r]()),
+        recipients.filter((r) => r in roleFilters).map((r) => roleFilters[r]()),
       );
       userIds = results.flat();
     } else if (recipientType === 'school') {
@@ -1294,15 +1125,24 @@ export class AdminExtraController {
         ? { id: 'role:student', name: 'All Students', count: studentCount }
         : null,
       schoolAdminCount > 0
-        ? { id: 'role:school_admin', name: 'All School Admins', count: schoolAdminCount }
+        ? {
+            id: 'role:school_admin',
+            name: 'All School Admins',
+            count: schoolAdminCount,
+          }
         : null,
       adminCount > 0
         ? { id: 'role:admin', name: 'All Admins', count: adminCount }
         : null,
-    ].filter((r): r is { id: string; name: string; count: number } => r !== null);
+    ].filter(
+      (r): r is { id: string; name: string; count: number } => r !== null,
+    );
 
     const [schools, users] = await Promise.all([
-      this.db.school.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } }),
+      this.db.school.findMany({
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
       this.db.user.findMany({
         where: {
           isActive: true,
@@ -1334,280 +1174,40 @@ export class AdminExtraController {
   async getReports(@Query() query: Record<string, string>, @Res() res: any) {
     const type = String(query.type ?? 'system').trim() || 'system';
     const now = new Date();
-    const datePart = now.toISOString().slice(0, 10);
 
-    const titleMap: Record<string, string> = {
-      schools: 'Schools Report',
-      teachers: 'Teacher Performance Report',
-      students: 'Student Enrollment Report',
-      courses: 'Course Progress Report',
+    // Filters arrive as comma-separated ids; the frontend sends them as school_ids, teacher_ids, ...
+    const ids = (raw?: string) =>
+      raw
+        ?.split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+    const nums = (raw?: string) =>
+      ids(raw)
+        ?.map(Number)
+        .filter((n) => Number.isInteger(n));
+    const pickIds = (raw?: string) => (ids(raw)?.length ? ids(raw) : undefined);
+    const filters = {
+      schoolIds: pickIds(query.school_ids),
+      teacherIds: nums(query.teacher_ids)?.length
+        ? nums(query.teacher_ids)
+        : undefined,
+      studentIds: nums(query.student_ids)?.length
+        ? nums(query.student_ids)
+        : undefined,
+      courseIds: pickIds(query.course_ids),
     };
-    const title = titleMap[type] ?? 'System Report';
-
-    // ── Parse filter IDs from query params ────────────────────────────────────
-    const parseIds = (raw: string | undefined): string[] | undefined => {
-      if (!raw || !raw.trim()) return undefined;
-      const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
-      return ids.length > 0 ? ids : undefined;
-    };
-
-    const filterSchoolIds   = parseIds(query.school_ids);
-    const filterTeacherIds  = parseIds(query.teacher_ids);
-    const filterStudentIds  = parseIds(query.student_ids);
-    const filterCourseIds   = parseIds(query.course_ids);
-
-    // ── Resolve human-readable filter labels for PDF display ─────────────────
-    const humanFilters: Record<string, string> = {};
-    try {
-      if (filterSchoolIds) {
-        const schools = await this.db.school.findMany({
-          where: { id: { in: filterSchoolIds } },
-          select: { name: true },
-        });
-        humanFilters['Schools'] = schools.map((s) => s.name).join(', ');
-      }
-    } catch { /* non-critical */ }
-
-    // ── Scoped summary counts ─────────────────────────────────────────────────
-    let schoolCount = 0, teacherCount = 0, studentCount = 0, courseCount = 0;
-    try {
-      [schoolCount, teacherCount, studentCount, courseCount] = await Promise.all([
-        this.db.school.count({
-          where: {
-            isActive: true,
-            ...(filterSchoolIds ? { id: { in: filterSchoolIds } } : {}),
-          },
-        }),
-        this.db.user.count({
-          where: {
-            role: Role.teacher,
-            isActive: true,
-            ...(filterTeacherIds ? { id: { in: filterTeacherIds.map(Number) } } : {}),
-            ...(filterSchoolIds && !filterTeacherIds
-              ? { teacherSchools: { some: { schoolId: { in: filterSchoolIds } } } }
-              : {}),
-          },
-        }),
-        this.db.user.count({
-          where: {
-            role: Role.student,
-            isActive: true,
-            ...(filterStudentIds ? { id: { in: filterStudentIds.map(Number) } } : {}),
-            ...(filterSchoolIds && !filterStudentIds
-              ? { studentSchools: { some: { schoolId: { in: filterSchoolIds } } } }
-              : {}),
-          },
-        }),
-        this.db.course.count({
-          where: {
-            isPublished: true,
-            ...(filterCourseIds ? { id: { in: filterCourseIds } } : {}),
-          },
-        }),
-      ]);
-    } catch { /* keep zero counts */ }
-
-    const summaryStats = [
-      { label: 'Schools', value: schoolCount },
-      { label: 'Teachers', value: teacherCount },
-      { label: 'Students', value: studentCount },
-      { label: 'Courses', value: courseCount },
-    ];
-
-    // ── Fetch per-type detailed rows (with filters applied) ───────────────────
-    let tableColumns: string[] = [];
-    let tableRows: string[][] = [];
-
-    try {
-      if (type === 'schools') {
-        tableColumns = ['#', 'School Name', 'Code', 'Status', 'Registered On'];
-        const schools = await this.db.school.findMany({
-          where: {
-            ...(filterSchoolIds ? { id: { in: filterSchoolIds } } : {}),
-          },
-          orderBy: { name: 'asc' },
-          take: 500,
-          select: { id: true, name: true, schoolCode: true, isActive: true, createdAt: true },
-        });
-        tableRows = schools.map((s, i) => [
-          String(i + 1),
-          s.name,
-          s.schoolCode ?? '—',
-          s.isActive ? 'Active' : 'Inactive',
-          s.createdAt ? new Date(s.createdAt).toLocaleDateString('en-IN') : '—',
-        ]);
-      } else if (type === 'teachers') {
-        tableColumns = ['#', 'Name', 'School', 'Classes Taught', 'Attendance', 'Avg Students/Class', 'Leaves Taken', 'Status'];
-
-        const teacherWhere: any = {
-          role: Role.teacher,
-          ...(filterTeacherIds ? { id: { in: filterTeacherIds.map(Number) } } : {}),
-          ...(filterSchoolIds && !filterTeacherIds
-            ? { teacherSchools: { some: { schoolId: { in: filterSchoolIds } } } }
-            : {}),
-        };
-
-        const teachers = await this.db.user.findMany({
-          where: teacherWhere,
-          orderBy: { createdAt: 'desc' },
-          take: 500,
-          select: {
-            id: true,
-            email: true,
-            isActive: true,
-            createdAt: true,
-            profile: { select: { fullName: true } },
-            teacherSchools: { take: 1, select: { schoolId: true, school: { select: { name: true } } } },
-          },
-        });
-
-        const teacherIds = teachers.map((t) => t.id);
-
-        // Fetch performance data in parallel for all teachers
-        const schoolIdFilter = filterSchoolIds ?? undefined;
-        const [reportAgg, attendanceAgg, leaveAgg] = await Promise.all([
-          // TeacherReport: count of reports (classes taught) + avg student count per teacher
-          this.db.teacherReport.groupBy({
-            by: ['teacherId'],
-            where: {
-              teacherId: { in: teacherIds },
-              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
-            },
-            _count: { id: true },
-            _avg: { studentCount: true },
-          }),
-          // Attendance: count present days per teacher
-          this.db.attendance.groupBy({
-            by: ['teacherId'],
-            where: {
-              teacherId: { in: teacherIds },
-              status: 'present',
-              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
-            },
-            _count: { id: true },
-          }),
-          // TeacherLeave: count approved leaves per teacher
-          this.db.teacherLeave.groupBy({
-            by: ['teacherId'],
-            where: {
-              teacherId: { in: teacherIds },
-              status: 'approved',
-              ...(schoolIdFilter ? { schoolId: { in: schoolIdFilter } } : {}),
-            },
-            _count: { id: true },
-          }),
-        ]);
-
-        // Build lookup maps
-        const reportMap = new Map(reportAgg.map((r: any) => [r.teacherId, r]));
-        const attendMap = new Map(attendanceAgg.map((r: any) => [r.teacherId, r._count.id]));
-        const leaveMap  = new Map(leaveAgg.map((r: any) => [r.teacherId, r._count.id]));
-
-        tableRows = teachers.map((t, i) => {
-          const rep   = reportMap.get(t.id) as any;
-          const classesTaught = rep?._count?.id ?? 0;
-          const avgStudents   = rep?._avg?.studentCount != null
-            ? Math.round(rep._avg.studentCount)
-            : '—';
-          const presentDays   = attendMap.get(t.id) ?? 0;
-          const leavesTaken   = leaveMap.get(t.id) ?? 0;
-
-          return [
-            String(i + 1),
-            (t as any).profile?.fullName ?? t.email ?? '—',
-            (t as any).teacherSchools?.[0]?.school?.name ?? '—',
-            String(classesTaught),
-            presentDays > 0 ? `${presentDays} days` : '—',
-            String(avgStudents),
-            String(leavesTaken),
-            t.isActive ? 'Active' : 'Inactive',
-          ];
-        });
-      } else if (type === 'students') {
-        tableColumns = ['#', 'Name', 'Email', 'School', 'Grade', 'Section', 'Enrolled On'];
-        const students = await this.db.user.findMany({
-          where: {
-            role: Role.student,
-            ...(filterStudentIds ? { id: { in: filterStudentIds.map(Number) } } : {}),
-            ...(filterSchoolIds && !filterStudentIds
-              ? { studentSchools: { some: { schoolId: { in: filterSchoolIds } } } }
-              : {}),
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 500,
-          select: {
-            id: true,
-            email: true,
-            createdAt: true,
-            profile: { select: { fullName: true } },
-            studentSchools: {
-              take: 1,
-              select: {
-                grade: true,
-                section: true,
-                school: { select: { name: true } },
-              },
-            },
-          },
-        });
-        tableRows = students.map((s, i) => {
-          const ss = (s as any).studentSchools?.[0];
-          return [
-            String(i + 1),
-            (s as any).profile?.fullName ?? s.email ?? '—',
-            s.email ?? '—',
-            ss?.school?.name ?? '—',
-            ss?.grade ?? '—',
-            ss?.section ?? '—',
-            s.createdAt ? new Date(s.createdAt).toLocaleDateString('en-IN') : '—',
-          ];
-        });
-      } else if (type === 'courses') {
-        tableColumns = ['#', 'Course Title', 'Status', 'School Access', 'Published On'];
-        const courses = await this.db.course.findMany({
-          where: {
-            ...(filterCourseIds ? { id: { in: filterCourseIds } } : {}),
-            ...(filterSchoolIds && !filterCourseIds
-              ? { courseAccess: { some: { schoolId: { in: filterSchoolIds } } } }
-              : {}),
-          },
-          orderBy: { createdAt: 'desc' },
-          take: 500,
-          select: {
-            id: true,
-            title: true,
-            isPublished: true,
-            createdAt: true,
-            _count: { select: { courseAccess: true } },
-          },
-        });
-        tableRows = courses.map((c, i) => [
-          String(i + 1),
-          c.title ?? '—',
-          c.isPublished ? 'Published' : 'Draft',
-          String((c as any)._count?.courseAccess ?? 0),
-          c.createdAt ? new Date(c.createdAt).toLocaleDateString('en-IN') : '—',
-        ]);
-      }
-    } catch (err) {
-      console.error('Report data fetch error:', err);
-    }
-
-    const pdf = await this.buildStyledPdf({
-      title,
-      subtitle: `${title} — ${now.toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric' })}`,
-      generatedAt: now,
-      filters: Object.keys(humanFilters).length > 0 ? humanFilters : {},
-      summaryStats,
-      tableColumns,
-      tableRows,
-    });
+    const doc = await buildReportDoc(this.db, type, filters);
+    const fileName = await reportFileName(
+      this.db,
+      type,
+      doc.title,
+      filters,
+      now,
+    );
+    const pdf = await buildReportPdf({ ...doc, generatedAt: now });
 
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="${type}-report-${datePart}.pdf"`,
-    );
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     return res.send(pdf);
   }
 
@@ -1727,9 +1327,7 @@ export class AdminExtraController {
   // Certificates admin
 
   @Post('certificates/generate-all-eligible')
-  async generateAllEligibleCertificates(
-    @CurrentUser() user: { id: number },
-  ) {
+  async generateAllEligibleCertificates(@CurrentUser() user: { id: number }) {
     // Delegates to batchGenerateCertificates with no filters = all students, all courses.
     return this.batchGenerateCertificates(user, { dry_run: false });
   }
@@ -1823,7 +1421,9 @@ export class AdminExtraController {
         }
       }
       if (failed > 0) {
-        warnings.push(`${failed} certificate(s) could not be drawn and are left as pending — use Fix broken / Regenerate.`);
+        warnings.push(
+          `${failed} certificate(s) could not be drawn and are left as pending — use Fix broken / Regenerate.`,
+        );
       }
     } else {
       const existing = await this.db.studentCertificate.findMany({
@@ -1983,12 +1583,17 @@ export class AdminExtraController {
       select: { certificateKey: true, certificateUrl: true, id: true },
     });
     if (!cert) throw new BadRequestException('Certificate not found');
-    const key = cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
+    const key =
+      cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
     if (!key) throw new BadRequestException('Certificate file is unavailable');
 
-    const { body, contentType } = await this.storage.getObject(key).catch(() => {
-      throw new NotFoundException('Certificate file is missing — use Regenerate to redraw it');
-    });
+    const { body, contentType } = await this.storage
+      .getObject(key)
+      .catch(() => {
+        throw new NotFoundException(
+          'Certificate file is missing — use Regenerate to redraw it',
+        );
+      });
     res.setHeader('Content-Type', contentType ?? 'image/jpeg');
     res.setHeader(
       'Content-Disposition',
@@ -2013,7 +1618,9 @@ export class AdminExtraController {
     });
     if (!cert) throw new BadRequestException('Certificate not found');
     if (cert.status === 'revoked') {
-      throw new BadRequestException('Certificate is revoked — it cannot be regenerated');
+      throw new BadRequestException(
+        'Certificate is revoked — it cannot be regenerated',
+      );
     }
 
     // Keeps the original issuer: regenerating only redraws the image.
@@ -2134,11 +1741,17 @@ export class AdminExtraController {
     const tpl = String(body?.template ?? '').trim();
     if (!tpl) throw new BadRequestException('template is required');
     if (!/<svg[\s>]/i.test(tpl)) {
-      throw new BadRequestException('Template must be an SVG document (no <svg> element found)');
+      throw new BadRequestException(
+        'Template must be an SVG document (no <svg> element found)',
+      );
     }
-    const missing = ['{{studentName}}', '{{certificateId}}'].filter((p) => !tpl.includes(p));
+    const missing = ['{{studentName}}', '{{certificateId}}'].filter(
+      (p) => !tpl.includes(p),
+    );
     if (missing.length > 0) {
-      throw new BadRequestException(`Template is missing required placeholder(s): ${missing.join(', ')}`);
+      throw new BadRequestException(
+        `Template is missing required placeholder(s): ${missing.join(', ')}`,
+      );
     }
     // A template that can't be drawn would leave every new certificate stuck as "pending".
     try {
@@ -2331,6 +1944,57 @@ export class AdminExtraController {
     };
   }
 
+  /** Apply one action to many messages at once. Ids that do not fit the action (e.g. restoring a live message) are skipped, not errors. */
+  @Post('contact-submissions/bulk')
+  async bulkContactSubmissions(
+    @Body() body: { action?: string; ids?: unknown },
+  ) {
+    const ids = Array.isArray(body?.ids)
+      ? [...new Set(body.ids.filter((i): i is string => typeof i === 'string'))]
+      : [];
+    if (ids.length === 0) throw new BadRequestException('ids is required');
+    if (ids.length > 200)
+      throw new BadRequestException('At most 200 messages at a time');
+    const live = { id: { in: ids }, deletedAt: null };
+    const trashed = { id: { in: ids }, deletedAt: { not: null } };
+    switch (body.action) {
+      case 'new':
+      case 'read':
+      case 'replied':
+      case 'archived': {
+        const r = await this.db.contactSubmission.updateMany({
+          where: live,
+          data: { status: body.action },
+        });
+        return { success: true, updated: r.count };
+      }
+      case 'delete': {
+        const r = await this.db.contactSubmission.updateMany({
+          where: live,
+          data: { deletedAt: new Date() },
+        });
+        return { success: true, updated: r.count };
+      }
+      case 'restore': {
+        const r = await this.db.contactSubmission.updateMany({
+          where: trashed,
+          data: { deletedAt: null },
+        });
+        return { success: true, updated: r.count };
+      }
+      case 'purge': {
+        const r = await this.db.contactSubmission.deleteMany({
+          where: trashed,
+        });
+        return { success: true, updated: r.count };
+      }
+      default:
+        throw new BadRequestException(
+          'action must be one of: new, read, replied, archived, delete, restore, purge',
+        );
+    }
+  }
+
   @Patch('contact-submissions/:id')
   async updateContactSubmission(
     @Param('id') id: string,
@@ -2390,7 +2054,8 @@ export class AdminExtraController {
     const existing = await this.db.contactSubmission.findFirst({
       where: { id, deletedAt: { not: null } },
     });
-    if (!existing) throw new NotFoundException('Trashed contact submission not found');
+    if (!existing)
+      throw new NotFoundException('Trashed contact submission not found');
     await this.db.contactSubmission.update({
       where: { id },
       data: { deletedAt: null },
@@ -2403,7 +2068,8 @@ export class AdminExtraController {
     const existing = await this.db.contactSubmission.findFirst({
       where: { id, deletedAt: { not: null } },
     });
-    if (!existing) throw new NotFoundException('Trashed contact submission not found');
+    if (!existing)
+      throw new NotFoundException('Trashed contact submission not found');
     await this.db.contactSubmission.delete({ where: { id } });
     return { success: true };
   }

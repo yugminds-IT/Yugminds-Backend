@@ -7,8 +7,16 @@ import { StorageService } from '../../common/storage/storage.service';
 describe('CommunityAdminController — orphaned upload cleanup', () => {
   let controller: CommunityAdminController;
   let db: {
-    communityPageConfig: { findUnique: jest.Mock; update: jest.Mock; create: jest.Mock };
-    communityItem: { findUnique: jest.Mock; update: jest.Mock; delete: jest.Mock };
+    communityPageConfig: {
+      findUnique: jest.Mock;
+      update: jest.Mock;
+      create: jest.Mock;
+    };
+    communityItem: {
+      findUnique: jest.Mock;
+      update: jest.Mock;
+      delete: jest.Mock;
+    };
     communityItemVersion: { create: jest.Mock; aggregate: jest.Mock };
     $transaction: jest.Mock;
   };
@@ -46,11 +54,15 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
     };
     storage = {
       keyFromUrl: jest.fn((url: string) =>
-        url.startsWith('https://cdn.example.com/') ? url.replace('https://cdn.example.com/', '') : null,
+        url.startsWith('https://cdn.example.com/')
+          ? url.replace('https://cdn.example.com/', '')
+          : null,
       ),
       deleteObject: jest.fn().mockResolvedValue(undefined),
       buildKey: jest.fn().mockReturnValue('community/new-key.png'),
-      uploadBuffer: jest.fn().mockResolvedValue('https://cdn.example.com/community/new-key.png'),
+      uploadBuffer: jest
+        .fn()
+        .mockResolvedValue('https://cdn.example.com/community/new-key.png'),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -86,7 +98,9 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
 
     it('propagates not-found as BadRequestException without touching storage', async () => {
       db.communityItem.delete.mockRejectedValue({ code: 'P2025' });
-      await expect(controller.deleteItem('missing')).rejects.toThrow(BadRequestException);
+      await expect(controller.deleteItem('missing')).rejects.toThrow(
+        BadRequestException,
+      );
       expect(storage.deleteObject).not.toHaveBeenCalled();
     });
   });
@@ -112,7 +126,9 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
 
       await controller.updateItem('i1', validImageFile, {});
 
-      expect(storage.deleteObject).toHaveBeenCalledWith('community/old-media.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith(
+        'community/old-media.png',
+      );
     });
 
     it('does not touch storage when no new media file is provided', async () => {
@@ -166,7 +182,9 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
 
       await controller.updateConfig(validImageFile, {});
 
-      expect(storage.deleteObject).toHaveBeenCalledWith('community/old-hero.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith(
+        'community/old-hero.png',
+      );
     });
 
     it('does not touch storage when no new hero image is provided', async () => {
@@ -215,7 +233,9 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
 
       await controller.uploadThumbnail('i1', validImageFile);
 
-      expect(storage.deleteObject).toHaveBeenCalledWith('community/old-thumb.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith(
+        'community/old-thumb.png',
+      );
     });
 
     it('deletes the old avatar after replacing it', async () => {
@@ -232,7 +252,9 @@ describe('CommunityAdminController — orphaned upload cleanup', () => {
 
       await controller.uploadAvatar('i1', validImageFile);
 
-      expect(storage.deleteObject).toHaveBeenCalledWith('community/old-avatar.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith(
+        'community/old-avatar.png',
+      );
     });
 
     it('does not attempt to delete an externally-hosted avatar', async () => {

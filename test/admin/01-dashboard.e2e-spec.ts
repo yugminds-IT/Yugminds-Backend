@@ -3,7 +3,11 @@ import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
 import { mintAccessToken, authHeader } from './support/auth';
 import { getBootstrapAdmin, closePool, pool } from './support/db';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 
 describe('Admin dashboard (read-only)', () => {
   let app: INestApplication;
@@ -123,7 +127,9 @@ describe('Admin dashboard (read-only)', () => {
 
     afterAll(async () => {
       if (orphanId) {
-        await pool.query('DELETE FROM "TeacherLeave" WHERE id = $1', [orphanId]);
+        await pool.query('DELETE FROM "TeacherLeave" WHERE id = $1', [
+          orphanId,
+        ]);
       }
       if (fixture) await teardownQaFixture(app, fixture);
     }, 60000);

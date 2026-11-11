@@ -23,10 +23,7 @@ export class TeacherDashboardController {
 
   /** Per-school open/holiday/off status for one date (defaults to today, IST). */
   @Get('day-status')
-  dayStatus(
-    @CurrentUser() user: { id: number },
-    @Query('date') date?: string,
-  ) {
+  dayStatus(@CurrentUser() user: { id: number }, @Query('date') date?: string) {
     return this.service.getDayStatus(user.id, date);
   }
 }

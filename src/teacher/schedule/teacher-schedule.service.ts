@@ -64,10 +64,14 @@ export class TeacherScheduleService {
         ]);
 
         const holidayEntry = holidayEntries.find(
-          (e) => e.date === dateStr && (e.type === 'Holiday' || e.type === 'Break'),
+          (e) =>
+            e.date === dateStr && (e.type === 'Holiday' || e.type === 'Break'),
         );
         const isCompWork = compDates.includes(dateStr);
-        const isAssignedToday = resolveWorkingDaysForDate(history, date).includes(dayOfWeek);
+        const isAssignedToday = resolveWorkingDaysForDate(
+          history,
+          date,
+        ).includes(dayOfWeek);
 
         if (isCompWork) {
           result.workingSchoolIds.push(schoolId);

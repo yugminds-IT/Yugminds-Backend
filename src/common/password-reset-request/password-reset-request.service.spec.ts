@@ -111,29 +111,33 @@ describe('PasswordResetRequestService', () => {
     });
 
     it('builds a role/email/school search filter server-side when search is provided', async () => {
-      db.school.findMany.mockResolvedValue([{ id: 'school-1', name: 'Sunrise Academy' }]);
+      db.school.findMany.mockResolvedValue([
+        { id: 'school-1', name: 'Sunrise Academy' },
+      ]);
 
       await service.list({ search: 'teach', limit: 20 });
 
       const where = db.passwordResetRequest.findMany.mock.calls[0][0].where;
       expect(where.OR).toEqual(
-        expect.arrayContaining([
-          { user: { role: { in: ['teacher'] } } },
-        ]),
+        expect.arrayContaining([{ user: { role: { in: ['teacher'] } } }]),
       );
     });
   });
 
   describe('delete', () => {
     it('throws and does not delete when the request is still pending', async () => {
-      db.passwordResetRequest.findUnique.mockResolvedValue({ status: 'pending' });
+      db.passwordResetRequest.findUnique.mockResolvedValue({
+        status: 'pending',
+      });
 
       await expect(service.delete('r1')).rejects.toThrow(BadRequestException);
       expect(db.passwordResetRequest.delete).not.toHaveBeenCalled();
     });
 
     it('deletes a resolved (non-pending) request', async () => {
-      db.passwordResetRequest.findUnique.mockResolvedValue({ status: 'rejected' });
+      db.passwordResetRequest.findUnique.mockResolvedValue({
+        status: 'rejected',
+      });
 
       await service.delete('r1');
 

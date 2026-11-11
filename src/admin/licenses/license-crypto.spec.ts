@@ -135,7 +135,8 @@ describe('license-crypto', () => {
     });
 
     it('returns the configured secret decoded from base64', () => {
-      process.env.ROBOCODERS_LICENSE_SECRET = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+      process.env.ROBOCODERS_LICENSE_SECRET =
+        'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
       expect(getLicenseSecret()).toEqual(TEST_SECRET);
     });
   });

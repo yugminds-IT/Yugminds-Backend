@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { mintAccessToken, authHeader } from './support/auth';
 import { getBootstrapAdmin, closePool } from './support/db';
 
@@ -58,32 +62,46 @@ describe('Admin system-controls: maintenance mode (extreme care, always restored
       await request(app.getHttpServer())
         .patch('/admin/system-controls')
         .set(...adminAuth)
-        .send({ maintenance_mode: true, maintenance_message: 'QA maintenance window' })
+        .send({
+          maintenance_mode: true,
+          maintenance_message: 'QA maintenance window',
+        })
         .expect(200);
 
       // Wrong password during maintenance: invalid-credentials wins over the
       // maintenance message (checked after password validation in auth.service).
       const wrongPassword = await request(app.getHttpServer())
         .post('/auth/login')
-        .send({ email: fixture.teachers[0].email, password: 'DefinitelyWrong123!' });
+        .send({
+          email: fixture.teachers[0].email,
+          password: 'DefinitelyWrong123!',
+        });
       expect(wrongPassword.status).toBe(401);
       expect(wrongPassword.body?.message).not.toMatch(/maintenance/i);
 
       // Correct password during maintenance: blocked with the maintenance message.
       const blocked = await request(app.getHttpServer())
         .post('/auth/login')
-        .send({ email: fixture.teachers[0].email, password: fixture.teachers[0].password });
+        .send({
+          email: fixture.teachers[0].email,
+          password: fixture.teachers[0].password,
+        });
       expect(blocked.status).toBe(403);
       expect(blocked.body?.message).toMatch(/QA maintenance window/);
 
       // Admin is exempt from maintenance mode.
       const adminLogin = await request(app.getHttpServer())
         .post('/auth/login')
-        .send({ email: 'admin@yugminds.com', password: process.env.ADMIN_SEED_PASSWORD });
+        .send({
+          email: 'admin@yugminds.com',
+          password: process.env.ADMIN_SEED_PASSWORD,
+        });
       expect([200, 201]).toContain(adminLogin.status);
 
       // Public status reflects it too.
-      const status = await request(app.getHttpServer()).get('/system-status').expect(200);
+      const status = await request(app.getHttpServer())
+        .get('/system-status')
+        .expect(200);
       expect(status.body.maintenance_mode).toBe(true);
     } finally {
       await request(app.getHttpServer())
@@ -93,25 +111,36 @@ describe('Admin system-controls: maintenance mode (extreme care, always restored
         .expect(200);
     }
 
-    const restored = await request(app.getHttpServer()).get('/system-status').expect(200);
-    expect(restored.body.maintenance_mode).toBe(originalControls.maintenance_mode);
+    const restored = await request(app.getHttpServer())
+      .get('/system-status')
+      .expect(200);
+    expect(restored.body.maintenance_mode).toBe(
+      originalControls.maintenance_mode,
+    );
 
     // Login works normally again post-restore.
-    const after = await request(app.getHttpServer())
-      .post('/auth/login')
-      .send({ email: fixture.teachers[0].email, password: fixture.teachers[0].password });
+    const after = await request(app.getHttpServer()).post('/auth/login').send({
+      email: fixture.teachers[0].email,
+      password: fixture.teachers[0].password,
+    });
     expect([200, 201]).toContain(after.status);
   }, 30000);
 
   it('announcement banner toggles and restores independently', async () => {
-    const newAnnouncement = { enabled: true, text: 'QA announcement', level: 'info' as const };
+    const newAnnouncement = {
+      enabled: true,
+      text: 'QA announcement',
+      level: 'info' as const,
+    };
     await request(app.getHttpServer())
       .patch('/admin/system-controls')
       .set(...adminAuth)
       .send({ announcement: newAnnouncement })
       .expect(200);
 
-    const status = await request(app.getHttpServer()).get('/system-status').expect(200);
+    const status = await request(app.getHttpServer())
+      .get('/system-status')
+      .expect(200);
     expect(status.body.announcement.text).toBe('QA announcement');
 
     await request(app.getHttpServer())
@@ -135,7 +164,9 @@ describe('Admin system-controls: maintenance mode (extreme care, always restored
         .send({ feature_flags: { qa_test_flag: true } })
         .expect(200);
 
-      const status = await request(app.getHttpServer()).get('/system-status').expect(200);
+      const status = await request(app.getHttpServer())
+        .get('/system-status')
+        .expect(200);
       expect(status.body.feature_flags).toMatchObject({ qa_test_flag: true });
     } finally {
       await request(app.getHttpServer())

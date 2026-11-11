@@ -3,7 +3,11 @@ import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
 import { mintAccessToken, authHeader } from './support/auth';
 import { getBootstrapAdmin, closePool } from './support/db';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 
 describe('Admin audit log + system-controls (read-only in this phase)', () => {
   let app: INestApplication;
@@ -92,7 +96,9 @@ describe('Admin audit log + system-controls (read-only in this phase)', () => {
   });
 
   it('GET /admin/system-controls is rejected without admin role', async () => {
-    await request(app.getHttpServer()).get('/admin/system-controls').expect(401);
+    await request(app.getHttpServer())
+      .get('/admin/system-controls')
+      .expect(401);
   });
 
   describe('audit trail actually records fixture mutations', () => {
@@ -118,11 +124,15 @@ describe('Admin audit log + system-controls (read-only in this phase)', () => {
         .expect(200);
 
       const res = await request(app.getHttpServer())
-        .get(`/admin/audit-logs?entityType=teachers&search=${fixture.teachers[0].id}&limit=20`)
+        .get(
+          `/admin/audit-logs?entityType=teachers&search=${fixture.teachers[0].id}&limit=20`,
+        )
         .set(...adminAuth)
         .expect(200);
       const list = res.body?.data ?? res.body;
-      const entries = Array.isArray(list) ? list : (list?.logs ?? list?.items ?? []);
+      const entries = Array.isArray(list)
+        ? list
+        : (list?.logs ?? list?.items ?? []);
       expect(
         entries.some(
           (e: { method: string; entityId: string }) =>

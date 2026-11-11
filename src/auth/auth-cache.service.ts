@@ -38,7 +38,9 @@ export class AuthCacheService {
       const cached = await this.redis.get(this.key(userId));
       return cached ? (JSON.parse(cached) as CachedAuthUser) : null;
     } catch (err) {
-      this.logger.warn(`Redis GET failed, falling back to DB: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(
+        `Redis GET failed, falling back to DB: ${err instanceof Error ? err.message : String(err)}`,
+      );
       return null;
     }
   }
@@ -52,7 +54,9 @@ export class AuthCacheService {
         this.TTL_SECONDS,
       );
     } catch (err) {
-      this.logger.warn(`Redis SET failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(
+        `Redis SET failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -62,7 +66,9 @@ export class AuthCacheService {
     try {
       await this.redis.del(...ids.map((id) => this.key(id)));
     } catch (err) {
-      this.logger.warn(`Redis DEL failed (non-fatal, entry will expire via TTL): ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.warn(
+        `Redis DEL failed (non-fatal, entry will expire via TTL): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }

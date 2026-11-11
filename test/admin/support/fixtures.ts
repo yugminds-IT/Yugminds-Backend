@@ -108,7 +108,9 @@ export async function createQaFixture(
     })
     .expect(201);
   const schoolId: string =
-    schoolRes.body?.data?.school?.id ?? schoolRes.body?.school?.id ?? schoolRes.body?.id;
+    schoolRes.body?.data?.school?.id ??
+    schoolRes.body?.school?.id ??
+    schoolRes.body?.id;
   if (!schoolId) {
     throw new Error(
       `createQaFixture: could not read school id from response: ${JSON.stringify(schoolRes.body)}`,
@@ -120,7 +122,10 @@ export async function createQaFixture(
     [schoolAdminEmail],
   );
   const schoolAdminId: number = schoolAdminRows[0].id;
-  const schoolAdminSubject = await subjectFromUserId(schoolAdminId, 'school_admin');
+  const schoolAdminSubject = await subjectFromUserId(
+    schoolAdminId,
+    'school_admin',
+  );
 
   const teachers: QaUser[] = [];
   for (let i = 0; i < 2; i++) {
@@ -279,7 +284,11 @@ export async function createQaFixture(
   }
 
   return {
-    admin: { token: adminToken, id: bootstrapAdmin.id, email: bootstrapAdmin.email },
+    admin: {
+      token: adminToken,
+      id: bootstrapAdmin.id,
+      email: bootstrapAdmin.email,
+    },
     schoolId,
     schoolAdmin: {
       id: schoolAdminId,

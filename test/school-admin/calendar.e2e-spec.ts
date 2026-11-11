@@ -68,9 +68,9 @@ describe('calendar CRUD (moved to admin-only)', () => {
       .set(...adminAuth)
       .query({ school_id: fixture.schoolId, year: '2026', month: '8' })
       .expect(200);
-    expect(res.body.calendar.some((c: any) => c.id === fixture.calendarId)).toBe(
-      true,
-    );
+    expect(
+      res.body.calendar.some((c: any) => c.id === fixture.calendarId),
+    ).toBe(true);
     const resOtherMonth = await request(app.getHttpServer())
       .get('/admin/calendar')
       .set(...adminAuth)

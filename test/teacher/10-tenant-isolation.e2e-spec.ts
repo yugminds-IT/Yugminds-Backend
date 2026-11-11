@@ -181,7 +181,9 @@ describe('Teacher tenant isolation (school A teacher vs school B resources)', ()
         'notifications recipients',
         () =>
           request(app.getHttpServer())
-            .get(`/teacher/notifications/recipients?school_id=${schoolB.schoolId}`)
+            .get(
+              `/teacher/notifications/recipients?school_id=${schoolB.schoolId}`,
+            )
             .set(...authA),
       ],
       [

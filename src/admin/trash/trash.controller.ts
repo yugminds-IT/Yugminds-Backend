@@ -13,7 +13,13 @@ import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Role } from '@prisma/client';
 import { TrashService, TrashEntityType } from './trash.service';
 
-const VALID_TYPES: TrashEntityType[] = ['students', 'teachers', 'schools', 'courses'];
+const VALID_TYPES: TrashEntityType[] = [
+  'students',
+  'teachers',
+  'school_admins',
+  'schools',
+  'courses',
+];
 
 function assertType(value: unknown): TrashEntityType {
   if (!VALID_TYPES.includes(value as TrashEntityType)) {

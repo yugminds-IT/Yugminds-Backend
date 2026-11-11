@@ -30,13 +30,22 @@ export function validatePasswordStrength(password: string): void {
  * length by padding the digit count for short names. No uniqueness needed
  * across students — only email has to be unique, not password.
  */
-export function deriveFriendlyPassword(fullName: string | undefined | null): string {
-  const cleaned = (fullName ?? '').trim().split(/\s+/)[0]?.replace(/[^a-zA-Z]/g, '') ?? '';
+export function deriveFriendlyPassword(
+  fullName: string | undefined | null,
+): string {
+  const cleaned =
+    (fullName ?? '')
+      .trim()
+      .split(/\s+/)[0]
+      ?.replace(/[^a-zA-Z]/g, '') ?? '';
   // A single-letter name can't carry both an uppercase and a lowercase
   // letter, so fall back to a name that can.
   const firstNameRaw = cleaned.length >= 2 ? cleaned : 'Student';
-  const capitalized = firstNameRaw[0].toUpperCase() + firstNameRaw.slice(1).toLowerCase();
+  const capitalized =
+    firstNameRaw[0].toUpperCase() + firstNameRaw.slice(1).toLowerCase();
   const digitCount = Math.max(6, 8 - (capitalized.length + 1)); // +1 for '@'
-  const digits = Array.from({ length: digitCount }, () => randomInt(10)).join('');
+  const digits = Array.from({ length: digitCount }, () => randomInt(10)).join(
+    '',
+  );
   return `${capitalized}@${digits}`;
 }

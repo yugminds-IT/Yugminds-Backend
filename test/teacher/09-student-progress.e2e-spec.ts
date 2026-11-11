@@ -132,14 +132,16 @@ describe('Teacher student-progress', () => {
       .set(...adminAuth)
       .send({
         name: '__qa_test_teacher_extra_progress_course',
-        description: 'QA extra course for teacher total_courses regression test',
+        description:
+          'QA extra course for teacher total_courses regression test',
         school_ids: [fixture.schoolId],
         grades: [fixture.grade],
         is_published: true,
         status: 'Published',
       })
       .expect(201);
-    const extraCourseId: string = createRes.body?.data?.id ?? createRes.body?.id;
+    const extraCourseId: string =
+      createRes.body?.data?.id ?? createRes.body?.id;
     expect(extraCourseId).toBeDefined();
 
     const before = await request(app.getHttpServer())
@@ -159,9 +161,9 @@ describe('Teacher student-progress', () => {
       .expect(200);
     expect(after.body.summary.total_courses).toBe(beforeTotal - 1);
     for (const s of after.body.students) {
-      expect(
-        s.courses.some((c: any) => c.course_id === extraCourseId),
-      ).toBe(false);
+      expect(s.courses.some((c: any) => c.course_id === extraCourseId)).toBe(
+        false,
+      );
     }
 
     await request(app.getHttpServer())

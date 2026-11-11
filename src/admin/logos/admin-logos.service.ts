@@ -33,7 +33,9 @@ export class AdminLogosService {
     if (mimetype === 'image/png') {
       // PNG: bytes 16-19 = width, 20-23 = height (big-endian)
       if (buffer.length < 24) {
-        throw new BadRequestException('Could not read PNG dimensions — file may be corrupt');
+        throw new BadRequestException(
+          'Could not read PNG dimensions — file may be corrupt',
+        );
       }
       return { w: buffer.readUInt32BE(16), h: buffer.readUInt32BE(20) };
     }
@@ -56,7 +58,9 @@ export class AdminLogosService {
         }
         i += 2 + len;
       }
-      throw new BadRequestException('Could not read JPEG dimensions — file may be corrupt');
+      throw new BadRequestException(
+        'Could not read JPEG dimensions — file may be corrupt',
+      );
     }
     throw new BadRequestException('Unsupported image type');
   }

@@ -82,14 +82,15 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
 
     db = new DatabaseService();
 
-    // eslint-disable-next-line no-console
     console.log(
       `\n[multi-school] teacher=${teacherId}\n  A(primary)=${schoolA}\n  B(other)  =${schoolB}\n  nonMember =${nonMemberSchool}\n`,
     );
   });
 
   afterAll(async () => {
-    await (db as unknown as { $disconnect: () => Promise<void> })?.$disconnect();
+    await (
+      db as unknown as { $disconnect: () => Promise<void> }
+    )?.$disconnect();
     await pool?.end();
   });
 
@@ -106,7 +107,7 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
 
     const aIds = new Set(aRows.map((r) => r.id));
     expect(bRows.filter((r) => aIds.has(r.id))).toHaveLength(0);
-    // eslint-disable-next-line no-console
+
     console.log(`  schedules: A=${aRows.length} B=${bRows.length}`);
   });
 
@@ -120,7 +121,7 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
       }),
     );
     expect(bAssignments.every((a) => a.schoolId === schoolB)).toBe(true);
-    // eslint-disable-next-line no-console
+
     console.log(`  assignments in B: ${bAssignments.length}`);
   });
 
@@ -148,11 +149,11 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
 
     const aIds = new Set(inA.map((r) => r.id));
     expect(inB.filter((r) => aIds.has(r.id))).toHaveLength(0); // disjoint
-    // eslint-disable-next-line no-console
+
     console.log(`  section assignments: A=${inA.length} B=${inB.length}`);
   });
 
-  it("students of the non-primary school are visible (and scoped to that school)", async () => {
+  it('students of the non-primary school are visible (and scoped to that school)', async () => {
     const students = await asTeacherInSchool(schoolB, () =>
       db.studentSchool.findMany({
         where: { schoolId: schoolB, isActive: true },
@@ -161,7 +162,7 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
     );
     expect(students.length).toBeGreaterThan(0);
     expect(students.every((s) => s.schoolId === schoolB)).toBe(true);
-    // eslint-disable-next-line no-console
+
     console.log(`  active students in B: ${students.length}`);
   });
 
@@ -201,7 +202,7 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
         }),
     );
     expect(inA.map((n) => n.id).sort()).toEqual(inB.map((n) => n.id).sort());
-    // eslint-disable-next-line no-console
+
     console.log(`  notifications visible: ${inA.length}`);
   });
 
@@ -219,7 +220,6 @@ describe('Multi-school teacher isolation (integration, read-only)', () => {
 
   it('rejects a school the teacher is not assigned to (interceptor 403 path)', async () => {
     if (!nonMemberSchool) {
-      // eslint-disable-next-line no-console
       console.warn('  no non-member school available; skipping');
       return;
     }

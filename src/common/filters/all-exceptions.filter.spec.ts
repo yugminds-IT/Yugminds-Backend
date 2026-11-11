@@ -17,7 +17,9 @@ function mockHost(url = '/teacher/reports') {
 
 describe('AllExceptionsFilter P2002 mapping', () => {
   const filter = new AllExceptionsFilter();
-  const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  const errorSpy = jest
+    .spyOn(console, 'error')
+    .mockImplementation(() => undefined);
 
   afterAll(() => errorSpy.mockRestore());
 

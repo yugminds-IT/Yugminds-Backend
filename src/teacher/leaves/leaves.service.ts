@@ -7,8 +7,16 @@ import {
 import { DatabaseService } from '../../database/database.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
-import { getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan, leaveStageFields } from '../../common/utils/leave-rules.util';
+import {
+  getTodayIstDateStr,
+  isBeforeAttendanceCutoff,
+} from '../../common/utils/date.util';
+import {
+  EMERGENCY_LEAVE_TYPE,
+  assertEmergencyLeaveAllowed,
+  assertLeaveSpan,
+  leaveStageFields,
+} from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class TeacherLeavesService {
@@ -111,7 +119,10 @@ export class TeacherLeavesService {
         substituteRequired: !!body.substitute_required,
         leaveType: isEmergency ? EMERGENCY_LEAVE_TYPE : 'General',
         // Emergency leave needs two sequential approvals: school admin, then admin.
-        ...(isEmergency && { schoolAdminStatus: 'pending', adminStatus: 'pending' }),
+        ...(isEmergency && {
+          schoolAdminStatus: 'pending',
+          adminStatus: 'pending',
+        }),
         status: 'pending',
       },
     });
@@ -178,13 +189,17 @@ export class TeacherLeavesService {
    * can't be cancelled again.
    */
   async cancel(teacherId: number, id: string) {
-    const leave = await this.db.teacherLeave.findFirst({ where: { id, teacherId } });
+    const leave = await this.db.teacherLeave.findFirst({
+      where: { id, teacherId },
+    });
     if (!leave) throw new NotFoundException('Leave request not found');
     if (leave.status === 'cancelled') {
       throw new BadRequestException('This leave request is already cancelled.');
     }
     if (leave.status === 'rejected') {
-      throw new BadRequestException('A rejected leave request cannot be cancelled.');
+      throw new BadRequestException(
+        'A rejected leave request cannot be cancelled.',
+      );
     }
     const startStr = leave.startDate.toISOString().split('T')[0];
     if (leave.status === 'approved' && startStr <= getTodayIstDateStr()) {
@@ -193,7 +208,10 @@ export class TeacherLeavesService {
       );
     }
 
-    await this.db.teacherLeave.update({ where: { id }, data: { status: 'cancelled' } });
+    await this.db.teacherLeave.update({
+      where: { id },
+      data: { status: 'cancelled' },
+    });
     if (leave.status === 'approved') {
       // Clear the days this leave had marked Leave-Approved (all in the future here).
       await this.db.attendance.deleteMany({
@@ -210,12 +228,24 @@ export class TeacherLeavesService {
       where: { id: teacherId },
       select: { profile: { select: { fullName: true } }, email: true },
     });
-    const teacherLabel = teacher?.profile?.fullName?.trim() || teacher?.email || 'A teacher';
+    const teacherLabel =
+      teacher?.profile?.fullName?.trim() || teacher?.email || 'A teacher';
     const [schoolAdmins, adminUsers] = await Promise.all([
-      this.db.schoolAdmin.findMany({ where: { schoolId: leave.schoolId }, select: { userId: true } }),
-      this.db.user.findMany({ where: { role: Role.admin, isActive: true }, select: { id: true } }),
+      this.db.schoolAdmin.findMany({
+        where: { schoolId: leave.schoolId },
+        select: { userId: true },
+      }),
+      this.db.user.findMany({
+        where: { role: Role.admin, isActive: true },
+        select: { id: true },
+      }),
     ]);
-    const recipientIds = [...new Set([...schoolAdmins.map((s) => s.userId), ...adminUsers.map((a) => a.id)])];
+    const recipientIds = [
+      ...new Set([
+        ...schoolAdmins.map((s) => s.userId),
+        ...adminUsers.map((a) => a.id),
+      ]),
+    ];
     const endStr = leave.endDate.toISOString().split('T')[0];
     await this.notifications.createManyRespectingPrefs(
       recipientIds.map((userId) => ({
@@ -239,7 +269,8 @@ export class TeacherLeavesService {
         where: { teacherId, schoolId },
         select: { schoolId: true },
       });
-      if (!assigned) throw new ForbiddenException('Not assigned to this school');
+      if (!assigned)
+        throw new ForbiddenException('Not assigned to this school');
     }
     const where: { teacherId: number; schoolId?: string } = { teacherId };
     if (schoolId) where.schoolId = schoolId;

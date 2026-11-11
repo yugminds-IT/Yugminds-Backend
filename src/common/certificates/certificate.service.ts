@@ -21,7 +21,9 @@ export type CertificateIssueResult =
 
 /** YYYY-MM-DD in India time — a UTC date prints the previous day for 00:00–05:30 IST. */
 function formatIssuedDate(d: Date): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(d);
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(
+    d,
+  );
 }
 
 /**
@@ -54,7 +56,9 @@ export class CertificateService implements OnApplicationBootstrap {
   onApplicationBootstrap(): void {
     if (process.env.NODE_ENV !== 'production') return;
     void this.redrawIfRendererChanged().catch((e: unknown) =>
-      this.logger.error(`Certificate redraw on boot failed: ${e instanceof Error ? e.message : String(e)}`),
+      this.logger.error(
+        `Certificate redraw on boot failed: ${e instanceof Error ? e.message : String(e)}`,
+      ),
     );
   }
 
@@ -123,7 +127,8 @@ export class CertificateService implements OnApplicationBootstrap {
       where: { studentId_courseId: { studentId, courseId } },
       select: { id: true, certificateUrl: true, status: true },
     });
-    if (existing?.status === 'revoked') return { issued: false, reason: 'revoked' };
+    if (existing?.status === 'revoked')
+      return { issued: false, reason: 'revoked' };
     if (existing) {
       // A previous attempt created the row but failed to draw/upload the image —
       // finish it now instead of leaving the student stuck on "pending" forever.
@@ -204,7 +209,9 @@ export class CertificateService implements OnApplicationBootstrap {
       },
     });
     if (cert.status === 'revoked') {
-      throw new BadRequestException('Certificate is revoked — it cannot be regenerated');
+      throw new BadRequestException(
+        'Certificate is revoked — it cannot be regenerated',
+      );
     }
     const templateSetting = await this.db.systemSetting.findUnique({
       where: { key: 'certificate:template' },
@@ -282,15 +289,17 @@ export class CertificateService implements OnApplicationBootstrap {
     });
 
     const results = await Promise.all(
-      certs.map(async (c) => {
-        const exists = c.certificateKey
-          ? await this.storage.objectExists(c.certificateKey)
-          : !c.certificateUrl.startsWith('pending');
-        return {
-          id: c.id,
-          status: (exists ? 'active' : 'broken') as 'active' | 'broken',
-        };
-      }),
+      certs.map(
+        async (c): Promise<{ id: string; status: 'active' | 'broken' }> => {
+          const exists = c.certificateKey
+            ? await this.storage.objectExists(c.certificateKey)
+            : !c.certificateUrl.startsWith('pending');
+          return {
+            id: c.id,
+            status: exists ? 'active' : 'broken',
+          };
+        },
+      ),
     );
 
     await Promise.all(

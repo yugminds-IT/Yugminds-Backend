@@ -98,7 +98,9 @@ describe('school-admin student-progress', () => {
       expect(res.body.summary.total_students).toBe(2);
     } finally {
       // Reactivate so this test doesn't bleed into the others in this file.
-      await pool.query('UPDATE "User" SET "isActive" = true WHERE id = $1', [target.id]);
+      await pool.query('UPDATE "User" SET "isActive" = true WHERE id = $1', [
+        target.id,
+      ]);
       await pool.query(
         'UPDATE "StudentSchool" SET "isActive" = true WHERE "studentId" = $1',
         [target.id],
@@ -116,22 +118,27 @@ describe('school-admin student-progress', () => {
 
   it(
     'summary.total_courses excludes a soft-deleted course, and it disappears from the ' +
-      'courses list and every student\'s per-course breakdown',
+      "courses list and every student's per-course breakdown",
     async () => {
-      const adminAuth: [string, string] = ['Authorization', `Bearer ${fixture.admin.token}`];
+      const adminAuth: [string, string] = [
+        'Authorization',
+        `Bearer ${fixture.admin.token}`,
+      ];
       const createRes = await request(app.getHttpServer())
         .post('/admin/courses')
         .set(...adminAuth)
         .send({
           name: '__qa_test_school_admin_extra_progress_course',
-          description: 'QA extra course for school-admin total_courses regression test',
+          description:
+            'QA extra course for school-admin total_courses regression test',
           school_ids: [fixture.schoolId],
           grades: [fixture.grade],
           is_published: true,
           status: 'Published',
         })
         .expect(201);
-      const extraCourseId: string = createRes.body?.data?.id ?? createRes.body?.id;
+      const extraCourseId: string =
+        createRes.body?.data?.id ?? createRes.body?.id;
       expect(extraCourseId).toBeDefined();
 
       const before = await request(app.getHttpServer())
@@ -157,9 +164,9 @@ describe('school-admin student-progress', () => {
         after.body.courses.some((c: any) => c.course_id === extraCourseId),
       ).toBe(false);
       for (const s of after.body.students) {
-        expect(
-          s.courses.some((c: any) => c.course_id === extraCourseId),
-        ).toBe(false);
+        expect(s.courses.some((c: any) => c.course_id === extraCourseId)).toBe(
+          false,
+        );
       }
 
       await request(app.getHttpServer())

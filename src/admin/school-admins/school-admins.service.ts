@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
+import { lastLoginByUser } from '../last-login';
 import * as bcrypt from 'bcrypt';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
@@ -24,7 +25,7 @@ export class AdminSchoolAdminsService {
 
   async list(params?: { search?: string; status?: string; schoolId?: string }) {
     const where: Record<string, unknown> = {
-      user: { role: 'school_admin' },
+      user: { role: 'school_admin', deletedAt: null },
     };
     if (params?.schoolId && params.schoolId !== 'all') {
       where.schoolId = params.schoolId;
@@ -33,6 +34,7 @@ export class AdminSchoolAdminsService {
       const q = params.search.trim();
       where.user = {
         role: 'school_admin',
+        deletedAt: null,
         OR: [
           { email: { contains: q, mode: 'insensitive' } },
           { profile: { fullName: { contains: q, mode: 'insensitive' } } },
@@ -49,6 +51,11 @@ export class AdminSchoolAdminsService {
       },
       orderBy: { createdAt: 'desc' },
     });
+
+    const lastLogin = await lastLoginByUser(
+      this.db,
+      list.map((sa) => sa.user.id),
+    );
 
     const schoolAdmins = list.map((sa) => {
       const user = sa.user;
@@ -70,6 +77,7 @@ export class AdminSchoolAdminsService {
             }
           : null,
         is_active: user.isActive,
+        last_login: lastLogin.get(user.id)?.toISOString() ?? null,
         created_at: sa.createdAt.toISOString(),
         updated_at: (sa.user.profile?.updatedAt ?? sa.createdAt).toISOString(),
       };
@@ -277,37 +285,28 @@ export class AdminSchoolAdminsService {
     };
   }
 
+  /** Moves the school admin to the admin Trash (restorable). Their school link is kept so a restore is complete. */
   async delete(id: string) {
-    // Frontend list returns user id as "id" (User.id); SchoolAdmin has its own uuid. Support both.
+    // The list sends User.id; SchoolAdmin has its own uuid. Support both.
     const byPk = await this.db.schoolAdmin.findUnique({ where: { id } });
-    if (byPk) {
-      await this.db.user.delete({ where: { id: byPk.userId } });
-      // The DB row is gone, but a cached auth-cache entry (120s TTL) would
-      // otherwise keep authenticating this user's still-valid access token
-      // without ever re-checking the DB — see jwt.strategy.ts's cached branch.
-      await this.authCache.invalidate(byPk.userId);
-      return { success: true };
-    }
-    const userId = Number(id);
+    const userId = byPk?.userId ?? Number(id);
     if (!Number.isInteger(userId)) {
       throw new BadRequestException('School admin not found');
     }
-    // Delete by user id: list shows User.id so frontend sends that
     const user = await this.db.user.findFirst({
       where: { id: userId, role: 'school_admin' },
     });
-    if (!user) {
-      throw new BadRequestException('School admin not found');
-    }
-    // Delete SchoolAdmin record first (cascade handles related data), then User
-    await this.db.schoolAdmin.deleteMany({ where: { userId: user.id } });
-    try {
-      await this.db.user.delete({ where: { id: user.id } });
-    } catch (err: unknown) {
-      // P2025 = record already deleted — treat as success
-      if ((err as { code?: string })?.code !== 'P2025') throw err;
-    }
+    if (!user) throw new BadRequestException('School admin not found');
+    await this.db.user.update({
+      where: { id: user.id },
+      data: {
+        deletedAt: new Date(),
+        isActive: false,
+        tokenVersion: { increment: 1 },
+      },
+    });
     await this.authCache.invalidate(user.id);
+    await this.sessions.revokeMany('lms', user.id);
     return { success: true };
   }
 

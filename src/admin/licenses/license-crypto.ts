@@ -10,7 +10,12 @@
  *   wire (13) = tag(3) + AES-256-CTR(plaintext)(10)
  *   activation key = Base32(wire) grouped in 7s  →  21 characters
  */
-import { createHash, createHmac, createCipheriv, timingSafeEqual } from 'crypto';
+import {
+  createHash,
+  createHmac,
+  createCipheriv,
+  timingSafeEqual,
+} from 'crypto';
 
 // ─── RFC 4648 Base32 ─────────────────────────────────────────────────────────
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -106,7 +111,10 @@ function ctrCrypt(encKey: Buffer, tag: Buffer, input: Buffer): Buffer {
 
 // tag = first TAG_BYTES of HMAC-SHA256(plaintext)  (AES-SIV style: seal AND IV)
 function tagOf(macKey: Buffer, plaintext: Buffer): Buffer {
-  return createHmac('sha256', macKey).update(plaintext).digest().subarray(0, TAG_BYTES);
+  return createHmac('sha256', macKey)
+    .update(plaintext)
+    .digest()
+    .subarray(0, TAG_BYTES);
 }
 
 export interface GenerateParams {
@@ -147,7 +155,10 @@ export function generateActivationNumber(params: GenerateParams): string {
   const tag = tagOf(macKey, plaintext);
   const ciphertext = ctrCrypt(encKey, tag, plaintext);
 
-  return groupChars(base32Encode(Buffer.concat([tag, ciphertext])), KEY_GROUP_SIZE);
+  return groupChars(
+    base32Encode(Buffer.concat([tag, ciphertext])),
+    KEY_GROUP_SIZE,
+  );
 }
 
 export interface DecodeResult {
@@ -172,7 +183,10 @@ export function readActivationNumber(
   }
 
   if (wire.length !== WIRE_BYTES) {
-    return { valid: false, reason: 'Wrong length — not a valid activation key' };
+    return {
+      valid: false,
+      reason: 'Wrong length — not a valid activation key',
+    };
   }
 
   const wireBuf = Buffer.from(wire);
@@ -184,7 +198,10 @@ export function readActivationNumber(
   const expectedTag = tagOf(macKey, plaintext);
 
   if (tag.length !== expectedTag.length || !timingSafeEqual(tag, expectedTag)) {
-    return { valid: false, reason: 'Activation key is invalid or was modified' };
+    return {
+      valid: false,
+      reason: 'Activation key is invalid or was modified',
+    };
   }
 
   const machineId = plaintext

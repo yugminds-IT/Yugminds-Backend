@@ -26,7 +26,18 @@ export class AdminTeacherReportsService {
   ];
 
   async list(opts: ListTeacherReportsOptions) {
-    const { schoolId, teacherId: teacherIdParam, grade, section, date, from, to, search, limit, status } = opts;
+    const {
+      schoolId,
+      teacherId: teacherIdParam,
+      grade,
+      section,
+      date,
+      from,
+      to,
+      search,
+      limit,
+      status,
+    } = opts;
 
     const where: {
       schoolId?: string;
@@ -78,23 +89,37 @@ export class AdminTeacherReportsService {
     // status for the current structural filters (school/teacher/grade/date),
     // regardless of which status the list itself is currently filtered to.
     const { status: _statusFilter, ...statsWhere } = where;
-    const [reports, total, submittedCount, reviewedCount, approvedCount, rejectedCount] =
-      await Promise.all([
-        this.db.teacherReport.findMany({
-          where,
-          orderBy: { reportDate: 'desc' },
-          take,
-        }),
-        // Real COUNT(*) queries — independent of the `take` cap above, so
-        // stats stay accurate even when a school/date range has more reports
-        // than a single page fetches (previously derived only from the
-        // capped in-memory list, silently undercounting past the cap).
-        this.db.teacherReport.count({ where: statsWhere }),
-        this.db.teacherReport.count({ where: { ...statsWhere, status: 'submitted' } }),
-        this.db.teacherReport.count({ where: { ...statsWhere, status: 'reviewed' } }),
-        this.db.teacherReport.count({ where: { ...statsWhere, status: 'approved' } }),
-        this.db.teacherReport.count({ where: { ...statsWhere, status: 'rejected' } }),
-      ]);
+    const [
+      reports,
+      total,
+      submittedCount,
+      reviewedCount,
+      approvedCount,
+      rejectedCount,
+    ] = await Promise.all([
+      this.db.teacherReport.findMany({
+        where,
+        orderBy: { reportDate: 'desc' },
+        take,
+      }),
+      // Real COUNT(*) queries — independent of the `take` cap above, so
+      // stats stay accurate even when a school/date range has more reports
+      // than a single page fetches (previously derived only from the
+      // capped in-memory list, silently undercounting past the cap).
+      this.db.teacherReport.count({ where: statsWhere }),
+      this.db.teacherReport.count({
+        where: { ...statsWhere, status: 'submitted' },
+      }),
+      this.db.teacherReport.count({
+        where: { ...statsWhere, status: 'reviewed' },
+      }),
+      this.db.teacherReport.count({
+        where: { ...statsWhere, status: 'approved' },
+      }),
+      this.db.teacherReport.count({
+        where: { ...statsWhere, status: 'rejected' },
+      }),
+    ]);
 
     const teacherIds = Array.from(new Set(reports.map((r) => r.teacherId)));
     const schoolIds = Array.from(new Set(reports.map((r) => r.schoolId)));
@@ -153,6 +178,9 @@ export class AdminTeacherReportsService {
           grade: r.grade ?? '',
           section: r.section ?? '',
           topics_taught: r.topicsTaught ?? '',
+          // chosen by the teacher on the report; 'timetable' marks older reports filled in from the timetable
+          subject: r.subject ?? '',
+          subject_source: r.subjectSource ?? '',
           activities: r.activities ?? '',
           student_count: r.studentCount ?? 0,
           duration_hours: r.durationHours ?? 0,

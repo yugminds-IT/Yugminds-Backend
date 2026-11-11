@@ -23,9 +23,6 @@ import { CommonModule } from '../common/common.module';
     SchoolAdminStatsController,
     SchoolAdminExtraController,
   ],
-  providers: [
-    SchoolAdminSchoolService,
-    SchoolAdminStatsService,
-  ],
+  providers: [SchoolAdminSchoolService, SchoolAdminStatsService],
 })
 export class SchoolAdminModule {}

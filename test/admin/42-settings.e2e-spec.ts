@@ -42,7 +42,8 @@ describe('Admin settings / security', () => {
       .set(...adminAuth)
       .expect(200);
     originalBackupLast = before.body?.settings?.['backup:last'];
-    originalNotificationSettings = before.body?.settings?.['settings:notifications'];
+    originalNotificationSettings =
+      before.body?.settings?.['settings:notifications'];
   }, 60000);
 
   afterAll(async () => {
@@ -55,7 +56,9 @@ describe('Admin settings / security', () => {
         ['backup:last', originalBackupLast],
       );
     } else {
-      await pool.query('DELETE FROM "SystemSetting" WHERE key = $1', ['backup:last']);
+      await pool.query('DELETE FROM "SystemSetting" WHERE key = $1', [
+        'backup:last',
+      ]);
     }
 
     if (originalNotificationSettings !== undefined) {
@@ -173,7 +176,9 @@ describe('Admin settings / security', () => {
       .get('/admin/settings')
       .set(...adminAuth)
       .expect(200);
-    const stored = JSON.parse(settingsRes.body.settings['settings:notifications']);
+    const stored = JSON.parse(
+      settingsRes.body.settings['settings:notifications'],
+    );
     expect(stored.qaMarker).toBe(testKey);
     expect(stored.emailDigest).toBe(true);
   });
@@ -257,7 +262,9 @@ describe('Admin settings / security', () => {
 
   it('rejects unauthenticated requests', async () => {
     await request(app.getHttpServer()).get('/admin/settings').expect(401);
-    await request(app.getHttpServer()).post('/admin/settings/cleanup').expect(401);
+    await request(app.getHttpServer())
+      .post('/admin/settings/cleanup')
+      .expect(401);
     await request(app.getHttpServer()).get('/admin/security').expect(401);
   });
 

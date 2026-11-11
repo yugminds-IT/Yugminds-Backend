@@ -106,7 +106,9 @@ describe('AdminCoursesService', () => {
       const dbDown = new Error('connection refused');
       db.course.create.mockRejectedValue(dbDown);
 
-      await expect(service.create({ name: 'Scratch Basics' })).rejects.toBe(dbDown);
+      await expect(service.create({ name: 'Scratch Basics' })).rejects.toBe(
+        dbDown,
+      );
     });
   });
 

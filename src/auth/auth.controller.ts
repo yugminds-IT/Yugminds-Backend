@@ -108,6 +108,13 @@ export class AuthController {
     const refreshToken = result.tokens.refreshToken;
     if (!refreshToken) throw new UnauthorizedException('Refresh token missing');
 
+    // This browser's previous session (if any) is replaced by the new one.
+    await this.authService.endBrowserSession(
+      (req as { cookies?: Record<string, string> }).cookies?.[
+        REFRESH_TOKEN_COOKIE_NAME
+      ],
+    );
+
     const refreshExpiry =
       this.config.get<string>('REFRESH_TOKEN_EXPIRY') ?? '7d';
     res.cookie(

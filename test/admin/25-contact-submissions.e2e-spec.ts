@@ -49,7 +49,9 @@ describe('Contact submissions (public form -> admin review)', () => {
       .set(...adminAuth)
       .expect(200);
     const list = res.body?.data ?? res.body;
-    const items = Array.isArray(list) ? list : (list?.submissions ?? list?.items ?? []);
+    const items = Array.isArray(list)
+      ? list
+      : (list?.submissions ?? list?.items ?? []);
     const found = items.find((s: { email: string }) => s.email === email);
     expect(found).toBeDefined();
     submissionId = found.id;
@@ -75,7 +77,9 @@ describe('Contact submissions (public form -> admin review)', () => {
       .set(...adminAuth)
       .expect(200);
     const normalItems = normal.body?.submissions ?? [];
-    expect(normalItems.some((s: { id: string }) => s.id === submissionId)).toBe(false);
+    expect(normalItems.some((s: { id: string }) => s.id === submissionId)).toBe(
+      false,
+    );
 
     // ...but present under the deleted pseudo-status, with deleted_at set.
     const trashed = await request(app.getHttpServer())
@@ -83,7 +87,9 @@ describe('Contact submissions (public form -> admin review)', () => {
       .set(...adminAuth)
       .expect(200);
     const trashedItems = trashed.body?.submissions ?? [];
-    const found = trashedItems.find((s: { id: string }) => s.id === submissionId);
+    const found = trashedItems.find(
+      (s: { id: string }) => s.id === submissionId,
+    );
     expect(found).toBeDefined();
     expect(found.deleted_at).toBeTruthy();
 
@@ -135,7 +141,9 @@ describe('Contact submissions (public form -> admin review)', () => {
       .set(...adminAuth)
       .expect(200);
     const trashedItems = trashed.body?.submissions ?? [];
-    expect(trashedItems.some((s: { id: string }) => s.id === submissionId)).toBe(false);
+    expect(
+      trashedItems.some((s: { id: string }) => s.id === submissionId),
+    ).toBe(false);
 
     // Restore on a purged (truly gone) row must 404, not silently succeed.
     await request(app.getHttpServer())
@@ -148,10 +156,9 @@ describe('Contact submissions (public form -> admin review)', () => {
     const throttleEmailPrefix = `__qa_test_contact_throttle_${Date.now()}`;
 
     afterAll(async () => {
-      await pool.query(
-        `DELETE FROM "ContactSubmission" WHERE email LIKE $1`,
-        [`${throttleEmailPrefix}%`],
-      );
+      await pool.query(`DELETE FROM "ContactSubmission" WHERE email LIKE $1`, [
+        `${throttleEmailPrefix}%`,
+      ]);
     });
 
     it('blocks a burst of requests past the per-IP limit (5/min)', async () => {

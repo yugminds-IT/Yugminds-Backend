@@ -3,7 +3,10 @@ import { Roles } from '../../auth/decorators/roles.decorator';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Public } from '../../auth/decorators/public.decorator';
 import { Role } from '@prisma/client';
-import { SystemControlsService, SystemControls } from './system-controls.service';
+import {
+  SystemControlsService,
+  SystemControls,
+} from './system-controls.service';
 import { SkipThrottle } from '@nestjs/throttler';
 
 @Controller()

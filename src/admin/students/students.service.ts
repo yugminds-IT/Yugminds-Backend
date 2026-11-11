@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { lastLoginByUser } from '../last-login';
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -57,6 +58,13 @@ type UserWithRelations = Awaited<
     school?: { name: string };
   }>;
 };
+
+/** What a delete writes: the record goes to the admin Trash, the account is off, live sessions end. */
+const trashed = () => ({
+  deletedAt: new Date(),
+  isActive: false,
+  tokenVersion: { increment: 1 },
+});
 
 @Injectable()
 export class AdminStudentsService {
@@ -156,9 +164,14 @@ export class AdminStudentsService {
       }),
       this.db.user.count({ where }),
     ]);
-    const students = (users as UserWithRelations[]).map((u) =>
-      this.toStudentDetail(u),
+    const lastLogin = await lastLoginByUser(
+      this.db,
+      users.map((u) => u.id),
     );
+    const students = (users as UserWithRelations[]).map((u) => ({
+      ...this.toStudentDetail(u),
+      last_login: lastLogin.get(u.id)?.toISOString() ?? null,
+    }));
     return {
       students,
       total,
@@ -762,13 +775,17 @@ export class AdminStudentsService {
         return { success: errors.length === 0, enrolled: succeeded, errors };
       }
       case 'delete': {
-        // Permanent delete, matching the single-student delete() behavior —
-        // frees emails for reuse immediately rather than leaving them
-        // reserved by a soft-deleted row.
-        await this.authCache.invalidate(ids);
-        const result = await this.db.user.deleteMany({
+        // Soft delete: the students land in the admin Trash and can be restored.
+        const result = await this.db.user.updateMany({
           where: { id: { in: ids }, role: Role.student },
+          data: trashed(),
         });
+        await this.db.studentSchool.updateMany({
+          where: { studentId: { in: ids } },
+          data: { isActive: false },
+        });
+        await this.authCache.invalidate(ids);
+        await this.sessions.revokeMany('lms', ids);
         return { success: true, deleted: result.count };
       }
       case 'reset_password': {
@@ -897,10 +914,16 @@ export class AdminStudentsService {
       this.db.studentSchool.deleteMany({
         where: { schoolId: school.id, studentId: { in: toUnenroll } },
       }),
-      this.db.user.deleteMany({
+      this.db.user.updateMany({
         where: { id: { in: toDelete }, role: Role.student },
+        data: trashed(),
       }),
     ]);
+    await this.db.studentSchool.updateMany({
+      where: { studentId: { in: toDelete } },
+      data: { isActive: false },
+    });
+    await this.sessions.revokeMany('lms', toDelete);
     return {
       success: true,
       deleted: deleted.count,
@@ -908,21 +931,19 @@ export class AdminStudentsService {
     };
   }
 
-  /**
-   * Permanently removes the student: the row is deleted outright (not
-   * soft-deleted), immediately freeing their email for reuse — e.g. by a
-   * later bulk import. Mirrors the same permanent-delete choice already
-   * made for schools (AdminSchoolsService.delete).
-   */
+  /** Moves the student to the admin Trash (restorable). The token bump ends any live session at once. */
   async delete(id: string) {
     const studentId = parseInt(id, 10);
-    try {
-      await this.authCache.invalidate(studentId);
-      await this.db.user.delete({ where: { id: studentId } });
-    } catch (err: unknown) {
-      // P2025 = record already deleted — treat as success
-      if ((err as { code?: string })?.code !== 'P2025') throw err;
-    }
+    await this.db.user.updateMany({
+      where: { id: studentId, role: Role.student },
+      data: trashed(),
+    });
+    await this.db.studentSchool.updateMany({
+      where: { studentId },
+      data: { isActive: false },
+    });
+    await this.authCache.invalidate(studentId);
+    await this.sessions.revokeMany('lms', studentId);
     return { success: true };
   }
 }

@@ -24,9 +24,14 @@ function configureBundledFonts(): void {
     path.resolve(__dirname, '../../../assets/fonts'), // dist/src/common/utils → dist/assets
     path.resolve(process.cwd(), 'dist/assets/fonts'),
     path.resolve(process.cwd(), 'src/assets/fonts'),
-  ].find((d) => fs.existsSync(d) && fs.readdirSync(d).some((f) => f.endsWith('.ttf')));
+  ].find(
+    (d) =>
+      fs.existsSync(d) && fs.readdirSync(d).some((f) => f.endsWith('.ttf')),
+  );
   if (!fontsDir) {
-    console.warn('[certificates] bundled fonts not found; certificate text depends on system fonts');
+    console.warn(
+      '[certificates] bundled fonts not found; certificate text depends on system fonts',
+    );
     return;
   }
   const prefer = (family: string, fonts: string[]) =>

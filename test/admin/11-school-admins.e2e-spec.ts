@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -28,7 +32,9 @@ describe('Admin school-admins CRUD', () => {
     const list = res.body?.data ?? res.body;
     const admins = Array.isArray(list) ? list : (list?.items ?? []);
     expect(
-      admins.some((a: { id: string }) => Number(a.id) === fixture.schoolAdmin.id),
+      admins.some(
+        (a: { id: string }) => Number(a.id) === fixture.schoolAdmin.id,
+      ),
     ).toBe(true);
   });
 
@@ -54,7 +60,10 @@ describe('Admin school-admins CRUD', () => {
 
     const oldLogin = await request(app.getHttpServer())
       .post('/auth/login')
-      .send({ email: fixture.schoolAdmin.email, password: fixture.schoolAdmin.password });
+      .send({
+        email: fixture.schoolAdmin.email,
+        password: fixture.schoolAdmin.password,
+      });
     expect(oldLogin.status).toBe(401);
 
     const newLogin = await request(app.getHttpServer())
@@ -126,7 +135,8 @@ describe('Admin school-admins CRUD', () => {
         full_name: 'QA Extra School Admin',
       })
       .expect(201);
-    const newId: number = createRes.body?.data?.user?.id ?? createRes.body?.user?.id;
+    const newId: number =
+      createRes.body?.data?.user?.id ?? createRes.body?.user?.id;
     expect(newId).toBeDefined();
 
     const login = await request(app.getHttpServer())
@@ -160,6 +170,8 @@ describe('Admin school-admins CRUD', () => {
     const trashList = trash.body?.data ?? trash.body;
     const students = trashList?.students ?? [];
     const teachers = trashList?.teachers ?? [];
-    expect([...students, ...teachers].some((u: { id: number }) => u.id === newId)).toBe(false);
+    expect(
+      [...students, ...teachers].some((u: { id: number }) => u.id === newId),
+    ).toBe(false);
   });
 });

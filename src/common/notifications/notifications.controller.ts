@@ -62,6 +62,15 @@ export class NotificationsController {
     return this.notifications.updateUserNotification(user.id, body);
   }
 
+  /** Bulk: mark many of your notifications read / unread, or delete them (max 200 ids). */
+  @Patch('user/bulk')
+  async bulkUpdate(
+    @CurrentUser() user: { id: number },
+    @Body() body: { ids?: string[]; action?: string },
+  ) {
+    return this.notifications.bulkUpdate(user.id, body?.ids, body?.action);
+  }
+
   /** List replies for a notification (caller must be recipient or sender). */
   @Get('reply')
   async getReplies(

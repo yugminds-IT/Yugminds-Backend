@@ -36,9 +36,9 @@ describe('Teacher classes, periods, schedules, schools', () => {
   });
 
   it(
-    'GET /teacher/schools includes each assignment\'s subjects ' +
+    "GET /teacher/schools includes each assignment's subjects " +
       '(regression: this used to be entirely unselected, which rendered as a ' +
-      "bare stray comma in the Settings page's \"{city}, {state}\" line since " +
+      'bare stray comma in the Settings page\'s "{city}, {state}" line since ' +
       'both were always undefined)',
     async () => {
       const res = await request(app.getHttpServer())
@@ -104,9 +104,9 @@ describe('Teacher classes, periods, schedules, schools', () => {
       .set(...authHeader(fixture.teachers[0].token))
       .expect(200);
     expect(Array.isArray(res.body.periods)).toBe(true);
-    expect(
-      res.body.periods.some((p: any) => p.id === fixture.periodId),
-    ).toBe(true);
+    expect(res.body.periods.some((p: any) => p.id === fixture.periodId)).toBe(
+      true,
+    );
   });
 
   it('GET /teacher/periods filtered by day only returns periods with a schedule on that day', async () => {
@@ -114,9 +114,9 @@ describe('Teacher classes, periods, schedules, schools', () => {
       .get(`/teacher/periods?school_id=${fixture.schoolId}&day=Monday`)
       .set(...authHeader(fixture.teachers[0].token))
       .expect(200);
-    expect(
-      res.body.periods.every((p: any) => p.has_schedule === true),
-    ).toBe(true);
+    expect(res.body.periods.every((p: any) => p.has_schedule === true)).toBe(
+      true,
+    );
   });
 
   it('GET /teacher/schedules returns the fixture schedule for teacher[0]', async () => {

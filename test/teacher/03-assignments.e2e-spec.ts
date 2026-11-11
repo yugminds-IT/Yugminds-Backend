@@ -141,7 +141,9 @@ describe('Teacher assignments (CRUD, grading, retakes, analytics-adjacent)', () 
         .get(`/teacher/assignments?school_id=${fixture.schoolId}`)
         .set(...teacherAuth)
         .expect(200);
-      const row = listRes.body.assignments.find((a: any) => a.id === assignmentId);
+      const row = listRes.body.assignments.find(
+        (a: any) => a.id === assignmentId,
+      );
       expect(row).toBeDefined();
       expect(row.avg_score).toBe(7);
       expect(row.average_score).toBeUndefined();
@@ -378,9 +380,9 @@ describe('Teacher assignments (CRUD, grading, retakes, analytics-adjacent)', () 
       .get(`/teacher/assignments/${assignmentId}/submissions`)
       .set(...teacherAuth)
       .expect(200);
-    expect(afterRes.body.submissions.every((s: any) => s.status === 'graded')).toBe(
-      true,
-    );
+    expect(
+      afterRes.body.submissions.every((s: any) => s.status === 'graded'),
+    ).toBe(true);
 
     const dashRes = await request(app.getHttpServer())
       .get(`/teacher/assignments/${assignmentId}/progress-dashboard`)

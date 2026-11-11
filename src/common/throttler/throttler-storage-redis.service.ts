@@ -68,7 +68,12 @@ export class ThrottlerStorageRedisService implements ThrottlerStorage {
       this.logger.warn(
         `Redis rate-limit check failed, allowing request through: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return { totalHits: 1, timeToExpire: 0, isBlocked: false, timeToBlockExpire: 0 };
+      return {
+        totalHits: 1,
+        timeToExpire: 0,
+        isBlocked: false,
+        timeToBlockExpire: 0,
+      };
     }
   }
 }

@@ -7,6 +7,8 @@ export interface CurrentUserPayload {
   isSuperAdmin: boolean;
   tenantId?: string;
   sid?: string;
+  /** Set when an admin is acting as this user (impersonation): the admin's own user id. */
+  impersonatorId?: number;
 }
 
 export const CurrentUser = createParamDecorator(

@@ -53,7 +53,7 @@ describe('Student analytics (GET /student/analytics)', () => {
 
   it(
     "on a 'highest'-rule assignment, the Analytics summary/leaderboard reflect the same " +
-      "best-scoring attempt as the Assignments detail endpoint (regression: this used to be " +
+      'best-scoring attempt as the Assignments detail endpoint (regression: this used to be ' +
       'a second hand-rolled copy of the retake-rule selection logic, risking silent divergence)',
     async () => {
       const assignmentId = await createDailyAssignment({

@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -53,7 +57,9 @@ describe('Admin notifications -> teacher sees it (cross-role propagation)', () =
       .expect(200);
     const otherNotifications = otherInbox.body?.notifications ?? [];
     expect(
-      otherNotifications.some((n: { title: string }) => n.title === uniqueTitle),
+      otherNotifications.some(
+        (n: { title: string }) => n.title === uniqueTitle,
+      ),
     ).toBe(false);
   });
 

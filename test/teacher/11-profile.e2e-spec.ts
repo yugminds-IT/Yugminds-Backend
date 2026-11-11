@@ -70,7 +70,9 @@ describe('Teacher profile / settings', () => {
       await request(app.getHttpServer())
         .patch('/profile')
         .set(...authHeader(fixture.teachers[0].token))
-        .send({ email: `__qa_test_should_not_apply_${Date.now()}@example.test` })
+        .send({
+          email: `__qa_test_should_not_apply_${Date.now()}@example.test`,
+        })
         .expect(200);
 
       const res = await request(app.getHttpServer())

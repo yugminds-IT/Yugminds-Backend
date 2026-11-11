@@ -721,6 +721,9 @@ model TeacherReport {
   grade         String?
   section       String?
   periodId      String?
+  // What was taught: chosen by the teacher on the report. subjectSource: 'teacher' | 'timetable' (filled from the timetable for reports sent before this field existed).
+  subject       String?
+  subjectSource String?
   status        String?     @default("submitted") // submitted | approved | rejected
   startTime     String?
   endTime       String?
@@ -1036,6 +1039,8 @@ model AuditLog {
   actor      User?    @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
   actorEmail String?
   actorRole  String?
+  /// The school the action was for (null for platform-wide admin actions and entries from before this was recorded).
+  schoolId   String?
   method     String // POST | PUT | PATCH | DELETE
   path       String
   entityType String? // schools | students | teachers | courses | ...
@@ -1051,6 +1056,8 @@ model AuditLog {
   @@index([entityType])
   @@index([createdAt])
   @@index([method])
+  @@index([schoolId])
+  @@index([actorRole])
 }
 
 // ============ Admin Saved Table Views ============
@@ -1335,4 +1342,26 @@ model LoginSession {
 
   @@index([subjectType, subjectId, revokedAt])
   @@index([expiresAt])
+}
+
+/// One row per hour, role and school: how many requests the API handled and how fast.
+/// Added to by every server instance, and deleted after MONITORING_RETENTION_DAYS (7 by default).
+model ApiHourlyStat {
+  id           String   @id @default(uuid())
+  hour         DateTime
+  role         String // admin | school_admin | teacher | student | public
+  schoolId     String   @default("") // "" when the request is not tied to a school
+  requests     Int      @default(0)
+  ok           Int      @default(0) // 2xx and 3xx
+  clientErrors Int      @default(0) // 4xx
+  serverErrors Int      @default(0) // 5xx
+  totalMs      BigInt   @default(0)
+  maxMs        Int      @default(0)
+  under200     Int      @default(0)
+  under500     Int      @default(0)
+  under1000    Int      @default(0)
+  over1000     Int      @default(0)
+
+  @@unique([hour, role, schoolId])
+  @@index([hour])
 }

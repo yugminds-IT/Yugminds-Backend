@@ -21,7 +21,9 @@ describe('EnrollmentService.shouldEnroll', () => {
   });
 
   it('grade match with no sections → grade-wide (any section enrolls)', () => {
-    const grants: CourseGradeGrant[] = [{ gradeName: 'Grade 4', sectionNames: [] }];
+    const grants: CourseGradeGrant[] = [
+      { gradeName: 'Grade 4', sectionNames: [] },
+    ];
     expect(service.shouldEnroll(grants, 'Grade 4', 'A')).toBe(true);
     expect(service.shouldEnroll(grants, 'Grade 4', 'Z')).toBe(true);
     expect(service.shouldEnroll(grants, 'Grade 4', null)).toBe(true);

@@ -61,7 +61,9 @@ describe('AuthService', () => {
     list: jest.fn().mockResolvedValue([]),
   };
   const mockSystemControls = {
-    isMaintenanceActive: jest.fn().mockResolvedValue({ active: false, message: '' }),
+    isMaintenanceActive: jest
+      .fn()
+      .mockResolvedValue({ active: false, message: '' }),
   };
 
   beforeEach(async () => {
@@ -106,7 +108,7 @@ describe('AuthService', () => {
       });
     });
 
-    it('accepts a password satisfying all complexity rules, re-issuing fresh tokens for the caller\'s own session', async () => {
+    it("accepts a password satisfying all complexity rules, re-issuing fresh tokens for the caller's own session", async () => {
       // updatePassword now bumps tokenVersion (invalidating every access
       // token, including the one this very request used) and re-issues a
       // matching pair for the caller so their own session keeps working.
@@ -163,23 +165,29 @@ describe('AuthService', () => {
 
       const tokens = await (
         service as unknown as {
-          generateTokens: (user: {
-            id: number;
-            email: string;
-            role: string;
-            isSuperAdmin: boolean;
-            tenantId: string | null;
-            tokenVersion: number;
-          }, sid: string) => Promise<{ accessToken: string; refreshToken: string }>;
+          generateTokens: (
+            user: {
+              id: number;
+              email: string;
+              role: string;
+              isSuperAdmin: boolean;
+              tenantId: string | null;
+              tokenVersion: number;
+            },
+            sid: string,
+          ) => Promise<{ accessToken: string; refreshToken: string }>;
         }
-      ).generateTokens({
-        id: 1,
-        email: 'admin@example.test',
-        role: 'admin',
-        isSuperAdmin: true,
-        tenantId: null,
-        tokenVersion: 0,
-      }, 'sid-1');
+      ).generateTokens(
+        {
+          id: 1,
+          email: 'admin@example.test',
+          role: 'admin',
+          isSuperAdmin: true,
+          tenantId: null,
+          tokenVersion: 0,
+        },
+        'sid-1',
+      );
 
       expect(mockJwtService.signAsync).toHaveBeenNthCalledWith(
         1,
@@ -211,7 +219,7 @@ describe('AuthService', () => {
       expect(mockDb.user.update).not.toHaveBeenCalled();
     });
 
-    it('revokeSession 404s when the session is not the caller\'s', async () => {
+    it("revokeSession 404s when the session is not the caller's", async () => {
       mockSessions.revoke.mockResolvedValueOnce(false);
       await expect(service.revokeSession(7, 'other')).rejects.toThrow(
         NotFoundException,
@@ -220,20 +228,28 @@ describe('AuthService', () => {
 
     it('revokeOtherSessions spares the current sid; revokeAllSessions spares none', async () => {
       await service.revokeOtherSessions(7, 'sid-1');
-      expect(mockSessions.revokeMany).toHaveBeenLastCalledWith('lms', 7, 'sid-1');
+      expect(mockSessions.revokeMany).toHaveBeenLastCalledWith(
+        'lms',
+        7,
+        'sid-1',
+      );
       await service.revokeAllSessions(7);
       expect(mockSessions.revokeMany).toHaveBeenLastCalledWith('lms', 7);
     });
 
     it('refresh rejects tokens with no sid (issued before device sessions)', async () => {
       mockJwtService.verifyAsync.mockResolvedValueOnce({ sub: 7 });
-      await expect(service.refresh('tok')).rejects.toThrow(UnauthorizedException);
+      await expect(service.refresh('tok')).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
 
     it('refresh rejects a revoked session', async () => {
       mockJwtService.verifyAsync.mockResolvedValueOnce({ sub: 7, sid: 's' });
       mockSessions.isAlive.mockResolvedValueOnce(false);
-      await expect(service.refresh('tok')).rejects.toThrow(UnauthorizedException);
+      await expect(service.refresh('tok')).rejects.toThrow(
+        UnauthorizedException,
+      );
     });
   });
 });

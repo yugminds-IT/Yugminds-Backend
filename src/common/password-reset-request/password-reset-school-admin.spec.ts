@@ -41,14 +41,12 @@ describe('PasswordResetRequestService: school-admin target rules', () => {
       },
       user: { update: jest.fn().mockResolvedValue({}) },
       notification: {
-        create: jest
-          .fn()
-          .mockResolvedValue({
-            id: 'n1',
-            title: 'T',
-            message: 'M',
-            createdAt: new Date(),
-          }),
+        create: jest.fn().mockResolvedValue({
+          id: 'n1',
+          title: 'T',
+          message: 'M',
+          createdAt: new Date(),
+        }),
         count: jest.fn().mockResolvedValue(0),
       },
     };

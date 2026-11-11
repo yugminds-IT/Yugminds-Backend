@@ -35,9 +35,7 @@ describe('Teacher notifications', () => {
       .get(`/teacher/notifications/recipients?school_id=${fixture.schoolId}`)
       .set(...teacherAuth)
       .expect(200);
-    expect(res.body.roles.some((r: any) => r.id === 'role:student')).toBe(
-      true,
-    );
+    expect(res.body.roles.some((r: any) => r.id === 'role:student')).toBe(true);
     expect(
       res.body.users.some((u: any) => u.id === String(fixture.students[0].id)),
     ).toBe(true);
@@ -125,9 +123,7 @@ describe('Teacher notifications', () => {
       .set(...authHeader(fixture.teachers[1].token))
       .expect(200);
     expect(
-      sentRes.body.notifications.some(
-        (n: any) => n.title === 'Staff meeting',
-      ),
+      sentRes.body.notifications.some((n: any) => n.title === 'Staff meeting'),
     ).toBe(true);
   });
 
@@ -159,7 +155,9 @@ describe('Teacher notifications', () => {
   });
 
   it('rejects unauthenticated requests', async () => {
-    await request(app.getHttpServer()).get('/teacher/notifications').expect(401);
+    await request(app.getHttpServer())
+      .get('/teacher/notifications')
+      .expect(401);
   });
 
   it('GET /teacher/notifications returns a real total, defaults to mode=received', async () => {
@@ -168,7 +166,9 @@ describe('Teacher notifications', () => {
       .set(...teacherAuth)
       .expect(200);
     expect(typeof res.body.total).toBe('number');
-    expect(res.body.total).toBeGreaterThanOrEqual(res.body.notifications.length);
+    expect(res.body.total).toBeGreaterThanOrEqual(
+      res.body.notifications.length,
+    );
     // Default mode is 'received' — the sender's own "Staff meeting" send
     // (from an earlier test in this file, teachers[1] -> role:teacher)
     // must NOT appear for teachers[1] under the default mode, since it's
@@ -179,7 +179,9 @@ describe('Teacher notifications', () => {
       .set(...sentAuth)
       .expect(200);
     expect(
-      defaultRes.body.notifications.some((n: any) => n.title === 'Staff meeting'),
+      defaultRes.body.notifications.some(
+        (n: any) => n.title === 'Staff meeting',
+      ),
     ).toBe(false);
   });
 
@@ -203,12 +205,14 @@ describe('Teacher notifications', () => {
       .expect(200);
     expect(page1.body.notifications.length).toBe(1);
     expect(page2.body.notifications.length).toBe(1);
-    expect(page1.body.notifications[0].id).not.toBe(page2.body.notifications[0].id);
+    expect(page1.body.notifications[0].id).not.toBe(
+      page2.body.notifications[0].id,
+    );
   });
 
   it(
     'marking a SENT notification as read fails — the row belongs to the ' +
-      "recipient, not the sender, so the shared ownership check rejects it " +
+      'recipient, not the sender, so the shared ownership check rejects it ' +
       '(regression guard for the mark-as-read-in-sent-view bug)',
     async () => {
       const senderAuth = authHeader(fixture.teachers[1].token);
@@ -231,7 +235,7 @@ describe('Teacher notifications', () => {
 
   it(
     'GET /teacher/notifications/recipients excludes the requesting teacher ' +
-      "from both the role:teacher count and the individual users list " +
+      'from both the role:teacher count and the individual users list ' +
       '(regression guard for the "All Teachers (1)" self-count bug that ' +
       "always 400'd on solo-teacher schools)",
     async () => {

@@ -12,6 +12,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { lastLoginByUser } from '../../admin/last-login';
 import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
@@ -408,14 +409,24 @@ export class TeacherExtraController {
     const [teacherCount, studentCount, teacherUsers, studentUsers] =
       await Promise.all([
         this.db.teacherSchool.count({
-          where: { schoolId, teacherId: { not: user.id } },
+          where: {
+            schoolId,
+            teacherId: { not: user.id },
+            teacher: { deletedAt: null },
+          },
         }),
-        this.db.studentSchool.count({ where: { schoolId } }),
+        this.db.studentSchool.count({
+          where: { schoolId, student: { deletedAt: null } },
+        }),
         this.db.teacherSchool.findMany({
-          where: { schoolId, teacherId: { not: user.id } },
+          where: {
+            schoolId,
+            teacherId: { not: user.id },
+            teacher: { deletedAt: null },
+          },
         }),
         this.db.studentSchool.findMany({
-          where: { schoolId },
+          where: { schoolId, student: { deletedAt: null } },
           include: { student: { include: { profile: true } } },
         }),
       ]);
@@ -876,6 +887,10 @@ export class TeacherExtraController {
 
     const courseById = new Map(courses.map((c) => [c.id, c]));
     const schoolById = new Map(schools.map((s) => [s.id, s]));
+    const lastLogin = await lastLoginByUser(
+      this.db,
+      allStudentsFiltered.map((u) => u.id),
+    );
     const studentsDto = allStudentsFiltered.map((u) => {
       const primarySchool = (u.studentSchools ?? [])[0];
       const school = primarySchool
@@ -961,6 +976,7 @@ export class TeacherExtraController {
         average_progress: Number(avgStudentProgress.toFixed(2)),
         courses: coursesForStudent,
         last_activity: lastActivity,
+        last_login: lastLogin.get(u.id)?.toISOString() ?? null,
       };
     });
     const studentsWithProgress = studentsDto.filter((s) => s.total_courses > 0);
@@ -1348,7 +1364,9 @@ export class TeacherExtraController {
           assignmentType: 'COURSE',
           AND: [
             // Never list another school's assignment just because the course is shared.
-            { OR: [{ schoolId: null }, { schoolId: { in: allowedSchoolIds } }] },
+            {
+              OR: [{ schoolId: null }, { schoolId: { in: allowedSchoolIds } }],
+            },
             {
               OR: [
                 ...(chapterIds.length
@@ -1974,7 +1992,7 @@ export class TeacherExtraController {
     ];
     if (!studentIds.length)
       throw new BadRequestException(
-        'None of the given students belong to this assignment\'s school',
+        "None of the given students belong to this assignment's school",
       );
 
     const isActive = body.isActive ?? true;

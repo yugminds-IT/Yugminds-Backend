@@ -7,9 +7,18 @@ import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { Role } from '@prisma/client';
-import { assertAdminMayApproveEmergency, isEmergencyLeave, leaveStageFields, revertLeaveApprovedAttendance } from '../../common/utils/leave-rules.util';
+import {
+  assertAdminMayApproveEmergency,
+  isEmergencyLeave,
+  leaveStageFields,
+  revertLeaveApprovedAttendance,
+} from '../../common/utils/leave-rules.util';
 import { getTodayIstDateStr } from '../../common/utils/date.util';
-import { EMERGENCY_LEAVE_TYPE, assertEmergencyLeaveAllowed, assertLeaveSpan } from '../../common/utils/leave-rules.util';
+import {
+  EMERGENCY_LEAVE_TYPE,
+  assertEmergencyLeaveAllowed,
+  assertLeaveSpan,
+} from '../../common/utils/leave-rules.util';
 
 @Injectable()
 export class AdminLeavesService {
@@ -56,7 +65,11 @@ export class AdminLeavesService {
     const reviewerById = new Map(
       reviewers.map((r) => [
         r.id,
-        { id: String(r.id), full_name: r.profile?.fullName ?? r.email, email: r.email },
+        {
+          id: String(r.id),
+          full_name: r.profile?.fullName ?? r.email,
+          email: r.email,
+        },
       ]),
     );
 
@@ -94,8 +107,10 @@ export class AdminLeavesService {
         // the status transitions) — previously declared/rendered on the
         // frontend but never sent, so "Approved on" / "Rejected on" was
         // permanently dead UI.
-        approved_at: l.status === 'approved' ? l.updatedAt.toISOString() : undefined,
-        rejected_at: l.status === 'rejected' ? l.updatedAt.toISOString() : undefined,
+        approved_at:
+          l.status === 'approved' ? l.updatedAt.toISOString() : undefined,
+        rejected_at:
+          l.status === 'rejected' ? l.updatedAt.toISOString() : undefined,
         reviewer: l.approvedBy
           ? (reviewerById.get(parseInt(String(l.approvedBy), 10)) ?? null)
           : null,
@@ -137,20 +152,34 @@ export class AdminLeavesService {
    * attendance changes — both must know and approve.
    */
   async createEmergency(
-    body: { teacher_id?: number | string; school_id?: string; start_date?: string; end_date?: string; reason?: string },
+    body: {
+      teacher_id?: number | string;
+      school_id?: string;
+      start_date?: string;
+      end_date?: string;
+      reason?: string;
+    },
     actorUserId: number,
   ) {
     const teacherId = Number(body?.teacher_id);
     const { school_id, start_date, end_date, reason } = body ?? {};
-    if (!Number.isInteger(teacherId) || !school_id || !start_date || !end_date) {
-      throw new BadRequestException('teacher_id, school_id, start_date and end_date are required');
+    if (
+      !Number.isInteger(teacherId) ||
+      !school_id ||
+      !start_date ||
+      !end_date
+    ) {
+      throw new BadRequestException(
+        'teacher_id, school_id, start_date and end_date are required',
+      );
     }
     const start = new Date(start_date + 'T00:00:00.000Z');
     const end = new Date(end_date + 'T23:59:59.999Z');
     if (isNaN(start.getTime()) || isNaN(end.getTime())) {
       throw new BadRequestException('Invalid date format. Use YYYY-MM-DD.');
     }
-    if (start > end) throw new BadRequestException('End date must be on or after start date');
+    if (start > end)
+      throw new BadRequestException('End date must be on or after start date');
     assertLeaveSpan(start_date, end_date);
     assertEmergencyLeaveAllowed(start_date, reason, getTodayIstDateStr());
 
@@ -158,7 +187,8 @@ export class AdminLeavesService {
       where: { teacherId, schoolId: school_id },
       select: { schoolId: true },
     });
-    if (!assigned) throw new BadRequestException('Teacher is not assigned to this school');
+    if (!assigned)
+      throw new BadRequestException('Teacher is not assigned to this school');
 
     const overlap = await this.db.teacherLeave.findFirst({
       where: {
@@ -171,7 +201,9 @@ export class AdminLeavesService {
       select: { id: true },
     });
     if (overlap) {
-      throw new BadRequestException('This teacher already has a pending or approved leave overlapping these dates.');
+      throw new BadRequestException(
+        'This teacher already has a pending or approved leave overlapping these dates.',
+      );
     }
 
     const leave = await this.db.teacherLeave.create({
@@ -210,7 +242,10 @@ export class AdminLeavesService {
         }),
       ),
     );
-    await this.realtimeGateway.emitDashboardStatsForUsers([teacherId, ...schoolAdmins.map((s) => s.userId)]);
+    await this.realtimeGateway.emitDashboardStatsForUsers([
+      teacherId,
+      ...schoolAdmins.map((s) => s.userId),
+    ]);
     return { success: true, leave_id: leave.id };
   }
 
@@ -244,12 +279,15 @@ export class AdminLeavesService {
     const leave = await this.db.teacherLeave.findUnique({ where: { id } });
     if (!leave) throw new NotFoundException('Leave request not found');
     if (leave.status === 'cancelled') {
-      throw new BadRequestException('This leave request was cancelled by the teacher.');
+      throw new BadRequestException(
+        'This leave request was cancelled by the teacher.',
+      );
     }
     // Emergency leave: the admin is approval stage 2 — approving requires the
     // school admin's approval first. Rejecting is always allowed.
     const emergency = isEmergencyLeave(leave);
-    if (emergency && normalized === 'approved') assertAdminMayApproveEmergency(leave);
+    if (emergency && normalized === 'approved')
+      assertAdminMayApproveEmergency(leave);
 
     const updated = await this.db.teacherLeave.update({
       where: { id },
@@ -336,7 +374,11 @@ export class AdminLeavesService {
     }
 
     if (normalized === 'rejected') {
-      await revertLeaveApprovedAttendance(this.db, updated, getTodayIstDateStr());
+      await revertLeaveApprovedAttendance(
+        this.db,
+        updated,
+        getTodayIstDateStr(),
+      );
     }
 
     // Notify the teacher when their leave is approved or rejected (in-app).
@@ -359,7 +401,9 @@ export class AdminLeavesService {
         ? parseInt(String(actor_user_id), 10)
         : NaN;
       await this.notifications.sendOne(
-        Number.isFinite(senderId) && senderId > 0 ? senderId : updated.teacherId,
+        Number.isFinite(senderId) && senderId > 0
+          ? senderId
+          : updated.teacherId,
         updated.teacherId,
         {
           title: `Leave request ${statusLabel}`,

@@ -1,6 +1,10 @@
 import { ForbiddenException, Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { getTodayIstDateOnly, getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+import {
+  getTodayIstDateOnly,
+  getTodayIstDateStr,
+  isBeforeAttendanceCutoff,
+} from '../../common/utils/date.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
 
@@ -85,7 +89,8 @@ export class TeacherAttendanceService {
     const workingSchoolIds = workStatus.workingSchoolIds;
     if (workingSchoolIds.length === 0) {
       result.attendance = {
-        status: workStatus.holidaySchoolIds.length > 0 ? 'Holiday' : 'Not-Scheduled',
+        status:
+          workStatus.holidaySchoolIds.length > 0 ? 'Holiday' : 'Not-Scheduled',
         date: result.date,
       };
       return result;
@@ -142,7 +147,9 @@ export class TeacherAttendanceService {
             p?.startTime ??
             undefined,
           end_time:
-            (s as { endTime?: string | null }).endTime ?? p?.endTime ?? undefined,
+            (s as { endTime?: string | null }).endTime ??
+            p?.endTime ??
+            undefined,
         };
       })
       // periodId is a UUID — orderBy periodId is random vs clock time.
@@ -168,7 +175,6 @@ export class TeacherAttendanceService {
             select: { periodId: true, status: true },
           })
         : [];
-
 
     const reportedPeriodIds = new Set(
       reports.map((r) => r.periodId).filter(Boolean) as string[],
@@ -233,7 +239,8 @@ export class TeacherAttendanceService {
     result.attendance = {
       status,
       date: result.date,
-      ...(status === 'Absent' && reportedPeriodIds.size > 0 && { late_report: true }),
+      ...(status === 'Absent' &&
+        reportedPeriodIds.size > 0 && { late_report: true }),
     };
     return result;
   }
@@ -254,9 +261,15 @@ export class TeacherAttendanceService {
     year: number,
     month: number,
   ): Promise<Map<string, number>> {
-    const monthEndForHistory = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    const monthEndForHistory = new Date(
+      Date.UTC(year, month, 0, 23, 59, 59, 999),
+    );
     const history = await this.db.teacherWorkingDaysHistory.findMany({
-      where: { teacherId, schoolId, effectiveFrom: { lte: monthEndForHistory } },
+      where: {
+        teacherId,
+        schoolId,
+        effectiveFrom: { lte: monthEndForHistory },
+      },
       select: { effectiveFrom: true, workingDays: true },
       orderBy: { effectiveFrom: 'asc' },
     });
@@ -349,7 +362,11 @@ export class TeacherAttendanceService {
 
       if (compensatoryDates.has(dateStr)) {
         // Compensatory working days always count (even if weekend)
-        const weight = holidayDates.has(dateStr) ? 0 : halfDayDates.has(dateStr) ? 0.5 : 1;
+        const weight = holidayDates.has(dateStr)
+          ? 0
+          : halfDayDates.has(dateStr)
+            ? 0.5
+            : 1;
         if (weight > 0) workingDates.set(dateStr, weight);
       } else if (
         resolveWorkingDaysForDate(history, cur).includes(dow) &&
@@ -494,7 +511,8 @@ export class TeacherAttendanceService {
           if (d < todayStr) absentDates.add(d);
           else unreportedDates.add(d);
         }
-        for (const d of [...presentDayDates, ...processedLeaveDates]) absentDates.delete(d);
+        for (const d of [...presentDayDates, ...processedLeaveDates])
+          absentDates.delete(d);
         const absentDays = absentDates.size;
         const unreportedDays = unreportedDates.size;
 
@@ -565,16 +583,22 @@ export class TeacherAttendanceService {
         where: {
           teacherId,
           schoolId: { in: schoolIds },
-          reportDate: { gte: fromDate, lte: new Date(toDate.getTime() + 24 * 3600 * 1000) },
+          reportDate: {
+            gte: fromDate,
+            lte: new Date(toDate.getTime() + 24 * 3600 * 1000),
+          },
         },
         select: { schoolId: true, reportDate: true },
       });
       const reported = new Set(
-        reports.map((r) => `${r.schoolId}|${r.reportDate.toISOString().split('T')[0]}`),
+        reports.map(
+          (r) => `${r.schoolId}|${r.reportDate.toISOString().split('T')[0]}`,
+        ),
       );
       for (const r of absent) {
         const day = r.date.toISOString().split('T')[0];
-        if (reported.has(`${r.schoolId}|${day}`)) lateDays.add(`${r.schoolId}|${day}`);
+        if (reported.has(`${r.schoolId}|${day}`))
+          lateDays.add(`${r.schoolId}|${day}`);
       }
     }
     return {

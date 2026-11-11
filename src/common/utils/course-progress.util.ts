@@ -61,8 +61,11 @@ export function computeCourseProgress(
     progressRows
       .filter((p) => {
         const cid = p.contentId;
-        const isChapterRecord = !cid || cid === '' || cid === 'null' || cid === 'undefined';
-        return isChapterRecord && p.chapterId && (p.progress >= 99 || p.completedAt);
+        const isChapterRecord =
+          !cid || cid === '' || cid === 'null' || cid === 'undefined';
+        return (
+          isChapterRecord && p.chapterId && (p.progress >= 99 || p.completedAt)
+        );
       })
       .map((p) => p.chapterId as string),
   );
@@ -78,7 +81,10 @@ export function computeCourseProgress(
 
   const progressPercentage =
     totalContentItems > 0
-      ? Math.min(100, Math.round((hybridCompletedCount / totalContentItems) * 100))
+      ? Math.min(
+          100,
+          Math.round((hybridCompletedCount / totalContentItems) * 100),
+        )
       : progressRows.some((p) => p.progress >= 99)
         ? 100
         : 0;
@@ -95,7 +101,9 @@ export function computeCourseProgress(
     const chContents = chapterContentsMap.get(ch.id) ?? [];
     const chapterIsExplicitlyCompleted = completedChapterIds.has(ch.id);
     if (chContents.length > 0) {
-      const allContentsDone = chContents.every((cid) => completedContentIds.has(cid));
+      const allContentsDone = chContents.every((cid) =>
+        completedContentIds.has(cid),
+      );
       if (allContentsDone || chapterIsExplicitlyCompleted) completedChapters++;
     } else if (chapterIsExplicitlyCompleted) {
       completedChapters++;
@@ -114,7 +122,10 @@ export function computeCourseProgress(
         ? 'active'
         : 'not_started';
 
-  const estimatedMinutes = contents.reduce((sum, c) => sum + (c.durationMinutes ?? 0), 0);
+  const estimatedMinutes = contents.reduce(
+    (sum, c) => sum + (c.durationMinutes ?? 0),
+    0,
+  );
 
   return {
     totalChapters,

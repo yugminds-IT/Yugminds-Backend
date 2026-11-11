@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -26,7 +30,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const schools = res.body?.data?.schools ?? res.body?.schools ?? [];
-    expect(schools.some((s: { id: string }) => s.id === fixture.schoolId)).toBe(true);
+    expect(schools.some((s: { id: string }) => s.id === fixture.schoolId)).toBe(
+      true,
+    );
   });
 
   it('GET /admin/schools/:id returns full detail', async () => {
@@ -63,7 +69,7 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
   it(
     'PUT /admin/schools with a new grade in grades_offered adds that grade ' +
       '(and its sections + join codes) without touching existing grades ' +
-      "or duplicating their join codes (regression: update() never wrote " +
+      'or duplicating their join codes (regression: update() never wrote ' +
       'academic structure at all, and the underlying write method minted a ' +
       'fresh join code for every already-existing section on every call)',
     async () => {
@@ -169,7 +175,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         .expect(200);
       const withBothSchool = withBothGrades.body?.data ?? withBothGrades.body;
       expect(
-        withBothSchool.grades.some((g: { name: string }) => g.name === 'Grade 9'),
+        withBothSchool.grades.some(
+          (g: { name: string }) => g.name === 'Grade 9',
+        ),
       ).toBe(true);
       const grade10Before = withBothSchool.grades.find(
         (g: { name: string }) => g.name === 'Grade 10',
@@ -206,7 +214,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
       expect(grade10After.sections).toHaveLength(1);
       // The original fixture grade must be completely unaffected throughout.
       expect(
-        finalSchool.grades.some((g: { name: string }) => g.name === fixture.grade),
+        finalSchool.grades.some(
+          (g: { name: string }) => g.name === fixture.grade,
+        ),
       ).toBe(true);
 
       // Doing it again with the exact same (already-shrunk) list must be a
@@ -232,7 +242,7 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
     },
   );
 
-  describe('growing a grade\'s section count (e.g. 2 -> 3 sections)', () => {
+  describe("growing a grade's section count (e.g. 2 -> 3 sections)", () => {
     async function getSchool() {
       const res = await request(app.getHttpServer())
         .get(`/admin/schools/${fixture.schoolId}`)
@@ -252,7 +262,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         const before = await getSchool();
         const beforeGrade = findGrade(before, fixture.grade);
         expect(beforeGrade.sections).toHaveLength(2);
-        const beforeSectionIds = beforeGrade.sections.map((s: { id: string }) => s.id).sort();
+        const beforeSectionIds = beforeGrade.sections
+          .map((s: { id: string }) => s.id)
+          .sort();
         const beforeJoinCodeIds = beforeGrade.sections
           .flatMap((s: { joinCodes: { id: string }[] }) => s.joinCodes)
           .map((jc: { id: string }) => jc.id)
@@ -271,11 +283,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         const after = await getSchool();
         const afterGrade = findGrade(after, fixture.grade);
         expect(afterGrade.sections).toHaveLength(3);
-        expect(afterGrade.sections.map((s: { name: string }) => s.name).sort()).toEqual([
-          'Section A',
-          'Section B',
-          'Section C',
-        ]);
+        expect(
+          afterGrade.sections.map((s: { name: string }) => s.name).sort(),
+        ).toEqual(['Section A', 'Section B', 'Section C']);
         // The original two sections must be the SAME rows, not recreated.
         const afterOriginalSectionIds = afterGrade.sections
           .filter((s: { name: string }) => s.name !== 'Section C')
@@ -289,7 +299,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
           .sort();
         expect(afterOriginalJoinCodeIds).toEqual(beforeJoinCodeIds);
         // Exactly one new section, with exactly one new join code.
-        const newSection = afterGrade.sections.find((s: { name: string }) => s.name === 'Section C');
+        const newSection = afterGrade.sections.find(
+          (s: { name: string }) => s.name === 'Section C',
+        );
         expect(newSection.joinCodes).toHaveLength(1);
 
         // Reverting to 2 for later tests in this block isn't needed — each
@@ -298,7 +310,7 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
     );
 
     it(
-      "a grade not mentioned in sections_per_grade keeps its section count " +
+      'a grade not mentioned in sections_per_grade keeps its section count ' +
         'exactly as-is, even though this same request grows a different grade',
       async () => {
         // fixture.grade is now at 3 sections from the previous test. Add a
@@ -378,7 +390,9 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
           .send({
             id: fixture.schoolId,
             grades_offered: before.gradesOffered,
-            sections_per_grade: { [fixture.grade]: beforeGrade.sections.length + 1 },
+            sections_per_grade: {
+              [fixture.grade]: beforeGrade.sections.length + 1,
+            },
           })
           .expect(200);
 
@@ -396,12 +410,15 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
           .get(`/admin/students/${fixture.students[0].id}`)
           .set(...authHeader(fixture.admin.token))
           .expect(200);
-        const studentAfterBody = studentAfterRes.body?.data ?? studentAfterRes.body;
+        const studentAfterBody =
+          studentAfterRes.body?.data ?? studentAfterRes.body;
         const studentSchoolAfter = studentAfterBody.student_schools.find(
           (ss: { school_id: string }) => ss.school_id === fixture.schoolId,
         );
         expect(studentSchoolAfter.section).toBe(studentSchoolBefore.section);
-        expect(studentSchoolAfter.is_active).toBe(studentSchoolBefore.is_active);
+        expect(studentSchoolAfter.is_active).toBe(
+          studentSchoolBefore.is_active,
+        );
       },
     );
 
@@ -438,9 +455,10 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
 
     beforeAll(async () => {
       codeFixture = await createQaFixture(app);
-      await pool.query('UPDATE "School" SET "schoolCode" = NULL WHERE id = $1', [
-        codeFixture.schoolId,
-      ]);
+      await pool.query(
+        'UPDATE "School" SET "schoolCode" = NULL WHERE id = $1',
+        [codeFixture.schoolId],
+      );
     }, 60000);
 
     afterAll(async () => {
@@ -472,7 +490,8 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
       // Join codes are shaped YUG-<schoolCode>-<gradeAbbr>-<sectionAbbr>.
       const codePrefix = `YUG-${persistedCode}-`;
       const firstGradeCodes: string[] = gradeAfterFirst.sections.flatMap(
-        (s: { joinCodes: { code: string }[] }) => s.joinCodes.map((jc) => jc.code),
+        (s: { joinCodes: { code: string }[] }) =>
+          s.joinCodes.map((jc) => jc.code),
       );
       expect(firstGradeCodes.length).toBeGreaterThan(0);
       for (const code of firstGradeCodes) {
@@ -499,7 +518,8 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         (g: { name: string }) => g.name === codeFixture.grade,
       );
       const allCodes: string[] = gradeAfterSecond.sections.flatMap(
-        (s: { joinCodes: { code: string }[] }) => s.joinCodes.map((jc) => jc.code),
+        (s: { joinCodes: { code: string }[] }) =>
+          s.joinCodes.map((jc) => jc.code),
       );
       for (const code of allCodes) {
         expect(code.startsWith(codePrefix)).toBe(true);
@@ -515,7 +535,8 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
     }, 60000);
 
     afterAll(async () => {
-      if (app && deactivateFixture) await teardownQaFixture(app, deactivateFixture);
+      if (app && deactivateFixture)
+        await teardownQaFixture(app, deactivateFixture);
     }, 60000);
 
     it('login is blocked while the school is inactive, and works again once reactivated', async () => {
@@ -544,7 +565,10 @@ describe('Admin schools CRUD + soft-delete/restore blast radius', () => {
         // the admin who deactivated it out of the platform.
         const adminLogin = await request(app.getHttpServer())
           .post('/auth/login')
-          .send({ email: 'admin@yugminds.com', password: process.env.ADMIN_SEED_PASSWORD });
+          .send({
+            email: 'admin@yugminds.com',
+            password: process.env.ADMIN_SEED_PASSWORD,
+          });
         expect([200, 201]).toContain(adminLogin.status);
       } finally {
         await request(app.getHttpServer())

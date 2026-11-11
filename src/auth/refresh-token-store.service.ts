@@ -135,7 +135,9 @@ export class RefreshTokenStoreService {
     try {
       const tokenIds = await this.redis.smembers(this.setKey(userId));
       if (tokenIds.length) {
-        await this.redis.del(...tokenIds.map((id) => this.tokenKey(userId, id)));
+        await this.redis.del(
+          ...tokenIds.map((id) => this.tokenKey(userId, id)),
+        );
       }
       await this.redis.del(this.setKey(userId));
     } catch (err) {

@@ -147,7 +147,9 @@ describe('school-admin notifications', () => {
     // from listWithProfiles and drop `total` entirely, so the frontend had
     // no way to paginate (it just fetched up to 100 rows in one shot).
     expect(typeof res.body.total).toBe('number');
-    expect(res.body.total).toBeGreaterThanOrEqual(res.body.notifications.length);
+    expect(res.body.total).toBeGreaterThanOrEqual(
+      res.body.notifications.length,
+    );
   });
 
   it('GET /school-admin/notifications honors limit/offset pagination', async () => {
@@ -170,7 +172,9 @@ describe('school-admin notifications', () => {
       .expect(200);
     expect(page1.body.notifications.length).toBe(1);
     expect(page2.body.notifications.length).toBe(1);
-    expect(page1.body.notifications[0].id).not.toBe(page2.body.notifications[0].id);
+    expect(page1.body.notifications[0].id).not.toBe(
+      page2.body.notifications[0].id,
+    );
   });
 
   it('GET /school-admin/notifications search param narrows to matching title/message', async () => {

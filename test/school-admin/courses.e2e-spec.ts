@@ -134,7 +134,9 @@ describe('school-admin courses + progress', () => {
       .set(...auth)
       .expect(200);
     expect(
-      afterList.body.courses.some((c: { id: string }) => c.id === extraCourseId),
+      afterList.body.courses.some(
+        (c: { id: string }) => c.id === extraCourseId,
+      ),
     ).toBe(false);
 
     const afterProgress = await request(app.getHttpServer())
@@ -227,10 +229,9 @@ describe('school-admin courses + progress', () => {
       expect(row.average_progress).toBeGreaterThan(0);
       expect(row.average_progress).toBeLessThan(50);
     } finally {
-      await pool.query(
-        'DELETE FROM "CourseProgress" WHERE "chapterId" = $1',
-        [chapterId],
-      );
+      await pool.query('DELETE FROM "CourseProgress" WHERE "chapterId" = $1', [
+        chapterId,
+      ]);
       await pool.query('DELETE FROM "Chapter" WHERE id = $1', [chapterId]);
     }
   });

@@ -59,7 +59,9 @@ export class AdminTeachersController {
 
   @Post('bulk')
   @Roles(Role.admin)
-  bulk(@Body() body: { action?: string; teacher_ids?: Array<number | string> }) {
+  bulk(
+    @Body() body: { action?: string; teacher_ids?: Array<number | string> },
+  ) {
     return this.service.bulk(body);
   }
 

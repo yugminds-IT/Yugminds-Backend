@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import {
   generateActivationNumber,
@@ -59,7 +63,9 @@ export class AdminLicensesService {
   /** UTC midnight for "today" so the encoded day index matches the desktop app. */
   private todayUtc(): Date {
     const now = new Date();
-    return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    return new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
   }
 
   private toIsoDate(d: Date): string {
@@ -107,7 +113,9 @@ export class AdminLicensesService {
     };
   }
 
-  async list(opts: { schoolId?: string; status?: string; search?: string } = {}) {
+  async list(
+    opts: { schoolId?: string; status?: string; search?: string } = {},
+  ) {
     const { schoolId, status, search } = opts;
     const where: Record<string, unknown> = {};
     if (schoolId) where.schoolId = schoolId;
@@ -150,7 +158,9 @@ export class AdminLicensesService {
   }
 
   private normalizeMachineId(raw: unknown): string {
-    const id = String(raw ?? '').trim().toUpperCase();
+    const id = String(raw ?? '')
+      .trim()
+      .toUpperCase();
     if (!/^[0-9A-F]{16}$/.test(id)) {
       throw new BadRequestException(
         'Machine ID must be exactly 16 hex characters (copy it from the desktop app)',
@@ -162,7 +172,9 @@ export class AdminLicensesService {
   private normalizeDays(raw: unknown): number {
     const days = Math.floor(Number(raw));
     if (!Number.isFinite(days) || days < 1 || days > 20000) {
-      throw new BadRequestException('Number of days must be an integer between 1 and 20000');
+      throw new BadRequestException(
+        'Number of days must be an integer between 1 and 20000',
+      );
     }
     return days;
   }
@@ -217,7 +229,9 @@ export class AdminLicensesService {
         secret: getLicenseSecret(),
       });
     } catch (e) {
-      throw new BadRequestException('Failed to generate key: ' + (e as Error).message);
+      throw new BadRequestException(
+        'Failed to generate key: ' + (e as Error).message,
+      );
     }
 
     const row = (await this.db.robocodersLicense.create({
@@ -256,7 +270,8 @@ export class AdminLicensesService {
     const activationKey = String(body.activationKey ?? '').trim();
     if (!schoolId) throw new BadRequestException('schoolId is required');
     if (!systemLabel) throw new BadRequestException('systemLabel is required');
-    if (!activationKey) throw new BadRequestException('activationKey is required');
+    if (!activationKey)
+      throw new BadRequestException('activationKey is required');
 
     const school = await this.validateSchool(schoolId);
     if (!school) throw new BadRequestException('School not found for given id');
@@ -286,12 +301,15 @@ export class AdminLicensesService {
       where: { schoolId, activationKey: canonical },
     });
     if (dup) {
-      throw new BadRequestException('This activation key is already stored for this school');
+      throw new BadRequestException(
+        'This activation key is already stored for this school',
+      );
     }
 
     const start = new Date(Date.parse(decoded.startDate! + 'T00:00:00Z'));
     const expiry = new Date(Date.parse(decoded.expiryDate! + 'T00:00:00Z'));
-    const durationDays = Math.round((expiry.getTime() - start.getTime()) / DAY_MS) + 1;
+    const durationDays =
+      Math.round((expiry.getTime() - start.getTime()) / DAY_MS) + 1;
 
     const row = (await this.db.robocodersLicense.create({
       data: {
@@ -324,7 +342,8 @@ export class AdminLicensesService {
       if (!label) throw new BadRequestException('systemLabel cannot be empty');
       data.systemLabel = label;
     }
-    if (body.notes !== undefined) data.notes = body.notes ? String(body.notes) : null;
+    if (body.notes !== undefined)
+      data.notes = body.notes ? String(body.notes) : null;
     if (body.isActive !== undefined) data.isActive = Boolean(body.isActive);
 
     // Any change to machine id / duration / start date (or an explicit regenerate)
@@ -363,7 +382,9 @@ export class AdminLicensesService {
           secret: getLicenseSecret(),
         });
       } catch (e) {
-        throw new BadRequestException('Failed to regenerate key: ' + (e as Error).message);
+        throw new BadRequestException(
+          'Failed to regenerate key: ' + (e as Error).message,
+        );
       }
       data.machineId = machineId;
       data.durationDays = durationDays;
@@ -386,7 +407,9 @@ export class AdminLicensesService {
 
   async remove(id: string) {
     if (!id) throw new BadRequestException('id is required');
-    const existing = await this.db.robocodersLicense.findUnique({ where: { id } });
+    const existing = await this.db.robocodersLicense.findUnique({
+      where: { id },
+    });
     if (!existing) throw new NotFoundException('License not found');
     await this.db.robocodersLicense.delete({ where: { id } });
     return { success: true };

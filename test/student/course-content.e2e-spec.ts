@@ -256,14 +256,18 @@ describe('Student course chapters — drip-unlock schedule', () => {
   );
 
   it(
-    "completing chapter A within the 7-day window does NOT unlock chapter B " +
+    'completing chapter A within the 7-day window does NOT unlock chapter B ' +
       "— still lock_reason: 'time' (proves AND, not OR)",
     async () => {
       const studentAuth = authHeader(fixture.students[0].token);
       await request(app.getHttpServer())
         .post('/student/save-chapter-progress')
         .set(...studentAuth)
-        .send({ courseId: fixture.courseId, chapterId: chapterAId, completed: true })
+        .send({
+          courseId: fixture.courseId,
+          chapterId: chapterAId,
+          completed: true,
+        })
         .expect(201);
 
       const res = await request(app.getHttpServer())
@@ -281,12 +285,14 @@ describe('Student course chapters — drip-unlock schedule', () => {
   it('GET .../chapters/:chapterId/contents on a locked chapter returns 403', async () => {
     const studentAuth = authHeader(fixture.students[0].token);
     await request(app.getHttpServer())
-      .get(`/student/courses/${fixture.courseId}/chapters/${chapterBId}/contents`)
+      .get(
+        `/student/courses/${fixture.courseId}/chapters/${chapterBId}/contents`,
+      )
       .set(...studentAuth)
       .expect(403);
   });
 
-  it('submitting the locked chapter\'s assignment is rejected', async () => {
+  it("submitting the locked chapter's assignment is rejected", async () => {
     const studentAuth = authHeader(fixture.students[0].token);
     const res = await request(app.getHttpServer())
       .post(`/student/assignments/${assignmentId}/submit`)
@@ -321,7 +327,9 @@ describe('Student course chapters — drip-unlock schedule', () => {
       expect(chapterB.lock_reason).toBeNull();
 
       await request(app.getHttpServer())
-        .get(`/student/courses/${fixture.courseId}/chapters/${chapterBId}/contents`)
+        .get(
+          `/student/courses/${fixture.courseId}/chapters/${chapterBId}/contents`,
+        )
         .set(...studentAuth)
         .expect(200);
 
@@ -335,7 +343,7 @@ describe('Student course chapters — drip-unlock schedule', () => {
   );
 
   it(
-    "for a DIFFERENT student, elapsed time alone does not unlock chapter B " +
+    'for a DIFFERENT student, elapsed time alone does not unlock chapter B ' +
       "if chapter A was never completed — lock_reason becomes 'sequential'",
     async () => {
       const studentAuth = authHeader(fixture.students[1].token);

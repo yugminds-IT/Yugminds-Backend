@@ -41,6 +41,17 @@ export class AdminCalendarController {
     });
   }
 
+  /** Who an entry affects: its schools, and the teachers with classes on those dates. `entry_ids` is comma-separated. */
+  @Get('impact')
+  impact(@Query('entry_ids') entryIds?: string) {
+    return this.service.impact(
+      (entryIds ?? '')
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean),
+    );
+  }
+
   /**
    * Per school: which weekdays (0=Sun..6=Sat) at least one teacher was
    * actually assigned to work there, as of `date` (defaults to today) —

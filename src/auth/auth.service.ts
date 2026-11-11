@@ -333,7 +333,7 @@ export class AuthService {
           success: a.success,
           failureReason: cut(a.failureReason, 300),
           ipAddress: cut(a.meta?.ip, 64),
-          userAgent: cut(a.meta?.userAgent as string | undefined, 500),
+          userAgent: cut(a.meta?.userAgent, 500),
         },
       });
     } catch {
@@ -798,6 +798,26 @@ export class AuthService {
   async invalidateAuthCacheFor(userIds: number[]): Promise<void> {
     for (let i = 0; i < userIds.length; i += 1000) {
       await this.authCache.invalidate(userIds.slice(i, i + 1000));
+    }
+  }
+
+  /**
+   * Signing in again from a browser that still holds an old refresh cookie replaces that browser's old session,
+   * instead of leaving a second "device" behind. The cookie must carry a valid signature (it may be expired).
+   */
+  async endBrowserSession(refreshCookie?: string): Promise<void> {
+    if (!refreshCookie) return;
+    try {
+      const p = await this.jwtService.verifyAsync<{
+        sub: number;
+        sid?: string;
+      }>(refreshCookie, {
+        secret: this.config.get<string>('JWT_REFRESH_SECRET'),
+        ignoreExpiration: true,
+      });
+      if (p.sid) await this.sessions.revoke('lms', p.sub, p.sid);
+    } catch {
+      /* not a token of ours: nothing to replace */
     }
   }
 

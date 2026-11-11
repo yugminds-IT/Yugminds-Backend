@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -26,7 +30,9 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const list = res.body?.data ?? res.body;
-    const codes = Array.isArray(list) ? list : (list?.codes ?? list?.joinCodes ?? []);
+    const codes = Array.isArray(list)
+      ? list
+      : (list?.codes ?? list?.joinCodes ?? []);
     expect(codes.length).toBeGreaterThan(0);
   });
 
@@ -55,7 +61,9 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const codesBody = list.body?.data ?? list.body;
-    const codes = Array.isArray(codesBody) ? codesBody : (codesBody?.codes ?? codesBody?.joinCodes ?? []);
+    const codes = Array.isArray(codesBody)
+      ? codesBody
+      : (codesBody?.codes ?? codesBody?.joinCodes ?? []);
     const target = codes[0];
     expect(target).toBeDefined();
 
@@ -80,12 +88,15 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const codesBody = list.body?.data ?? list.body;
-    const codes = Array.isArray(codesBody) ? codesBody : (codesBody?.codes ?? []);
+    const codes = Array.isArray(codesBody)
+      ? codesBody
+      : (codesBody?.codes ?? []);
     const created = codes.find((c: { code: string }) => c.code === code);
     expect(created).toBeDefined();
     expect(created.expires_at).toBeTruthy();
     const daysOut =
-      (new Date(created.expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24);
+      (new Date(created.expires_at).getTime() - Date.now()) /
+      (1000 * 60 * 60 * 24);
     expect(daysOut).toBeGreaterThan(350);
     expect(daysOut).toBeLessThan(380);
   });
@@ -94,7 +105,11 @@ describe('Admin joining-codes CRUD', () => {
     const createRes = await request(app.getHttpServer())
       .post('/admin/joining-codes')
       .set(...authHeader(fixture.admin.token))
-      .send({ schoolId: fixture.schoolId, grades: [fixture.grade], usageType: 'single' })
+      .send({
+        schoolId: fixture.schoolId,
+        grades: [fixture.grade],
+        usageType: 'single',
+      })
       .expect(201);
     const code = createRes.body?.codes?.[fixture.grade];
     expect(code).toBeDefined();
@@ -137,7 +152,8 @@ describe('Admin joining-codes CRUD', () => {
     // both are correct, independent layers of the same fix.
     const rejectionMsg = String(second.body.error ?? '').toLowerCase();
     expect(
-      rejectionMsg.includes('already been used') || rejectionMsg.includes('maximum uses'),
+      rejectionMsg.includes('already been used') ||
+        rejectionMsg.includes('maximum uses'),
     ).toBe(true);
 
     // Clean up the one real user account this test created (the second
@@ -149,7 +165,11 @@ describe('Admin joining-codes CRUD', () => {
     const createRes = await request(app.getHttpServer())
       .post('/admin/joining-codes')
       .set(...authHeader(fixture.admin.token))
-      .send({ schoolId: fixture.schoolId, grades: [fixture.grade], usageType: 'single' })
+      .send({
+        schoolId: fixture.schoolId,
+        grades: [fixture.grade],
+        usageType: 'single',
+      })
       .expect(201);
     const code = createRes.body?.codes?.[fixture.grade];
     expect(code).toBeDefined();
@@ -159,7 +179,9 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const codesBody = list.body?.data ?? list.body;
-    const codes = Array.isArray(codesBody) ? codesBody : (codesBody?.codes ?? []);
+    const codes = Array.isArray(codesBody)
+      ? codesBody
+      : (codesBody?.codes ?? []);
     const target = codes.find((c: { code: string }) => c.code === code);
     expect(target).toBeDefined();
 
@@ -178,7 +200,11 @@ describe('Admin joining-codes CRUD', () => {
       .post('/validate-joining-code')
       .send({
         code,
-        studentData: { full_name: 'QA Isolated', email, password: 'QaTest123!' },
+        studentData: {
+          full_name: 'QA Isolated',
+          email,
+          password: 'QaTest123!',
+        },
       })
       .expect(201);
     expect(first.body.success).toBe(true);
@@ -188,7 +214,9 @@ describe('Admin joining-codes CRUD', () => {
       .send({ code })
       .expect(201);
     expect(second.body.is_valid).toBe(false);
-    expect(String(second.body.message ?? '').toLowerCase()).toContain('already been used');
+    expect(String(second.body.message ?? '').toLowerCase()).toContain(
+      'already been used',
+    );
 
     await pool.query(`DELETE FROM "User" WHERE email = $1`, [email]);
   });
@@ -206,7 +234,9 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const codesBody = list.body?.data ?? list.body;
-    const codes = Array.isArray(codesBody) ? codesBody : (codesBody?.codes ?? []);
+    const codes = Array.isArray(codesBody)
+      ? codesBody
+      : (codesBody?.codes ?? []);
     const target = codes.find((c: { code: string }) => c.code === code);
     expect(target).toBeDefined();
 
@@ -220,8 +250,12 @@ describe('Admin joining-codes CRUD', () => {
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const afterBody = after.body?.data ?? after.body;
-    const afterCodes = Array.isArray(afterBody) ? afterBody : (afterBody?.codes ?? []);
-    expect(afterCodes.some((c: { id: string }) => c.id === target.id)).toBe(false);
+    const afterCodes = Array.isArray(afterBody)
+      ? afterBody
+      : (afterBody?.codes ?? []);
+    expect(afterCodes.some((c: { id: string }) => c.id === target.id)).toBe(
+      false,
+    );
 
     // Deleting an id that no longer exists is a client error, not a 500/200.
     const res = await request(app.getHttpServer())

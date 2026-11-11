@@ -56,7 +56,9 @@ describe('DigestService', () => {
 
       expect(result).toEqual({ recipients: 2 });
       expect(db.user.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { role: Role.admin, isActive: true } }),
+        expect.objectContaining({
+          where: { role: Role.admin, isActive: true },
+        }),
       );
       expect(notifications.createManyRespectingPrefs).toHaveBeenCalledTimes(1);
       expect(db.systemSetting.upsert).toHaveBeenCalledWith(

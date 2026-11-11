@@ -207,9 +207,11 @@ describe('school-admin reports (single + bulk, route-ordering regression guard)'
         .expect(200);
       // Same stats regardless of the page size requested.
       expect(full.body.stats).toEqual(capped.body.stats);
-      expect(full.body.stats.approved + full.body.stats.rejected + full.body.stats.pending).toBe(
-        full.body.stats.total,
-      );
+      expect(
+        full.body.stats.approved +
+          full.body.stats.rejected +
+          full.body.stats.pending,
+      ).toBe(full.body.stats.total);
     });
   });
 

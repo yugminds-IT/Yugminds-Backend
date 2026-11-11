@@ -57,7 +57,9 @@ describe('Teacher student-progress (real multi-school teacher, read-only)', () =
        GROUP BY s.id, s.name`,
       [teacherId],
     );
-    dawnBudsId = schools.rows.find((r: any) => r.name.includes('Dawn Buds'))?.id;
+    dawnBudsId = schools.rows.find((r: any) =>
+      r.name.includes('Dawn Buds'),
+    )?.id;
     stLouisId = schools.rows.find((r: any) => r.name.includes('St Louis'))?.id;
     expect(dawnBudsId).toBeDefined();
     expect(stLouisId).toBeDefined();

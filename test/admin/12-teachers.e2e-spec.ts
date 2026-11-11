@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -31,7 +35,9 @@ describe('Admin teachers CRUD + role matrix + cross-school isolation', () => {
     const list = res.body?.data ?? res.body;
     const teachers = Array.isArray(list) ? list : (list?.teachers ?? []);
     const ids = teachers.map((t: { id: number }) => t.id);
-    expect(ids).toEqual(expect.arrayContaining(fixtureA.teachers.map((t) => t.id)));
+    expect(ids).toEqual(
+      expect.arrayContaining(fixtureA.teachers.map((t) => t.id)),
+    );
   });
 
   it('GET /admin/teachers/:id (admin) returns detail', async () => {
@@ -85,7 +91,11 @@ describe('Admin teachers CRUD + role matrix + cross-school isolation', () => {
       const res = await request(app.getHttpServer())
         .post('/admin/teachers')
         .set(...authHeader(fixtureA.schoolAdmin.token))
-        .send({ email: 'x@example.test', password: 'QaTest123!', school_assignments: [] });
+        .send({
+          email: 'x@example.test',
+          password: 'QaTest123!',
+          school_assignments: [],
+        });
       expect(res.status).toBe(403);
     });
 
@@ -122,5 +132,4 @@ describe('Admin teachers CRUD + role matrix + cross-school isolation', () => {
       .expect(201);
     expect(res.body?.updated ?? res.body?.data?.updated).toBe(1);
   });
-
 });

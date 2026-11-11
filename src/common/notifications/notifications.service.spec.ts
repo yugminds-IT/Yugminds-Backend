@@ -128,6 +128,58 @@ describe('NotificationsService', () => {
     });
   });
 
+  describe('bulkUpdate', () => {
+    it('scopes every action to the caller and skips deleted rows', async () => {
+      db.notification.updateMany.mockResolvedValue({ count: 2 });
+      const res = await service.bulkUpdate(7, ['a', 'b', 'a'], 'read');
+      expect(db.notification.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['a', 'b'] }, userId: 7, deletedAt: null },
+        data: { readAt: expect.any(Date) },
+      });
+      expect(res).toEqual({ success: true, updated: 2 });
+    });
+
+    it('marks unread by clearing readAt', async () => {
+      db.notification.updateMany.mockResolvedValue({ count: 1 });
+      await service.bulkUpdate(7, ['a'], 'unread');
+      expect(db.notification.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { readAt: null } }),
+      );
+    });
+
+    it('soft-deletes', async () => {
+      db.notification.updateMany.mockResolvedValue({ count: 1 });
+      await service.bulkUpdate(7, ['a'], 'delete');
+      expect(db.notification.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { deletedAt: expect.any(Date) } }),
+      );
+    });
+
+    it('rejects an unknown action or an empty selection without touching the db', async () => {
+      await expect(service.bulkUpdate(7, ['a'], 'archive')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(service.bulkUpdate(7, [], 'read')).rejects.toThrow(
+        BadRequestException,
+      );
+      await expect(service.bulkUpdate(7, 'a', 'read')).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(db.notification.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('caps a selection at 200 ids', async () => {
+      db.notification.updateMany.mockResolvedValue({ count: 200 });
+      await service.bulkUpdate(
+        7,
+        Array.from({ length: 500 }, (_, i) => `n${i}`),
+        'read',
+      );
+      const where = db.notification.updateMany.mock.calls[0][0].where;
+      expect(where.id.in).toHaveLength(200);
+    });
+  });
+
   describe('listWithProfiles', () => {
     const baseRow = {
       id: 'n1',
@@ -140,7 +192,12 @@ describe('NotificationsService', () => {
       readAt: null as Date | null,
       broadcastId: null as string | null,
       createdAt: new Date('2026-07-27T08:00:00Z'),
-      user: { id: 1, email: 'admin@yugminds.com', role: 'admin', profile: { fullName: 'Admin' } },
+      user: {
+        id: 1,
+        email: 'admin@yugminds.com',
+        role: 'admin',
+        profile: { fullName: 'Admin' },
+      },
       sender: null as unknown,
       _count: { replies: 0 },
     };
@@ -165,7 +222,11 @@ describe('NotificationsService', () => {
     it('applies a search filter across title and message server-side', async () => {
       db.notification.findMany.mockResolvedValue([]);
 
-      await service.listWithProfiles(1, { mode: 'received', limit: 20, search: 'digest' });
+      await service.listWithProfiles(1, {
+        mode: 'received',
+        limit: 20,
+        search: 'digest',
+      });
 
       expect(db.notification.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -187,35 +248,59 @@ describe('NotificationsService', () => {
     it('applies a read/unread status filter for received mode', async () => {
       db.notification.findMany.mockResolvedValue([]);
 
-      await service.listWithProfiles(1, { mode: 'received', limit: 20, status: 'unread' });
+      await service.listWithProfiles(1, {
+        mode: 'received',
+        limit: 20,
+        status: 'unread',
+      });
 
       expect(db.notification.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ readAt: null }) }),
+        expect.objectContaining({
+          where: expect.objectContaining({ readAt: null }),
+        }),
       );
     });
 
     it('falls back to a synthetic "System" sender profile for null-sender received notifications', async () => {
-      db.notification.findMany.mockResolvedValue([{ ...baseRow, sender: null }]);
+      db.notification.findMany.mockResolvedValue([
+        { ...baseRow, sender: null },
+      ]);
 
-      const { items } = await service.listWithProfiles(1, { mode: 'received', limit: 20 });
+      const { items } = await service.listWithProfiles(1, {
+        mode: 'received',
+        limit: 20,
+      });
 
       expect(items[0].profiles).toEqual(
-        expect.objectContaining({ full_name: 'Yugminds System', role: 'system' }),
+        expect.objectContaining({
+          full_name: 'Yugminds System',
+          role: 'system',
+        }),
       );
     });
 
     it('does not synthesize a sender profile in sent mode (recipient profile always exists)', async () => {
-      db.notification.findMany.mockResolvedValue([{ ...baseRow, user: null as unknown }]);
+      db.notification.findMany.mockResolvedValue([
+        { ...baseRow, user: null as unknown },
+      ]);
 
-      const { items } = await service.listWithProfiles(1, { mode: 'sent', limit: 20 });
+      const { items } = await service.listWithProfiles(1, {
+        mode: 'sent',
+        limit: 20,
+      });
 
       expect(items[0].profiles).toBeUndefined();
     });
 
     it('exposes broadcast_id on each row for client-side fan-out grouping', async () => {
-      db.notification.findMany.mockResolvedValue([{ ...baseRow, broadcastId: 'b-1' }]);
+      db.notification.findMany.mockResolvedValue([
+        { ...baseRow, broadcastId: 'b-1' },
+      ]);
 
-      const { items } = await service.listWithProfiles(1, { mode: 'sent', limit: 20 });
+      const { items } = await service.listWithProfiles(1, {
+        mode: 'sent',
+        limit: 20,
+      });
 
       expect(items[0].broadcast_id).toBe('b-1');
     });
@@ -224,15 +309,33 @@ describe('NotificationsService', () => {
   describe('sendBroadcast', () => {
     it('stamps every created row with the same broadcastId', async () => {
       db.notification.findMany.mockResolvedValue([
-        { id: 'a', userId: 2, title: 'T', message: 'M', mode: 'general', allowReplies: true, createdAt: new Date() },
-        { id: 'b', userId: 3, title: 'T', message: 'M', mode: 'general', allowReplies: true, createdAt: new Date() },
+        {
+          id: 'a',
+          userId: 2,
+          title: 'T',
+          message: 'M',
+          mode: 'general',
+          allowReplies: true,
+          createdAt: new Date(),
+        },
+        {
+          id: 'b',
+          userId: 3,
+          title: 'T',
+          message: 'M',
+          mode: 'general',
+          allowReplies: true,
+          createdAt: new Date(),
+        },
       ]);
 
       await service.sendBroadcast(1, [2, 3], { title: 'T', message: 'M' });
 
       const createManyArg = db.notification.createMany.mock.calls[0][0];
       const broadcastIds = new Set(
-        (createManyArg.data as Array<{ broadcastId: string }>).map((d) => d.broadcastId),
+        (createManyArg.data as Array<{ broadcastId: string }>).map(
+          (d) => d.broadcastId,
+        ),
       );
       expect(broadcastIds.size).toBe(1);
       expect([...broadcastIds][0]).toEqual(expect.any(String));
@@ -242,7 +345,12 @@ describe('NotificationsService', () => {
   describe('in-app preference filtering', () => {
     it('sendOne skips create when recipient opted out of grade_posted', async () => {
       db.profile.findMany.mockResolvedValue([
-        { userId: 2, assignmentReminders: true, gradeNotifications: false, courseUpdates: true },
+        {
+          userId: 2,
+          assignmentReminders: true,
+          gradeNotifications: false,
+          courseUpdates: true,
+        },
       ]);
 
       const result = await service.sendOne(1, 2, {
@@ -257,8 +365,18 @@ describe('NotificationsService', () => {
 
     it('createManyRespectingPrefs drops opted-out recipients for assignment_due', async () => {
       db.profile.findMany.mockResolvedValue([
-        { userId: 2, assignmentReminders: false, gradeNotifications: true, courseUpdates: true },
-        { userId: 3, assignmentReminders: true, gradeNotifications: true, courseUpdates: true },
+        {
+          userId: 2,
+          assignmentReminders: false,
+          gradeNotifications: true,
+          courseUpdates: true,
+        },
+        {
+          userId: 3,
+          assignmentReminders: true,
+          gradeNotifications: true,
+          courseUpdates: true,
+        },
       ]);
 
       const sent = await service.createManyRespectingPrefs([
@@ -268,18 +386,25 @@ describe('NotificationsService', () => {
 
       expect(sent).toBe(1);
       expect(db.notification.createMany).toHaveBeenCalledWith({
-        data: [
-          expect.objectContaining({ userId: 3, mode: 'assignment_due' }),
-        ],
+        data: [expect.objectContaining({ userId: 3, mode: 'assignment_due' })],
       });
     });
 
     it('does not filter manual/general messages', async () => {
       db.profile.findMany.mockResolvedValue([
-        { userId: 2, assignmentReminders: false, gradeNotifications: false, courseUpdates: false },
+        {
+          userId: 2,
+          assignmentReminders: false,
+          gradeNotifications: false,
+          courseUpdates: false,
+        },
       ]);
 
-      await service.sendOne(1, 2, { title: 'Hi', message: 'Hello', type: 'general' });
+      await service.sendOne(1, 2, {
+        title: 'Hi',
+        message: 'Hello',
+        type: 'general',
+      });
 
       expect(db.profile.findMany).not.toHaveBeenCalled();
       expect(db.notification.create).toHaveBeenCalled();

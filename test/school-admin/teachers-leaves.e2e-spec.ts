@@ -119,10 +119,17 @@ describe('school-admin teachers list + leaves', () => {
 
       const { rows } = await pool.query(
         `SELECT status FROM "Attendance" WHERE "teacherId" = $1 AND "schoolId" = $2 AND date BETWEEN $3 AND $4`,
-        [fixture.teachers[0].id, fixture.schoolId, APPROVE_RANGE.start, APPROVE_RANGE.end],
+        [
+          fixture.teachers[0].id,
+          fixture.schoolId,
+          APPROVE_RANGE.start,
+          APPROVE_RANGE.end,
+        ],
       );
       expect(rows.length).toBeGreaterThan(0);
-      expect(rows.every((r: { status: string }) => r.status === 'Leave-Approved')).toBe(true);
+      expect(
+        rows.every((r: { status: string }) => r.status === 'Leave-Approved'),
+      ).toBe(true);
 
       // Teacher must get an in-app notification about the approval.
       const { rows: notifRows } = await pool.query(
@@ -165,10 +172,17 @@ describe('school-admin teachers list + leaves', () => {
 
       const { rows } = await pool.query(
         `SELECT status FROM "Attendance" WHERE "teacherId" = $1 AND "schoolId" = $2 AND date BETWEEN $3 AND $4`,
-        [fixture.teachers[0].id, fixture.schoolId, REJECT_RANGE.start, REJECT_RANGE.end],
+        [
+          fixture.teachers[0].id,
+          fixture.schoolId,
+          REJECT_RANGE.start,
+          REJECT_RANGE.end,
+        ],
       );
       expect(rows.length).toBeGreaterThan(0);
-      expect(rows.every((r: { status: string }) => r.status === 'Unreported')).toBe(true);
+      expect(
+        rows.every((r: { status: string }) => r.status === 'Unreported'),
+      ).toBe(true);
 
       // Teacher must get an in-app notification about the rejection.
       const { rows: rejectNotifs } = await pool.query(
@@ -183,11 +197,14 @@ describe('school-admin teachers list + leaves', () => {
     });
 
     it(
-      'rejects a PATCH with a missing/invalid action instead of silently no-op\'ing ' +
-        '(regression: this used to fall back to the leave\'s current status and return 200 ' +
+      "rejects a PATCH with a missing/invalid action instead of silently no-op'ing " +
+        "(regression: this used to fall back to the leave's current status and return 200 " +
         'OK with no actual change, unlike the equivalent admin endpoint which already threw)',
       async () => {
-        const thirdLeaveId = await createLeave({ start: '2026-08-17', end: '2026-08-18' });
+        const thirdLeaveId = await createLeave({
+          start: '2026-08-17',
+          end: '2026-08-18',
+        });
 
         const missingBody = await request(app.getHttpServer())
           .patch(`/school-admin/leaves/${thirdLeaveId}`)

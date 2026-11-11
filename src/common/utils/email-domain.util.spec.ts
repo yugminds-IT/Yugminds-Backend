@@ -12,26 +12,40 @@ describe('normalizeEmailDomain', () => {
     expect(normalizeEmailDomain('snthighschool.com')).toBe('snthighschool.com');
   });
 
-  it.each(['snt', 'snt..edu', '-snt.edu', 'snt.edu-', 'a@b.com', 'snt edu.in', 'snt.c'])(
-    'rejects %s',
-    (bad) => {
-      expect(() => normalizeEmailDomain(bad)).toThrow(/Invalid email domain/);
-    },
-  );
+  it.each([
+    'snt',
+    'snt..edu',
+    '-snt.edu',
+    'snt.edu-',
+    'a@b.com',
+    'snt edu.in',
+    'snt.c',
+  ])('rejects %s', (bad) => {
+    expect(() => normalizeEmailDomain(bad)).toThrow(/Invalid email domain/);
+  });
 });
 
 describe('applyEmailDomain', () => {
   it('appends the domain to a bare local part', () => {
-    expect(applyEmailDomain('ravi', 'snt.edu.in')).toEqual({ email: 'ravi@snt.edu.in' });
+    expect(applyEmailDomain('ravi', 'snt.edu.in')).toEqual({
+      email: 'ravi@snt.edu.in',
+    });
   });
 
   it('keeps emails already on the domain', () => {
-    expect(applyEmailDomain('ravi@snt.edu.in', 'snt.edu.in')).toEqual({ email: 'ravi@snt.edu.in' });
+    expect(applyEmailDomain('ravi@snt.edu.in', 'snt.edu.in')).toEqual({
+      email: 'ravi@snt.edu.in',
+    });
   });
 
-  it.each(['ravi smith', '@snt.edu.in', 'a@b@snt.edu.in'])('rejects malformed %s', (bad) => {
-    expect(applyEmailDomain(bad, 'snt.edu.in')).toEqual({ error: 'Invalid email address' });
-  });
+  it.each(['ravi smith', '@snt.edu.in', 'a@b@snt.edu.in'])(
+    'rejects malformed %s',
+    (bad) => {
+      expect(applyEmailDomain(bad, 'snt.edu.in')).toEqual({
+        error: 'Invalid email address',
+      });
+    },
+  );
 
   it('rejects emails on another domain', () => {
     expect(applyEmailDomain('ravi@gmail.com', 'snt.edu.in')).toEqual({

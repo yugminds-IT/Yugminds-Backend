@@ -45,7 +45,11 @@ describe('TeacherScheduleService', () => {
     db.teacherWorkingDaysHistory.findMany.mockResolvedValue([
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4, 5] },
     ]);
-    const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-20'));
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-20'),
+    );
     expect(result.workingSchoolIds).toEqual(['school-a']);
     expect(result.holidaySchoolIds).toEqual([]);
     expect(result.offScheduleSchoolIds).toEqual([]);
@@ -56,7 +60,11 @@ describe('TeacherScheduleService', () => {
     db.teacherWorkingDaysHistory.findMany.mockResolvedValue([
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4] },
     ]);
-    const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-24'));
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-24'),
+    );
     expect(result.offScheduleSchoolIds).toEqual(['school-a']);
     expect(result.workingSchoolIds).toEqual([]);
   });
@@ -68,10 +76,17 @@ describe('TeacherScheduleService', () => {
     calendar.getHolidayDatesForMonth.mockResolvedValue([
       { date: '2026-07-20', type: 'Holiday', name: 'Diwali' },
     ]);
-    const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-20'));
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-20'),
+    );
     expect(result.holidaySchoolIds).toEqual(['school-a']);
     expect(result.workingSchoolIds).toEqual([]);
-    expect(result.holidays['school-a']).toEqual({ name: 'Diwali', type: 'Holiday' });
+    expect(result.holidays['school-a']).toEqual({
+      name: 'Diwali',
+      type: 'Holiday',
+    });
   });
 
   it('treats a declared compensatory-work day as working even outside the weekly pattern', async () => {
@@ -80,7 +95,11 @@ describe('TeacherScheduleService', () => {
       { effectiveFrom: d('2026-07-01'), workingDays: [1, 2, 3, 4, 5] },
     ]);
     calendar.getCompensatoryDatesForMonth.mockResolvedValue(['2026-07-25']);
-    const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-25'));
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-25'),
+    );
     expect(result.workingSchoolIds).toEqual(['school-a']);
     expect(result.offScheduleSchoolIds).toEqual([]);
   });
@@ -106,7 +125,11 @@ describe('TeacherScheduleService', () => {
 
   it('classifies a school with no working-days history yet as off-schedule (not working)', async () => {
     db.teacherWorkingDaysHistory.findMany.mockResolvedValue([]);
-    const result = await service.getWorkStatusForDate(1, ['school-a'], d('2026-07-20'));
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-20'),
+    );
     expect(result.offScheduleSchoolIds).toEqual(['school-a']);
     expect(result.workingSchoolIds).toEqual([]);
   });

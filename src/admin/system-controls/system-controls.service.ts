@@ -19,6 +19,38 @@ export interface SystemControls {
   feature_flags: Record<string, boolean>;
 }
 
+const MAX_TEXT = 500;
+const LEVELS: Announcement['level'][] = ['info', 'warning', 'critical'];
+const FLAG_NAME = /^[\w.-]{1,64}$/;
+
+/** A usable announcement from whatever was stored or sent: real booleans and text only, a known level. */
+function cleanAnnouncement(raw: unknown, base: Announcement): Announcement {
+  const a =
+    raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  return {
+    enabled: typeof a.enabled === 'boolean' ? a.enabled : base.enabled,
+    text: typeof a.text === 'string' ? a.text.slice(0, MAX_TEXT) : base.text,
+    level: LEVELS.includes(a.level as Announcement['level'])
+      ? (a.level as Announcement['level'])
+      : base.level,
+  };
+}
+
+/** Only well-formed names with a real on/off value, at most 100. */
+function cleanFlags(raw: unknown): Record<string, boolean> {
+  const out: Record<string, boolean> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>).slice(
+    0,
+    100,
+  )) {
+    if (FLAG_NAME.test(k) && typeof v === 'boolean') out[k] = v;
+  }
+  return out;
+}
+
 const DEFAULT_CONTROLS: SystemControls = {
   maintenance_mode: false,
   maintenance_message:
@@ -65,10 +97,17 @@ export class SystemControlsService {
     };
     const data: SystemControls = {
       maintenance_mode: byKey.get(KEY_MAINTENANCE) === 'true',
+      // a blank message must never reach people: they would read nothing at sign-in
       maintenance_message:
-        byKey.get(KEY_MAINTENANCE_MESSAGE) ?? DEFAULT_CONTROLS.maintenance_message,
-      announcement: parseJson(byKey.get(KEY_ANNOUNCEMENT), DEFAULT_CONTROLS.announcement),
-      feature_flags: parseJson(byKey.get(KEY_FEATURE_FLAGS), {}),
+        (byKey.get(KEY_MAINTENANCE_MESSAGE) ?? '').trim() ||
+        DEFAULT_CONTROLS.maintenance_message,
+      announcement: cleanAnnouncement(
+        parseJson<unknown>(byKey.get(KEY_ANNOUNCEMENT), null),
+        DEFAULT_CONTROLS.announcement,
+      ),
+      feature_flags: cleanFlags(
+        parseJson<unknown>(byKey.get(KEY_FEATURE_FLAGS), {}),
+      ),
     };
     this.cache = { data, expiresAt: Date.now() + this.TTL_MS };
     return data;
@@ -91,21 +130,24 @@ export class SystemControlsService {
       await this.writeKey(KEY_MAINTENANCE, String(body.maintenance_mode));
     }
     if (typeof body.maintenance_message === 'string') {
-      await this.writeKey(KEY_MAINTENANCE_MESSAGE, body.maintenance_message.slice(0, 500));
+      await this.writeKey(
+        KEY_MAINTENANCE_MESSAGE,
+        body.maintenance_message.trim().slice(0, MAX_TEXT),
+      );
     }
     if (body.announcement && typeof body.announcement === 'object') {
-      const a = body.announcement;
-      const clean: Announcement = {
-        enabled: !!a.enabled,
-        text: String(a.text ?? '').slice(0, 500),
-        level: ['info', 'warning', 'critical'].includes(a.level) ? a.level : 'info',
-      };
-      await this.writeKey(KEY_ANNOUNCEMENT, JSON.stringify(clean));
+      // Parts that are not sent keep their current value, so sending only { enabled: false } does not wipe the text.
+      const current = (await this.readAll()).announcement;
+      await this.writeKey(
+        KEY_ANNOUNCEMENT,
+        JSON.stringify(cleanAnnouncement(body.announcement, current)),
+      );
     }
     if (body.feature_flags && typeof body.feature_flags === 'object') {
+      // The flags sent are the complete list: anything left out is removed.
       const clean: Record<string, boolean> = {};
       for (const [k, v] of Object.entries(body.feature_flags).slice(0, 100)) {
-        if (/^[\w.-]{1,64}$/.test(k)) clean[k] = !!v;
+        if (FLAG_NAME.test(k)) clean[k] = !!v;
       }
       await this.writeKey(KEY_FEATURE_FLAGS, JSON.stringify(clean));
     }
@@ -120,9 +162,18 @@ export class SystemControlsService {
     announcement: Announcement;
     feature_flags: Record<string, boolean>;
   }> {
-    const { maintenance_mode, maintenance_message, announcement, feature_flags } =
-      await this.readAll();
-    return { maintenance_mode, maintenance_message, announcement, feature_flags };
+    const {
+      maintenance_mode,
+      maintenance_message,
+      announcement,
+      feature_flags,
+    } = await this.readAll();
+    return {
+      maintenance_mode,
+      maintenance_message,
+      announcement,
+      feature_flags,
+    };
   }
 
   /** Used by the login flow to block non-admin sign-ins during maintenance. */

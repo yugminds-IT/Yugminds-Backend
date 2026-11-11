@@ -23,7 +23,11 @@ export class AdminDashboardController {
     @Query('to') to?: string,
     @Query('force') force?: string,
   ) {
-    return this.service.getAnalytics(from, to, force === 'true' || force === '1');
+    return this.service.getAnalytics(
+      from,
+      to,
+      force === 'true' || force === '1',
+    );
   }
 
   @Get('assignment-analytics')
@@ -37,8 +41,20 @@ export class AdminDashboardController {
   }
 
   @Get('monitoring-dashboard')
-  getMonitoring() {
-    return this.service.getMonitoring();
+  getMonitoring(
+    @Query('role') role?: string,
+    @Query('school_id') schoolId?: string,
+  ) {
+    return this.service.getMonitoring(role, schoolId);
+  }
+
+  @Get('monitoring-history')
+  getMonitoringHistory(
+    @Query('hours') hours?: string,
+    @Query('role') role?: string,
+    @Query('school_id') schoolId?: string,
+  ) {
+    return this.service.getMonitoringHistory(hours, role, schoolId);
   }
 
   @Get('materialized-view-stats')

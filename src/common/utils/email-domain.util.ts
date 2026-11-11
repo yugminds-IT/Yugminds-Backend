@@ -1,4 +1,5 @@
-const DOMAIN_RE = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+const DOMAIN_RE =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
 const LOCAL_PART_RE = /^[^\s@]{1,64}$/;
 
 /**
@@ -10,7 +11,9 @@ export function normalizeEmailDomain(raw: unknown): string | null {
   const domain = String(raw).trim().toLowerCase().replace(/^@/, '');
   if (!domain) return null;
   if (!DOMAIN_RE.test(domain)) {
-    throw new Error(`Invalid email domain "${domain}" (expected something like school.edu.in)`);
+    throw new Error(
+      `Invalid email domain "${domain}" (expected something like school.edu.in)`,
+    );
   }
   return domain;
 }

@@ -5,7 +5,11 @@ import { DatabaseService } from '../../database/database.service';
 describe('AdminTeacherReportsService', () => {
   let service: AdminTeacherReportsService;
   let db: {
-    teacherReport: { findMany: jest.Mock; deleteMany: jest.Mock; count: jest.Mock };
+    teacherReport: {
+      findMany: jest.Mock;
+      deleteMany: jest.Mock;
+      count: jest.Mock;
+    };
     user: { findMany: jest.Mock };
     school: { findMany: jest.Mock };
   };
@@ -31,6 +35,53 @@ describe('AdminTeacherReportsService', () => {
     service = module.get<AdminTeacherReportsService>(
       AdminTeacherReportsService,
     );
+  });
+
+  describe('subject', () => {
+    const report = (over: Record<string, unknown> = {}) => ({
+      id: 'r1',
+      teacherId: 5,
+      schoolId: 's1',
+      periodId: 'p1',
+      reportDate: new Date('2026-11-10T00:00:00Z'),
+      grade: 'Grade 4',
+      section: 'Section A',
+      topicsTaught: 'Physical Education and maths',
+      studentCount: 1,
+      durationHours: 1,
+      notes: null,
+      adminNotes: null,
+      status: 'submitted',
+      createdAt: new Date(),
+      subject: null,
+      subjectSource: null,
+      ...over,
+    });
+
+    it('returns the subject the teacher chose, and where it came from', async () => {
+      db.teacherReport.findMany.mockResolvedValue([
+        report({ subject: 'Robotics', subjectSource: 'teacher' }),
+      ]);
+      const r = (await service.list({})).reports[0];
+      expect(r.subject).toBe('Robotics');
+      expect(r.subject_source).toBe('teacher');
+    });
+
+    it('marks reports filled in from the timetable', async () => {
+      db.teacherReport.findMany.mockResolvedValue([
+        report({ subject: 'Coding', subjectSource: 'timetable' }),
+      ]);
+      expect((await service.list({})).reports[0].subject_source).toBe(
+        'timetable',
+      );
+    });
+
+    it('leaves the subject empty when none was recorded, and never reads it from the topic text', async () => {
+      db.teacherReport.findMany.mockResolvedValue([report()]);
+      const r = (await service.list({})).reports[0];
+      expect(r.subject).toBe('');
+      expect(r.subject_source).toBe('');
+    });
   });
 
   describe('list', () => {
@@ -169,7 +220,9 @@ describe('AdminTeacherReportsService', () => {
     it('count() queries omit the status filter so stats reflect all statuses, even when the list itself is status-filtered', async () => {
       await service.list({ status: 'approved', schoolId: 'school-1' });
 
-      const countCalls = db.teacherReport.count.mock.calls.map((c) => c[0].where);
+      const countCalls = db.teacherReport.count.mock.calls.map(
+        (c) => c[0].where,
+      );
       // None of the 5 count() calls should be scoped to only 'approved' as
       // the sole where.status — the "total" call in particular must not
       // inherit the list's status filter.

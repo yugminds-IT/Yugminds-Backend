@@ -37,9 +37,8 @@ async function queryWithRetry<T>(
       return await fn();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      const isConnLimit = /remaining connection slots|too many.*connections/i.test(
-        msg,
-      );
+      const isConnLimit =
+        /remaining connection slots|too many.*connections/i.test(msg);
       if (!isConnLimit || i === attempts - 1) throw e;
       await new Promise((r) => setTimeout(r, 500 * (i + 1)));
     }

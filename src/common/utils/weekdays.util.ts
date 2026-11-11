@@ -4,7 +4,10 @@
  * TeacherSchool.workingDays (AdminTeachersService) and School.operatingDays
  * (AdminSchoolsService) so both use the exact same normalization rules.
  */
-export function normalizeWeekdays(input: unknown, fallback: number[]): number[] {
+export function normalizeWeekdays(
+  input: unknown,
+  fallback: number[],
+): number[] {
   if (!Array.isArray(input)) return fallback;
   const days = [
     ...new Set(

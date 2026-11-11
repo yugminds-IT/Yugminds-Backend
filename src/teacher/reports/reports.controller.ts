@@ -23,6 +23,7 @@ export class TeacherReportsController {
       section: body.section as string | undefined,
       date: body.date as string,
       period_id: body.period_id as string | undefined,
+      subject: body.subject as string | undefined,
       start_time: body.start_time as string | undefined,
       end_time: body.end_time as string | undefined,
       topics_taught: body.topics_taught as string | undefined,

@@ -7,7 +7,12 @@ import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import { AdminSchoolsService } from '../schools/schools.service';
 
-export type TrashEntityType = 'students' | 'teachers' | 'schools' | 'courses';
+export type TrashEntityType =
+  | 'students'
+  | 'teachers'
+  | 'school_admins'
+  | 'schools'
+  | 'courses';
 
 @Injectable()
 export class TrashService {
@@ -21,7 +26,7 @@ export class TrashService {
       this.db.user.findMany({
         where: {
           deletedAt: { not: null },
-          role: { in: [Role.student, Role.teacher] },
+          role: { in: [Role.student, Role.teacher, Role.school_admin] },
         },
         select: {
           id: true,
@@ -58,6 +63,9 @@ export class TrashService {
     return {
       students: users.filter((u) => u.role === Role.student).map(mapUser),
       teachers: users.filter((u) => u.role === Role.teacher).map(mapUser),
+      school_admins: users
+        .filter((u) => u.role === Role.school_admin)
+        .map(mapUser),
       schools: schools.map((s) => ({
         id: s.id,
         name: s.name,
@@ -76,7 +84,8 @@ export class TrashService {
   async restore(entityType: TrashEntityType, id: string) {
     switch (entityType) {
       case 'students':
-      case 'teachers': {
+      case 'teachers':
+      case 'school_admins': {
         const userId = parseInt(id, 10);
         const user = await this.db.user.findFirst({
           where: { id: userId, deletedAt: { not: null } },
@@ -86,6 +95,12 @@ export class TrashService {
           where: { id: userId },
           data: { deletedAt: null, isActive: true },
         });
+        // Trashing switched their enrollments off; switch them back on.
+        if (user.role === Role.student)
+          await this.db.studentSchool.updateMany({
+            where: { studentId: userId },
+            data: { isActive: true },
+          });
         return { success: true };
       }
       case 'schools': {
@@ -117,7 +132,9 @@ export class TrashService {
         return { success: true };
       }
       default:
-        throw new BadRequestException(`Unknown entity type: ${String(entityType)}`);
+        throw new BadRequestException(
+          `Unknown entity type: ${String(entityType)}`,
+        );
     }
   }
 
@@ -125,7 +142,8 @@ export class TrashService {
   async purge(entityType: TrashEntityType, id: string) {
     switch (entityType) {
       case 'students':
-      case 'teachers': {
+      case 'teachers':
+      case 'school_admins': {
         const userId = parseInt(id, 10);
         const user = await this.db.user.findFirst({
           where: { id: userId, deletedAt: { not: null } },
@@ -135,7 +153,11 @@ export class TrashService {
         // survive a teacher being soft-deleted so history stays visible), so
         // a hard delete here would otherwise leave orphaned report rows that
         // can never resolve a teacher name again ("Unknown" in the admin UI).
-        await this.db.teacherReport.deleteMany({ where: { teacherId: userId } });
+        if (user.role === Role.school_admin)
+          await this.db.schoolAdmin.deleteMany({ where: { userId } });
+        await this.db.teacherReport.deleteMany({
+          where: { teacherId: userId },
+        });
         // Same gap for TeacherLeave — its teacherId relation isn't enforced
         // at the DB level either, so it would otherwise survive as a
         // permanently-orphaned "pending" leave request no admin can ever
@@ -169,7 +191,9 @@ export class TrashService {
         return { success: true };
       }
       default:
-        throw new BadRequestException(`Unknown entity type: ${String(entityType)}`);
+        throw new BadRequestException(
+          `Unknown entity type: ${String(entityType)}`,
+        );
     }
   }
 }

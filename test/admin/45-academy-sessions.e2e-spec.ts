@@ -9,8 +9,10 @@ describe('Academy device sessions', () => {
   let http: ReturnType<INestApplication['getHttpServer']>;
   const email = `__qa_academy_${Date.now()}@example.test`;
   const password = 'QaAcademy123!';
-  const CHROME = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36';
-  const IPHONE = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1';
+  const CHROME =
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36';
+  const IPHONE =
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 Version/17.5 Mobile/15E148 Safari/604.1';
 
   beforeAll(async () => {
     app = await bootstrapApp();
@@ -22,30 +24,51 @@ describe('Academy device sessions', () => {
   }, 60000);
 
   afterAll(async () => {
-    const r = await pool.query('SELECT id FROM "AcademyAccount" WHERE email = $1', [email]);
+    const r = await pool.query(
+      'SELECT id FROM "AcademyAccount" WHERE email = $1',
+      [email],
+    );
     if (r.rows[0]) {
-      await pool.query(`DELETE FROM "LoginSession" WHERE "subjectType"='academy' AND "subjectId"=$1`, [r.rows[0].id]);
-      await pool.query('DELETE FROM "AcademyAccount" WHERE id = $1', [r.rows[0].id]);
+      await pool.query(
+        `DELETE FROM "LoginSession" WHERE "subjectType"='academy' AND "subjectId"=$1`,
+        [r.rows[0].id],
+      );
+      await pool.query('DELETE FROM "AcademyAccount" WHERE id = $1', [
+        r.rows[0].id,
+      ]);
     }
     if (app) await app.close();
     await closePool();
   }, 30000);
 
   const cookieOf = (res: request.Response, name: string) =>
-    (res.headers['set-cookie'] as unknown as string[]).find((c) => c.startsWith(`${name}=`))!.split(';')[0];
+    (res.headers['set-cookie'] as unknown as string[])
+      .find((c) => c.startsWith(`${name}=`))!
+      .split(';')[0];
 
   const login = async (ua: string) => {
-    const res = await request(http).post('/academy/auth/login').set('User-Agent', ua).send({ email, password }).expect(200);
+    const res = await request(http)
+      .post('/academy/auth/login')
+      .set('User-Agent', ua)
+      .send({ email, password })
+      .expect(200);
     return { at: cookieOf(res, 'ac_at'), rt: cookieOf(res, 'ac_rt') };
   };
   const list = async (c: { at: string }) =>
-    (await request(http).get('/academy/auth/sessions').set('Cookie', c.at).expect(200)).body.sessions as Array<{
+    (
+      await request(http)
+        .get('/academy/auth/sessions')
+        .set('Cookie', c.at)
+        .expect(200)
+    ).body.sessions as Array<{
       id: string;
       current: boolean;
       deviceType: string;
     }>;
-  const me = (c: { at: string }) => request(http).get('/academy/auth/me').set('Cookie', c.at);
-  const refresh = (c: { rt: string }) => request(http).post('/academy/auth/refresh').set('Cookie', c.rt);
+  const me = (c: { at: string }) =>
+    request(http).get('/academy/auth/me').set('Cookie', c.at);
+  const refresh = (c: { rt: string }) =>
+    request(http).post('/academy/auth/refresh').set('Cookie', c.rt);
 
   it('lists devices, flags the current one', async () => {
     const a = await login(CHROME);
@@ -60,7 +83,10 @@ describe('Academy device sessions', () => {
     const a = await login(CHROME);
     const b = await login(IPHONE);
     const bId = (await list(b)).find((s) => s.current)!.id;
-    await request(http).delete(`/academy/auth/sessions/${bId}`).set('Cookie', a.at).expect(200);
+    await request(http)
+      .delete(`/academy/auth/sessions/${bId}`)
+      .set('Cookie', a.at)
+      .expect(200);
     await me(b).expect(401);
     await refresh(b).expect(401);
     await me(a).expect(200);
@@ -69,7 +95,10 @@ describe('Academy device sessions', () => {
   it('logout ends only the calling device', async () => {
     const a = await login(CHROME);
     const b = await login(IPHONE);
-    await request(http).post('/academy/auth/logout').set('Cookie', `${a.at}; ${a.rt}`).expect(200);
+    await request(http)
+      .post('/academy/auth/logout')
+      .set('Cookie', `${a.at}; ${a.rt}`)
+      .expect(200);
     await me(a).expect(401);
     await refresh(a).expect(401);
     await me(b).expect(200);
@@ -78,10 +107,16 @@ describe('Academy device sessions', () => {
   it('revoke-others spares this device; revoke-all ends everything', async () => {
     const a = await login(CHROME);
     const b = await login(IPHONE);
-    await request(http).post('/academy/auth/sessions/revoke-others').set('Cookie', a.at).expect(200);
+    await request(http)
+      .post('/academy/auth/sessions/revoke-others')
+      .set('Cookie', a.at)
+      .expect(200);
     await me(a).expect(200);
     await me(b).expect(401);
-    await request(http).post('/academy/auth/sessions/revoke-all').set('Cookie', a.at).expect(200);
+    await request(http)
+      .post('/academy/auth/sessions/revoke-all')
+      .set('Cookie', a.at)
+      .expect(200);
     await me(a).expect(401);
     await refresh(a).expect(401);
   });

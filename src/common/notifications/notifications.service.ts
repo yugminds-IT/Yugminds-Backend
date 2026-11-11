@@ -511,6 +511,51 @@ export class NotificationsService {
   }
 
   /**
+   * Mark many of the caller's own notifications as read or unread, or delete them.
+   * Ids that are not the caller's (or already deleted) are skipped, never an error.
+   */
+  async bulkUpdate(
+    userId: number,
+    ids: unknown,
+    action: unknown,
+  ): Promise<{ success: boolean; updated: number }> {
+    if (action !== 'read' && action !== 'unread' && action !== 'delete') {
+      throw new BadRequestException('action must be read, unread or delete');
+    }
+    const unique = [
+      ...new Set(
+        (Array.isArray(ids) ? ids : []).filter(
+          (i): i is string => typeof i === 'string' && i.length > 0,
+        ),
+      ),
+    ].slice(0, 200);
+    if (unique.length === 0) {
+      throw new BadRequestException('Provide at least one notification id');
+    }
+
+    const res = await this.db.notification.updateMany({
+      where: { id: { in: unique }, userId, deletedAt: null },
+      data:
+        action === 'delete'
+          ? { deletedAt: new Date() }
+          : { readAt: action === 'read' ? new Date() : null },
+    });
+
+    if (res.count > 0) {
+      const unreadCount = await this.getUnreadCount(userId);
+      if (action === 'read') {
+        this.realtimeGateway.emitNotificationRead(userId, {
+          mark_all: false,
+          read_at: new Date().toISOString(),
+        });
+      }
+      this.realtimeGateway.emitUnreadCount(userId, unreadCount);
+      await this.realtimeGateway.emitDashboardStatsForUser(userId);
+    }
+    return { success: true, updated: res.count };
+  }
+
+  /**
    * Mark one notification as read/unread or delete it.
    * Used by role-scoped PATCH endpoints (teacher, school-admin).
    * The caller must verify the notification belongs to userId before calling.

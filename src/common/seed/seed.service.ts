@@ -16,7 +16,9 @@ export class SeedService implements OnApplicationBootstrap {
     try {
       await this.seedAdmin();
     } catch (err) {
-      this.logger.warn(`Seed skipped — database unreachable at startup: ${err.message}`);
+      this.logger.warn(
+        `Seed skipped — database unreachable at startup: ${err.message}`,
+      );
     }
   }
 

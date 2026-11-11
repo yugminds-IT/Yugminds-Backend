@@ -2,6 +2,7 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { AdminDashboardService } from './dashboard.service';
 import { DatabaseService } from '../../database/database.service';
 import { MonitoringService } from '../../common/monitoring/monitoring.service';
+import { MonitoringHistoryService } from '../../common/monitoring/monitoring-history.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 
 describe('AdminDashboardService', () => {
@@ -9,12 +10,14 @@ describe('AdminDashboardService', () => {
   let db: {
     tenant: { count: jest.Mock; findMany: jest.Mock };
     user: { count: jest.Mock; findMany: jest.Mock };
-    course: { count: jest.Mock };
+    course: { count: jest.Mock; findMany: jest.Mock };
+    chapter: { findMany: jest.Mock };
+    chapterContent: { findMany: jest.Mock };
     attendance: { findMany: jest.Mock };
     courseProgress: { findMany: jest.Mock };
     school: { findMany: jest.Mock };
     studentSchool: { groupBy: jest.Mock };
-    studentCourse: { groupBy: jest.Mock };
+    studentCourse: { groupBy: jest.Mock; findMany: jest.Mock };
     $queryRaw: jest.Mock;
   };
   let monitoring: { getSnapshot: jest.Mock };
@@ -38,12 +41,20 @@ describe('AdminDashboardService', () => {
         count: countMock(3, 0),
         findMany: jest.fn().mockResolvedValue([]),
       },
-      course: { count: countMock(2, 0) },
+      course: {
+        count: countMock(2, 0),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      chapter: { findMany: jest.fn().mockResolvedValue([]) },
+      chapterContent: { findMany: jest.fn().mockResolvedValue([]) },
       attendance: { findMany: jest.fn().mockResolvedValue([]) },
       courseProgress: { findMany: jest.fn().mockResolvedValue([]) },
       school: { findMany: jest.fn().mockResolvedValue([]) },
       studentSchool: { groupBy: jest.fn().mockResolvedValue([]) },
-      studentCourse: { groupBy: jest.fn().mockResolvedValue([]) },
+      studentCourse: {
+        groupBy: jest.fn().mockResolvedValue([]),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
       $queryRaw: jest.fn().mockResolvedValue([]),
     };
     monitoring = {
@@ -57,6 +68,7 @@ describe('AdminDashboardService', () => {
         AdminDashboardService,
         { provide: DatabaseService, useValue: db },
         { provide: MonitoringService, useValue: monitoring },
+        { provide: MonitoringHistoryService, useValue: { history: jest.fn() } },
         {
           provide: StudentRankingService,
           useValue: { getSystemLeaderboard: jest.fn().mockResolvedValue([]) },
@@ -105,6 +117,109 @@ describe('AdminDashboardService', () => {
     });
   });
 
+  describe('health numbers', () => {
+    const rec = (teacherId: number, status: string) => ({ teacherId, status });
+
+    it('leaves approved leave out of the attendance rate and counts Unreported against it', async () => {
+      db.attendance.findMany.mockResolvedValue([
+        rec(1, 'Present'),
+        rec(1, 'Present'),
+        rec(1, 'Leave-Approved'),
+        rec(1, 'Unreported'),
+      ]);
+      const r = (await service.getAnalytics(undefined, undefined, true)) as {
+        analytics: { avgAttendance: number };
+      };
+      expect(r.analytics.avgAttendance).toBe(67); // 2 present of 3 counted days, leave ignored
+    });
+
+    it('does not mark a teacher with no attendance records as needing attention', async () => {
+      db.user.findMany.mockImplementation(
+        (args: { where: { role?: string } }) =>
+          Promise.resolve(
+            args.where.role === 'teacher' ? [{ id: 1 }, { id: 2 }] : [],
+          ),
+      );
+      db.attendance.findMany.mockResolvedValue([
+        rec(1, 'Present'),
+        rec(1, 'Present'),
+      ]); // teacher 2 has none
+      const r = (await service.getAnalytics(undefined, undefined, true)) as {
+        teacherPerformance: {
+          excellent: number;
+          needsImprovement: number;
+          noRecords: number;
+        };
+      };
+      expect(r.teacherPerformance).toMatchObject({
+        excellent: 1,
+        needsImprovement: 0,
+        noRecords: 1,
+      });
+    });
+
+    it('measures progress across enrolments in live courses, not an average of recent lesson rows', async () => {
+      // 1 student in 1 course with 2 lessons, 1 finished => 50%
+      db.course.findMany.mockResolvedValue([{ id: 'c1' }]);
+      db.user.findMany.mockImplementation(
+        (args: { where: { role?: string } }) =>
+          Promise.resolve(args.where.role === 'student' ? [{ id: 10 }] : []),
+      );
+      db.studentCourse.findMany.mockResolvedValue([
+        { studentId: 10, courseId: 'c1', enrolledAt: new Date() },
+      ]);
+      db.chapter.findMany.mockResolvedValue([{ id: 'ch1', courseId: 'c1' }]);
+      db.chapterContent.findMany.mockResolvedValue([
+        {
+          id: 'k1',
+          chapterId: 'ch1',
+          durationMinutes: null,
+          chapter: { courseId: 'c1' },
+        },
+        {
+          id: 'k2',
+          chapterId: 'ch1',
+          durationMinutes: null,
+          chapter: { courseId: 'c1' },
+        },
+      ]);
+      db.courseProgress.findMany.mockResolvedValue([
+        {
+          studentId: 10,
+          courseId: 'c1',
+          contentId: 'k1',
+          chapterId: 'ch1',
+          progress: 100,
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        },
+      ]);
+      const r = (await service.getAnalytics(undefined, undefined, true)) as {
+        analytics: { completionRate: number };
+      };
+      expect(r.analytics.completionRate).toBe(50);
+    });
+
+    it('only lists popular courses that still exist', async () => {
+      db.course.findMany.mockImplementation(
+        (args: { where?: { deletedAt?: null; id?: unknown } }) =>
+          Promise.resolve(
+            args.where?.deletedAt === null
+              ? [{ id: 'live' }]
+              : [{ id: 'live', title: 'Level 1' }],
+          ),
+      );
+      db.user.findMany.mockImplementation(
+        (args: { where: { role?: string } }) =>
+          Promise.resolve(args.where.role === 'student' ? [{ id: 10 }] : []),
+      );
+      await service.getAnalytics(undefined, undefined, true);
+      const where = db.studentCourse.groupBy.mock.calls[0][0].where;
+      expect(where.courseId).toEqual({ in: ['live'] });
+      expect(where.studentId).toEqual({ in: [10] });
+    });
+  });
+
   describe('cache / force refresh', () => {
     it('serves cached data on a second default-range call within the TTL', async () => {
       await service.getAnalytics();
@@ -119,7 +234,9 @@ describe('AdminDashboardService', () => {
       const callsAfterFirst = db.tenant.count.mock.calls.length;
 
       await service.getAnalytics(undefined, undefined, true);
-      expect(db.tenant.count.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      expect(db.tenant.count.mock.calls.length).toBeGreaterThan(
+        callsAfterFirst,
+      );
     });
 
     it('does not use the cache when a date range is given', async () => {
@@ -127,7 +244,9 @@ describe('AdminDashboardService', () => {
       const callsAfterFirst = db.tenant.count.mock.calls.length;
 
       await service.getAnalytics('2026-01-01', '2026-01-31');
-      expect(db.tenant.count.mock.calls.length).toBeGreaterThan(callsAfterFirst);
+      expect(db.tenant.count.mock.calls.length).toBeGreaterThan(
+        callsAfterFirst,
+      );
     });
   });
 });

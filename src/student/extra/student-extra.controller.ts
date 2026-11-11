@@ -263,7 +263,8 @@ export class StudentExtraController {
         certificate_name: c.certificateName,
         certificate_url: c.status === 'revoked' ? '' : c.certificateUrl,
         status: c.status,
-        revoked_reason: c.status === 'revoked' ? (c.revokedReason ?? null) : null,
+        revoked_reason:
+          c.status === 'revoked' ? (c.revokedReason ?? null) : null,
         issued_at: c.issuedAt.toISOString(),
         courses: {
           id: c.courseId,
@@ -308,9 +309,13 @@ export class StudentExtraController {
       cert.certificateKey ?? this.storage.keyFromUrl(cert.certificateUrl);
     if (!key) throw new BadRequestException('Certificate file is unavailable');
 
-    const { body, contentType } = await this.storage.getObject(key).catch(() => {
-      throw new NotFoundException('Certificate file is missing — please ask your administrator to regenerate it');
-    });
+    const { body, contentType } = await this.storage
+      .getObject(key)
+      .catch(() => {
+        throw new NotFoundException(
+          'Certificate file is missing — please ask your administrator to regenerate it',
+        );
+      });
     res.setHeader('Content-Type', contentType ?? 'image/jpeg');
     res.setHeader(
       'Content-Disposition',
@@ -397,7 +402,10 @@ export class StudentExtraController {
   async listCourses(@CurrentUser() user: { id: number }) {
     await this.enrollmentService.syncStudentEnrollments(user.id);
     const enrollments = await this.db.studentCourse.findMany({
-      where: { studentId: user.id, courseId: { in: await this.liveCourseIds() } },
+      where: {
+        studentId: user.id,
+        courseId: { in: await this.liveCourseIds() },
+      },
     });
     if (enrollments.length === 0) {
       return { courses: [] };
@@ -1441,7 +1449,9 @@ export class StudentExtraController {
     // DAILY assignments are school-scoped — verify school membership, not course enrollment
     if (assignment.assignmentType === 'DAILY') {
       // Same publish + audience rule as the list, not just school membership.
-      if (!(await this.dailyAssignments.isVisibleToStudent(user.id, assignment)))
+      if (
+        !(await this.dailyAssignments.isVisibleToStudent(user.id, assignment))
+      )
         throw new NotFoundException('Assignment not found');
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
@@ -1767,7 +1777,9 @@ export class StudentExtraController {
     // DAILY assignments: verify school membership. COURSE assignments: verify enrollment.
     if (assignment.assignmentType === 'DAILY') {
       // Same publish + audience rule as the list, not just school membership.
-      if (!(await this.dailyAssignments.isVisibleToStudent(user.id, assignment)))
+      if (
+        !(await this.dailyAssignments.isVisibleToStudent(user.id, assignment))
+      )
         throw new NotFoundException('Assignment not found');
     } else {
       const courseId = assignment.chapter?.courseId ?? assignment.courseId;
@@ -2024,7 +2036,10 @@ export class StudentExtraController {
     if (!courseId) throw new BadRequestException('courseId is required');
 
     // No actor: "Issued By" must not show the student as issuing their own certificate.
-    const result = await this.certificateService.issueIfEligible(user.id, courseId);
+    const result = await this.certificateService.issueIfEligible(
+      user.id,
+      courseId,
+    );
     if (!result.issued) {
       throw new BadRequestException(
         result.reason === 'not_enrolled'
@@ -2113,9 +2128,9 @@ export class StudentExtraController {
     });
     if (!chapter)
       throw new BadRequestException('Chapter does not belong to this course');
-    const unlock = (await this.computeChapterUnlockStates(studentId, courseId)).get(
-      chapterId,
-    );
+    const unlock = (
+      await this.computeChapterUnlockStates(studentId, courseId)
+    ).get(chapterId);
     if (unlock && !unlock.isUnlocked)
       throw new BadRequestException('This chapter is locked');
     if (contentId) {
@@ -2124,7 +2139,9 @@ export class StudentExtraController {
         select: { id: true },
       });
       if (!content)
-        throw new BadRequestException('Content does not belong to this chapter');
+        throw new BadRequestException(
+          'Content does not belong to this chapter',
+        );
       return value;
     }
     if (value >= 99) {

@@ -18,7 +18,6 @@ import { SchoolAdminModule } from './school-admin/school-admin.module';
 import { StudentModule } from './student/student.module';
 import { AcademyModule } from './academy/academy.module';
 import { MonitoringModule } from './common/monitoring/monitoring.module';
-import { MonitoringInterceptor } from './common/monitoring/monitoring.interceptor';
 import { InternalModule } from './modules/internal/internal.module';
 import { TenantContextInterceptor } from './tenants/tenant-context.interceptor';
 import { SeedModule } from './common/seed/seed.module';
@@ -82,7 +81,6 @@ import { ThrottlerStorageRedisService } from './common/throttler/throttler-stora
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: UserOrIpThrottlerGuard },
     { provide: APP_INTERCEPTOR, useClass: TenantContextInterceptor },
-    { provide: APP_INTERCEPTOR, useClass: MonitoringInterceptor },
   ],
 })
 export class AppModule {}

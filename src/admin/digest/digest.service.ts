@@ -41,10 +41,18 @@ export class DigestService {
       trashedUsers,
     ] = await Promise.all([
       this.db.user.count({
-        where: { role: Role.student, createdAt: { gte: weekAgo }, deletedAt: null },
+        where: {
+          role: Role.student,
+          createdAt: { gte: weekAgo },
+          deletedAt: null,
+        },
       }),
       this.db.user.count({
-        where: { role: Role.teacher, createdAt: { gte: weekAgo }, deletedAt: null },
+        where: {
+          role: Role.teacher,
+          createdAt: { gte: weekAgo },
+          deletedAt: null,
+        },
       }),
       this.db.school.count({
         where: { createdAt: { gte: weekAgo }, deletedAt: null },
@@ -55,11 +63,11 @@ export class DigestService {
       this.db.passwordResetRequest.count({ where: { status: 'pending' } }),
       // TeacherLeave has no enforced FK — exclude rows orphaned by a
       // hard-deleted teacher/school (see AdminDashboardService.getStats()).
-      this.db
-        .$queryRaw<
-          Array<{ count: bigint }>
-        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
-        .then((rows) => Number(rows[0]?.count ?? 0)),
+      this.db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`.then(
+        (rows) => Number(rows[0]?.count ?? 0),
+      ),
       this.db.contactSubmission.count({
         where: { status: 'new', createdAt: { gte: weekAgo } },
       }),
@@ -137,7 +145,10 @@ export class DigestService {
     );
     await this.db.systemSetting.upsert({
       where: { key: DigestService.DIGEST_LOCK_KEY },
-      create: { key: DigestService.DIGEST_LOCK_KEY, value: new Date().toISOString() },
+      create: {
+        key: DigestService.DIGEST_LOCK_KEY,
+        value: new Date().toISOString(),
+      },
       update: { value: new Date().toISOString() },
     });
     this.logger.log(`Weekly digest sent to ${recipients} admin(s)`);

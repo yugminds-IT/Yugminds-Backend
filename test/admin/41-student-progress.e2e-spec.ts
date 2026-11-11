@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader, mintAccessToken } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -61,7 +65,11 @@ describe('Admin student-progress', () => {
       .expect(200);
     const courses = res.body.courses ?? [];
     if (courses.length > 0) {
-      expect(courses.every((c: { course_id: string }) => c.course_id === fixture.courseId)).toBe(true);
+      expect(
+        courses.every(
+          (c: { course_id: string }) => c.course_id === fixture.courseId,
+        ),
+      ).toBe(true);
     }
   });
 
@@ -79,7 +87,9 @@ describe('Admin student-progress', () => {
 
   it('GET /admin/student-progress?grade filters by grade, no match for a bogus grade returns empty summary', async () => {
     const res = await request(app.getHttpServer())
-      .get(`/admin/student-progress?school_id=${fixture.schoolId}&grade=ZZ-not-a-real-grade`)
+      .get(
+        `/admin/student-progress?school_id=${fixture.schoolId}&grade=ZZ-not-a-real-grade`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     expect(res.body.students).toEqual([]);
@@ -92,7 +102,9 @@ describe('Admin student-progress', () => {
 
   it('GET /admin/student-progress honors limit/offset pagination', async () => {
     const page1 = await request(app.getHttpServer())
-      .get(`/admin/student-progress?school_id=${fixture.schoolId}&limit=1&offset=0`)
+      .get(
+        `/admin/student-progress?school_id=${fixture.schoolId}&limit=1&offset=0`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     expect(page1.body.students.length).toBeLessThanOrEqual(1);
@@ -100,7 +112,9 @@ describe('Admin student-progress', () => {
     expect(page1.body.pagination.offset).toBe(0);
 
     const page2 = await request(app.getHttpServer())
-      .get(`/admin/student-progress?school_id=${fixture.schoolId}&limit=1&offset=1`)
+      .get(
+        `/admin/student-progress?school_id=${fixture.schoolId}&limit=1&offset=1`,
+      )
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     if (page1.body.students[0] && page2.body.students[0]) {
@@ -204,7 +218,9 @@ describe('Admin student-progress', () => {
     ).toBe(false);
     for (const s of after.body.students) {
       expect(
-        s.courses.some((c: { course_id: string }) => c.course_id === extraCourseId),
+        s.courses.some(
+          (c: { course_id: string }) => c.course_id === extraCourseId,
+        ),
       ).toBe(false);
     }
 
@@ -228,7 +244,9 @@ describe('Admin student-progress', () => {
   });
 
   it('rejects unauthenticated requests', async () => {
-    await request(app.getHttpServer()).get('/admin/student-progress').expect(401);
+    await request(app.getHttpServer())
+      .get('/admin/student-progress')
+      .expect(401);
   });
 
   it('rejects non-admin roles', async () => {

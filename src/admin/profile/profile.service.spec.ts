@@ -66,7 +66,10 @@ describe('AdminProfileService', () => {
     it('upserts the Profile row with the trimmed full_name', async () => {
       db.user.findUnique
         .mockResolvedValueOnce(adminUser) // permission check
-        .mockResolvedValueOnce({ ...adminUser, profile: { fullName: 'New Name' } }); // final fetch
+        .mockResolvedValueOnce({
+          ...adminUser,
+          profile: { fullName: 'New Name' },
+        }); // final fetch
 
       await service.update(1, { full_name: '  New Name  ' });
 
@@ -78,8 +81,14 @@ describe('AdminProfileService', () => {
     });
 
     it('rejects non-admin, non-super-admin users', async () => {
-      db.user.findUnique.mockResolvedValue({ ...adminUser, role: 'teacher', isSuperAdmin: false });
-      await expect(service.update(1, { full_name: 'x' })).rejects.toThrow(ForbiddenException);
+      db.user.findUnique.mockResolvedValue({
+        ...adminUser,
+        role: 'teacher',
+        isSuperAdmin: false,
+      });
+      await expect(service.update(1, { full_name: 'x' })).rejects.toThrow(
+        ForbiddenException,
+      );
       expect(db.profile.upsert).not.toHaveBeenCalled();
     });
 

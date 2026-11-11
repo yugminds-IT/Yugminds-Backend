@@ -25,7 +25,11 @@ export const ATTENDANCE_CUTOFF_HOUR_IST = 20;
 
 export function isBeforeAttendanceCutoff(now: Date = new Date()): boolean {
   const hour = Number(
-    new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Kolkata', hour: '2-digit', hour12: false }).format(now),
+    new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Asia/Kolkata',
+      hour: '2-digit',
+      hour12: false,
+    }).format(now),
   );
   return hour % 24 < ATTENDANCE_CUTOFF_HOUR_IST;
 }
@@ -49,7 +53,12 @@ export function isSchoolAdminLeaveDeadlinePassed(
   const a = dayBeforeStart.toISOString().split('T')[0];
   const b = istDay(leave.createdAt);
   const deadlineDay = a > b ? a : b;
-  return now.getTime() >= new Date(`${deadlineDay}T${SCHOOL_ADMIN_LEAVE_DEADLINE_HOUR_IST}:00:00+05:30`).getTime();
+  return (
+    now.getTime() >=
+    new Date(
+      `${deadlineDay}T${SCHOOL_ADMIN_LEAVE_DEADLINE_HOUR_IST}:00:00+05:30`,
+    ).getTime()
+  );
 }
 
 /** The exact instant the 8pm IST attendance cutoff falls on, for a YYYY-MM-DD day. */

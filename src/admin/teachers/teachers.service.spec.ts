@@ -37,7 +37,11 @@ describe('AdminTeachersService.create — assigned_from/assigned_until', () => {
       user: {
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({ id: 42 }),
-        findFirst: jest.fn().mockResolvedValue({ id: 42, teacherSchools: [], teacherSectionAssignments: [] }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 42,
+          teacherSchools: [],
+          teacherSectionAssignments: [],
+        }),
       },
       profile: { upsert: jest.fn().mockResolvedValue({}) },
       teacherSchool: { upsert: jest.fn().mockResolvedValue({}) },
@@ -46,7 +50,9 @@ describe('AdminTeachersService.create — assigned_from/assigned_until', () => {
         create: jest.fn().mockResolvedValue({}),
       },
       teacherWorkingDaysHistory: {
-        aggregate: jest.fn().mockResolvedValue({ _min: { effectiveFrom: null } }),
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _min: { effectiveFrom: null } }),
         upsert: jest.fn().mockResolvedValue({}),
       },
       school: {
@@ -55,7 +61,9 @@ describe('AdminTeachersService.create — assigned_from/assigned_until', () => {
           operatingDays: [1, 2, 3, 4, 5, 6],
         }),
       },
-      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) => callback(db)),
+      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) =>
+        callback(db),
+      ),
     };
     service = new AdminTeachersService(
       db as unknown as DatabaseService,
@@ -68,10 +76,18 @@ describe('AdminTeachersService.create — assigned_from/assigned_until', () => {
   it('writes assignedFrom/assignedUntil onto the TeacherSchool upsert', async () => {
     await service.create(validBody);
     const call = db.teacherSchool.upsert.mock.calls[0][0];
-    expect(call.create.assignedFrom).toEqual(new Date('2026-08-01T00:00:00.000Z'));
-    expect(call.create.assignedUntil).toEqual(new Date('2026-12-15T00:00:00.000Z'));
-    expect(call.update.assignedFrom).toEqual(new Date('2026-08-01T00:00:00.000Z'));
-    expect(call.update.assignedUntil).toEqual(new Date('2026-12-15T00:00:00.000Z'));
+    expect(call.create.assignedFrom).toEqual(
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+    expect(call.create.assignedUntil).toEqual(
+      new Date('2026-12-15T00:00:00.000Z'),
+    );
+    expect(call.update.assignedFrom).toEqual(
+      new Date('2026-08-01T00:00:00.000Z'),
+    );
+    expect(call.update.assignedUntil).toEqual(
+      new Date('2026-12-15T00:00:00.000Z'),
+    );
   });
 
   it('rejects assigned_until before assigned_from', async () => {
@@ -137,7 +153,11 @@ describe('AdminTeachersService.create — working days vs school operatingDays',
       user: {
         findUnique: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({ id: 42 }),
-        findFirst: jest.fn().mockResolvedValue({ id: 42, teacherSchools: [], teacherSectionAssignments: [] }),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 42,
+          teacherSchools: [],
+          teacherSectionAssignments: [],
+        }),
       },
       profile: { upsert: jest.fn().mockResolvedValue({}) },
       teacherSchool: { upsert: jest.fn().mockResolvedValue({}) },
@@ -146,7 +166,9 @@ describe('AdminTeachersService.create — working days vs school operatingDays',
         create: jest.fn().mockResolvedValue({}),
       },
       teacherWorkingDaysHistory: {
-        aggregate: jest.fn().mockResolvedValue({ _min: { effectiveFrom: null } }),
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _min: { effectiveFrom: null } }),
         upsert: jest.fn().mockResolvedValue({}),
       },
       school: {
@@ -156,7 +178,9 @@ describe('AdminTeachersService.create — working days vs school operatingDays',
           operatingDays: [1, 2, 3, 4, 5],
         }),
       },
-      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) => callback(db)),
+      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) =>
+        callback(db),
+      ),
     };
     service = new AdminTeachersService(
       db as unknown as DatabaseService,
@@ -167,9 +191,9 @@ describe('AdminTeachersService.create — working days vs school operatingDays',
   });
 
   it('rejects a working day outside the target school operatingDays', async () => {
-    await expect(service.create(bodyWithWorkingDays([1, 2, 6]))).rejects.toThrow(
-      BadRequestException,
-    );
+    await expect(
+      service.create(bodyWithWorkingDays([1, 2, 6])),
+    ).rejects.toThrow(BadRequestException);
     expect(db.teacherSchool.upsert).not.toHaveBeenCalled();
   });
 
@@ -227,7 +251,9 @@ describe('AdminTeachersService.list — tenant scoping', () => {
     // Previously list() had no @CurrentUser() at all — a school_admin JWT
     // could pass a different school's id (or none) and read that school's
     // full teacher roster (name/email/phone/qualification).
-    expect(where.teacherSchools).toEqual({ some: { schoolId: 'my-real-school' } });
+    expect(where.teacherSchools).toEqual({
+      some: { schoolId: 'my-real-school' },
+    });
   });
 
   it('a school_admin caller with no school_id query param still only sees their own school (not every school)', async () => {
@@ -237,7 +263,9 @@ describe('AdminTeachersService.list — tenant scoping', () => {
       tenantId: 'my-real-school',
     });
     const where = db.user.findMany.mock.calls[0][0].where;
-    expect(where.teacherSchools).toEqual({ some: { schoolId: 'my-real-school' } });
+    expect(where.teacherSchools).toEqual({
+      some: { schoolId: 'my-real-school' },
+    });
   });
 
   it('rejects a school_admin caller with no tenantId assigned', async () => {

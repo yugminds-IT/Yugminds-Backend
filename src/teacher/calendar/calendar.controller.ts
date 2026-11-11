@@ -54,7 +54,12 @@ export class TeacherCalendarController {
 
     const [calendarResult, { schedule, unassignedDates }] = await Promise.all([
       this.calendar.listForSchools(assignedSchoolIds, y, m),
-      this.resolveMonthlySchedule(user.id, Number(y), Number(m), schoolNameById),
+      this.resolveMonthlySchedule(
+        user.id,
+        Number(y),
+        Number(m),
+        schoolNameById,
+      ),
     ]);
 
     return { ...calendarResult, schedule, unassigned_dates: unassignedDates };
@@ -109,7 +114,8 @@ export class TeacherCalendarController {
       let assignedSomewhere = false;
       for (const [schoolId, entries] of historyBySchool) {
         if (entries.some((e) => e.effectiveFrom <= d)) assignedSomewhere = true;
-        if (!resolveWorkingDaysForDate(entries, d).includes(dayOfWeek)) continue;
+        if (!resolveWorkingDaysForDate(entries, d).includes(dayOfWeek))
+          continue;
         schedule.push({
           date: dateStr,
           school_id: schoolId,

@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
+import { lastLoginByUser } from '../last-login';
 import { DatabaseService } from '../../database/database.service';
 import { Role, Prisma } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
@@ -302,6 +303,10 @@ export class AdminTeachersService {
             include: { section: true, teacher: { include: { profile: true } } },
           })
         : [];
+    const lastLogin = await lastLoginByUser(
+      this.db,
+      users.map((u) => u.id),
+    );
     return {
       teachers: users.map((u) => {
         const excludeTeacherId = u.id;
@@ -316,7 +321,10 @@ export class AdminTeachersService {
             teacherName: a.teacher?.profile?.fullName ?? a.teacher?.email ?? '',
           }));
         }
-        return this.toTeacherDetail(u as UserWithRelations, otherBySchool);
+        return {
+          ...this.toTeacherDetail(u as UserWithRelations, otherBySchool),
+          last_login: lastLogin.get(u.id)?.toISOString() ?? null,
+        };
       }),
       total,
       ...(page && take
@@ -897,7 +905,6 @@ export class AdminTeachersService {
         schoolAssignments.length > 0 ? schoolAssignments[0].school_id : null;
       for (const assignment of schoolAssignments) {
         const schoolId = assignment.school_id;
-        const gradesAssigned = assignment.grades_assigned ?? [];
         const gradeSectionsAssigned = assignment.grade_sections_assigned ?? [];
         const subjects = assignment.subjects ?? [];
         const workingDays = normalizeWorkingDays(assignment.working_days);

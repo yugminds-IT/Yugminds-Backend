@@ -47,7 +47,9 @@ describe('Teacher attendance', () => {
 
   it('GET /teacher/attendance/today returns a shape with no data marked yet', async () => {
     const res = await request(app.getHttpServer())
-      .get(`/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`)
+      .get(
+        `/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`,
+      )
       .set(...teacherAuth)
       .expect(200);
     expect(res.body.date).toBe(reportDate);
@@ -67,7 +69,9 @@ describe('Teacher attendance', () => {
       .expect(201);
 
     const todayRes = await request(app.getHttpServer())
-      .get(`/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`)
+      .get(
+        `/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`,
+      )
       .set(...teacherAuth)
       .expect(200);
     expect(todayRes.body.attendance.status).toBe('Present');
@@ -100,25 +104,31 @@ describe('Teacher attendance', () => {
   it('a teacher with no report that day sees no Present attendance from teacher[0]', async () => {
     const otherAuth = authHeader(fixture.teachers[1].token);
     const res = await request(app.getHttpServer())
-      .get(`/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`)
+      .get(
+        `/teacher/attendance/today?school_id=${fixture.schoolId}&date=${reportDate}`,
+      )
       .set(...otherAuth)
       .expect(200);
     expect(res.body.attendance.status).not.toBe('Present');
   });
 
   it('rejects unauthenticated requests and unassigned school_id (tenant interceptor)', async () => {
-    await request(app.getHttpServer()).get('/teacher/attendance/today').expect(401);
+    await request(app.getHttpServer())
+      .get('/teacher/attendance/today')
+      .expect(401);
     await request(app.getHttpServer())
       .get('/teacher/attendance?school_id=some-other-school')
       .set(...teacherAuth)
       .expect(403);
   });
 
-  it("monthly attendance denominator never counts days later this month than today (future-date bug regression)", async () => {
+  it('monthly attendance denominator never counts days later this month than today (future-date bug regression)', async () => {
     const teacherId = fixture.teachers[0].id;
     const schoolId = fixture.schoolId;
     const now = new Date();
-    const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+    const monthStart = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+    );
     const todayUTC = new Date(
       Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
     );
@@ -140,7 +150,9 @@ describe('Teacher attendance', () => {
     // into day 1 once round-tripped through the local test-runner's
     // timezone offset — pushing it safely into the prior day sidesteps that
     // entirely rather than relying on exact-midnight equality.
-    const historyEffectiveFrom = new Date(monthStart.getTime() - 24 * 60 * 60 * 1000);
+    const historyEffectiveFrom = new Date(
+      monthStart.getTime() - 24 * 60 * 60 * 1000,
+    );
     await pool.query(
       `INSERT INTO "TeacherWorkingDaysHistory" (id, "teacherId", "schoolId", "effectiveFrom", "workingDays", "createdAt")
        VALUES (gen_random_uuid(), $1, $2, $3, $4, now())`,
@@ -158,7 +170,9 @@ describe('Teacher attendance', () => {
 
     try {
       const res = await request(app.getHttpServer())
-        .get(`/teacher/attendance/monthly?school_id=${schoolId}&yearMonth=${yearMonth}`)
+        .get(
+          `/teacher/attendance/monthly?school_id=${schoolId}&yearMonth=${yearMonth}`,
+        )
         .set(...teacherAuth)
         .expect(200);
       const monthEntry = res.body.monthlyData.find(

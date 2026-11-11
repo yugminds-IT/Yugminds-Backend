@@ -72,6 +72,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
         isSuperAdmin: cached.isSuperAdmin,
         tenantId: cached.tenantId ?? undefined,
         sid: payload.sid,
+        impersonatorId: payload.impersonatorId,
       };
     }
 
@@ -116,6 +117,7 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
       isSuperAdmin: user.isSuperAdmin,
       tenantId: user.tenantId ?? undefined,
       sid: payload.sid,
+      impersonatorId: payload.impersonatorId,
     };
   }
 }

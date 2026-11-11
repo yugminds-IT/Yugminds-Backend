@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool } from './support/db';
 
@@ -30,7 +34,9 @@ describe('Admin trash: course soft-delete -> vanishes from student view -> resto
       .set(...authHeader(fixture.students[0].token))
       .expect(200);
     const courses = res.body?.courses ?? [];
-    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(true);
+    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(
+      true,
+    );
   });
 
   it('GET /admin/trash lists nothing for the fixture course yet', async () => {
@@ -40,7 +46,9 @@ describe('Admin trash: course soft-delete -> vanishes from student view -> resto
       .expect(200);
     const trash = res.body?.data ?? res.body;
     const courses = trash?.courses ?? [];
-    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(false);
+    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(
+      false,
+    );
   });
 
   it('soft-deleting the course removes it from the trash list source AND from the student view', async () => {
@@ -55,14 +63,18 @@ describe('Admin trash: course soft-delete -> vanishes from student view -> resto
       .expect(200);
     const trashBody = trash.body?.data ?? trash.body;
     const trashedCourses = trashBody?.courses ?? [];
-    expect(trashedCourses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(true);
+    expect(
+      trashedCourses.some((c: { id: string }) => c.id === fixture.courseId),
+    ).toBe(true);
 
     const studentView = await request(app.getHttpServer())
       .get('/student/courses')
       .set(...authHeader(fixture.students[0].token))
       .expect(200);
     const courses = studentView.body?.courses ?? [];
-    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(false);
+    expect(courses.some((c: { id: string }) => c.id === fixture.courseId)).toBe(
+      false,
+    );
   });
 
   it('restoring brings it back but NOT re-published', async () => {

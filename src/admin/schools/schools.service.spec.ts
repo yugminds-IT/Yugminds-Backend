@@ -85,7 +85,9 @@ describe('AdminSchoolsService', () => {
     const pick = (body: Record<string, unknown>) =>
       (
         service as unknown as {
-          pickSchoolDataFromBody: (b: Record<string, unknown>) => Record<string, unknown>;
+          pickSchoolDataFromBody: (
+            b: Record<string, unknown>,
+          ) => Record<string, unknown>;
         }
       ).pickSchoolDataFromBody(body);
 

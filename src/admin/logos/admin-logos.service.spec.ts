@@ -49,12 +49,16 @@ describe('AdminLogosService', () => {
         delete: jest.fn().mockResolvedValue({}),
       },
       school: {
-        findUnique: jest.fn().mockResolvedValue({ name: 'Sunrise Academy', schoolNumber: 1 }),
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ name: 'Sunrise Academy', schoolNumber: 1 }),
       },
     };
     storage = {
       buildKey: jest.fn().mockReturnValue('logos/1/key.png'),
-      uploadBuffer: jest.fn().mockResolvedValue('https://cdn.example.com/logos/1/key.png'),
+      uploadBuffer: jest
+        .fn()
+        .mockResolvedValue('https://cdn.example.com/logos/1/key.png'),
       deleteObject: jest.fn().mockResolvedValue(undefined),
     };
 
@@ -71,31 +75,39 @@ describe('AdminLogosService', () => {
 
   describe('readImageDims', () => {
     it('returns "svg" for an SVG mimetype regardless of content', () => {
-      expect(service.readImageDims(Buffer.from('<svg/>'), 'image/svg+xml')).toBe('svg');
+      expect(
+        service.readImageDims(Buffer.from('<svg/>'), 'image/svg+xml'),
+      ).toBe('svg');
     });
 
     it('parses PNG width/height from the IHDR chunk', () => {
-      expect(service.readImageDims(pngWithDims(500, 400), 'image/png')).toEqual({
-        w: 500,
-        h: 400,
-      });
+      expect(service.readImageDims(pngWithDims(500, 400), 'image/png')).toEqual(
+        {
+          w: 500,
+          h: 400,
+        },
+      );
     });
 
     it('throws (fails closed) for a truncated/corrupt PNG instead of silently allowing it', () => {
-      expect(() => service.readImageDims(Buffer.from([0x89, 0x50]), 'image/png')).toThrow(
-        BadRequestException,
-      );
+      expect(() =>
+        service.readImageDims(Buffer.from([0x89, 0x50]), 'image/png'),
+      ).toThrow(BadRequestException);
     });
 
     it('throws (fails closed) for a JPEG with no recognizable SOF marker', () => {
-      const garbage = Buffer.from([0xff, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
-      expect(() => service.readImageDims(garbage, 'image/jpeg')).toThrow(BadRequestException);
+      const garbage = Buffer.from([
+        0xff, 0xd8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      ]);
+      expect(() => service.readImageDims(garbage, 'image/jpeg')).toThrow(
+        BadRequestException,
+      );
     });
 
     it('throws for an unsupported mimetype', () => {
-      expect(() => service.readImageDims(Buffer.from('x'), 'image/gif')).toThrow(
-        BadRequestException,
-      );
+      expect(() =>
+        service.readImageDims(Buffer.from('x'), 'image/gif'),
+      ).toThrow(BadRequestException);
     });
   });
 
@@ -214,7 +226,9 @@ describe('AdminLogosService', () => {
       };
       await service.update('l1', file, { replace_image: 'true' });
 
-      expect(storage.deleteObject).toHaveBeenCalledWith('logos/unassigned/old-key.png');
+      expect(storage.deleteObject).toHaveBeenCalledWith(
+        'logos/unassigned/old-key.png',
+      );
     });
 
     it('does not touch storage when not replacing the image', async () => {
@@ -242,7 +256,10 @@ describe('AdminLogosService', () => {
 
   describe('remove', () => {
     it('soft-deletes by default (no S3 deletion)', async () => {
-      db.logo.findUnique.mockResolvedValue({ id: 'l1', imageKey: 'logos/1/k.png' });
+      db.logo.findUnique.mockResolvedValue({
+        id: 'l1',
+        imageKey: 'logos/1/k.png',
+      });
       await service.remove('l1');
       expect(db.logo.update).toHaveBeenCalledWith({
         where: { id: 'l1' },
@@ -253,7 +270,10 @@ describe('AdminLogosService', () => {
     });
 
     it('hard-deletes the row and the S3 object when hard=true', async () => {
-      db.logo.findUnique.mockResolvedValue({ id: 'l1', imageKey: 'logos/1/k.png' });
+      db.logo.findUnique.mockResolvedValue({
+        id: 'l1',
+        imageKey: 'logos/1/k.png',
+      });
       await service.remove('l1', 'true');
       expect(db.logo.delete).toHaveBeenCalledWith({ where: { id: 'l1' } });
       expect(storage.deleteObject).toHaveBeenCalledWith('logos/1/k.png');

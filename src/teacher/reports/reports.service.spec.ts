@@ -4,7 +4,11 @@ import { TeacherReportsService } from './reports.service';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { TeacherScheduleService } from '../schedule/teacher-schedule.service';
-import { getTodayIstDateOnly, getTodayIstDateStr, isBeforeAttendanceCutoff } from '../../common/utils/date.util';
+import {
+  getTodayIstDateOnly,
+  getTodayIstDateStr,
+  isBeforeAttendanceCutoff,
+} from '../../common/utils/date.util';
 
 // "Today" is frozen at the fixture date (2020-01-06): reports are same-day only.
 jest.mock('../../common/utils/date.util', () => ({
@@ -38,11 +42,14 @@ describe('TeacherReportsService.create', () => {
     school_id: 'school-a',
     date: pastDate,
     period_id: 'period-1',
+    subject: 'Robotics',
   };
 
   beforeEach(async () => {
     db = {
-      teacherSchool: { findFirst: jest.fn().mockResolvedValue({ schoolId: 'school-a' }) },
+      teacherSchool: {
+        findFirst: jest.fn().mockResolvedValue({ schoolId: 'school-a' }),
+      },
       teacherReport: {
         findFirst: jest.fn().mockResolvedValue(null),
         create: jest.fn().mockResolvedValue({
@@ -83,7 +90,9 @@ describe('TeacherReportsService.create', () => {
       },
       schoolAdmin: { findMany: jest.fn().mockResolvedValue([]) },
       user: { findMany: jest.fn().mockResolvedValue([]) },
-      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) => callback(db)),
+      $transaction: jest.fn(async (callback: (tx: unknown) => unknown) =>
+        callback(db),
+      ),
     };
     teacherSchedule = {
       getWorkStatusForDate: jest.fn().mockResolvedValue({
@@ -98,7 +107,9 @@ describe('TeacherReportsService.create', () => {
         { provide: DatabaseService, useValue: db },
         {
           provide: RealtimeGateway,
-          useValue: { emitDashboardStatsForUsers: jest.fn().mockResolvedValue(undefined) },
+          useValue: {
+            emitDashboardStatsForUsers: jest.fn().mockResolvedValue(undefined),
+          },
         },
         { provide: TeacherScheduleService, useValue: teacherSchedule },
       ],
@@ -109,7 +120,9 @@ describe('TeacherReportsService.create', () => {
 
   it('rejects a report for a school the teacher is not assigned to', async () => {
     db.teacherSchool.findFirst.mockResolvedValue(null);
-    await expect(service.create(1, baseBody)).rejects.toThrow(ForbiddenException);
+    await expect(service.create(1, baseBody)).rejects.toThrow(
+      ForbiddenException,
+    );
     expect(db.teacherReport.create).not.toHaveBeenCalled();
   });
 
@@ -119,7 +132,9 @@ describe('TeacherReportsService.create', () => {
       holidaySchoolIds: ['school-a'],
       offScheduleSchoolIds: [],
     });
-    await expect(service.create(1, baseBody)).rejects.toThrow(BadRequestException);
+    await expect(service.create(1, baseBody)).rejects.toThrow(
+      BadRequestException,
+    );
     expect(db.teacherReport.create).not.toHaveBeenCalled();
   });
 
@@ -152,7 +167,9 @@ describe('TeacherReportsService.create', () => {
       id: 'existing-report',
       status: 'submitted',
     });
-    await expect(service.create(1, baseBody)).rejects.toThrow(BadRequestException);
+    await expect(service.create(1, baseBody)).rejects.toThrow(
+      BadRequestException,
+    );
     expect(db.teacherReport.create).not.toHaveBeenCalled();
     expect(db.teacherReport.update).not.toHaveBeenCalled();
   });
@@ -178,6 +195,39 @@ describe('TeacherReportsService.create', () => {
     );
     expect(result.report.id).toBe('r-rejected');
     expect(result.report.report_status).toBe('Pending');
+  });
+
+  describe('subject', () => {
+    it('requires the teacher to say what they taught', async () => {
+      await expect(
+        service.create(7, { ...baseBody, subject: undefined }),
+      ).rejects.toThrow('Pick the subject you taught.');
+      await expect(
+        service.create(7, { ...baseBody, subject: '   ' }),
+      ).rejects.toThrow('Pick the subject you taught.');
+      expect(db.teacherReport.create).not.toHaveBeenCalled();
+    });
+
+    it('stores the subject the teacher chose, marked as teacher-confirmed, with the canonical spelling', async () => {
+      await service.create(7, { ...baseBody, subject: ' coding ' });
+      expect(db.teacherReport.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            subject: 'Coding',
+            subjectSource: 'teacher',
+          }),
+        }),
+      );
+    });
+
+    it('keeps a school-specific subject as typed', async () => {
+      await service.create(7, { ...baseBody, subject: 'Maths' });
+      expect(db.teacherReport.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ subject: 'Maths' }),
+        }),
+      );
+    });
   });
 
   it('still rejects when an approved report already exists for the period', async () => {
@@ -244,7 +294,9 @@ describe('TeacherReportsService.create', () => {
       db.classSchedule.findMany.mockResolvedValue([{ periodId: 'period-1' }]);
       db.teacherReport.count.mockResolvedValue(1);
       await service.create(1, baseBody);
-      expect(db.teacherReport.count.mock.calls[0][0].where.status).toBeUndefined();
+      expect(
+        db.teacherReport.count.mock.calls[0][0].where.status,
+      ).toBeUndefined();
     });
 
     it('marks attendance Present when the teacher has no schedule that day (any report counts)', async () => {
@@ -254,7 +306,7 @@ describe('TeacherReportsService.create', () => {
       expect(result.attendance_marked_present).toBe(true);
     });
 
-    it('does NOT mark attendance Present when only some of the day\'s scheduled periods have been reported', async () => {
+    it("does NOT mark attendance Present when only some of the day's scheduled periods have been reported", async () => {
       db.classSchedule.findMany.mockResolvedValue([
         { periodId: 'period-1' },
         { periodId: 'period-2' },
@@ -285,7 +337,9 @@ describe('TeacherReportsService.create', () => {
         'used to have their leave status silently clobbered)',
       async () => {
         db.classSchedule.findMany.mockResolvedValue([]);
-        db.attendance.findUnique.mockResolvedValue({ status: 'Leave-Approved' });
+        db.attendance.findUnique.mockResolvedValue({
+          status: 'Leave-Approved',
+        });
         const result = await service.create(1, baseBody);
         expect(db.attendance.upsert).not.toHaveBeenCalled();
         expect(result.attendance_marked_present).toBe(false);
@@ -341,7 +395,7 @@ describe('TeacherReportsService.list — stats', () => {
 
   it(
     'returns stats computed via count(), independent of the limit-capped findMany result ' +
-      "(regression: the Analytics page's \"Total Reports (All time)\" used to be reports.length " +
+      '(regression: the Analytics page\'s "Total Reports (All time)" used to be reports.length ' +
       'off a list capped at 500)',
     async () => {
       // findMany (the capped list) returns just 1 row...

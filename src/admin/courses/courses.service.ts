@@ -249,28 +249,30 @@ export class AdminCoursesService {
     });
     const schoolIds = Array.from(new Set(access.map((a) => a.schoolId)));
 
-    const [adminUsers, schoolAdmins, teachers, enrollments] = await Promise.all([
-      this.db.user.findMany({
-        where: { role: Role.admin },
-        select: { id: true },
-      }),
-      schoolIds.length > 0
-        ? this.db.schoolAdmin.findMany({
-            where: { schoolId: { in: schoolIds } },
-            select: { userId: true },
-          })
-        : Promise.resolve([] as Array<{ userId: number }>),
-      schoolIds.length > 0
-        ? this.db.teacherSchool.findMany({
-            where: { schoolId: { in: schoolIds } },
-            select: { teacherId: true },
-          })
-        : Promise.resolve([] as Array<{ teacherId: number }>),
-      this.db.studentCourse.findMany({
-        where: { courseId },
-        select: { studentId: true },
-      }),
-    ]);
+    const [adminUsers, schoolAdmins, teachers, enrollments] = await Promise.all(
+      [
+        this.db.user.findMany({
+          where: { role: Role.admin },
+          select: { id: true },
+        }),
+        schoolIds.length > 0
+          ? this.db.schoolAdmin.findMany({
+              where: { schoolId: { in: schoolIds } },
+              select: { userId: true },
+            })
+          : Promise.resolve([] as Array<{ userId: number }>),
+        schoolIds.length > 0
+          ? this.db.teacherSchool.findMany({
+              where: { schoolId: { in: schoolIds } },
+              select: { teacherId: true },
+            })
+          : Promise.resolve([] as Array<{ teacherId: number }>),
+        this.db.studentCourse.findMany({
+          where: { courseId },
+          select: { studentId: true },
+        }),
+      ],
+    );
 
     await this.realtimeGateway.emitDashboardStatsForUsers([
       ...adminUsers.map((u) => u.id),

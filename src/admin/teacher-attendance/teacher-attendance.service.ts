@@ -3,7 +3,11 @@ import { Cron } from '@nestjs/schedule';
 import { DatabaseService } from '../../database/database.service';
 import { Role } from '@prisma/client';
 import { AdminCalendarService } from '../calendar/calendar.service';
-import { attendanceCutoffInstant, getTodayIstDateOnly, getTodayIstDateStr } from '../../common/utils/date.util';
+import {
+  attendanceCutoffInstant,
+  getTodayIstDateOnly,
+  getTodayIstDateStr,
+} from '../../common/utils/date.util';
 import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
 
 @Injectable()
@@ -68,7 +72,9 @@ export class AdminTeacherAttendanceService {
     const now = new Date();
     const walkEnd =
       year === now.getUTCFullYear() && month === now.getUTCMonth() + 1
-        ? new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+        ? new Date(
+            Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+          )
         : end;
     const workingDays = new Set<string>();
     for (
@@ -183,11 +189,21 @@ export class AdminTeacherAttendanceService {
    * List all teachers with today's attendance summary and per-teacher status.
    * If teacherId is provided, returns attendance records for that teacher only.
    */
-  async list(schoolId?: string, teacherId?: string, from?: string, to?: string) {
+  async list(
+    schoolId?: string,
+    teacherId?: string,
+    from?: string,
+    to?: string,
+  ) {
     if (teacherId) {
       const tid = parseInt(teacherId, 10);
       if (isNaN(tid))
-        return { summary: null, teacherTodayStatus: {}, teacherTodaySchoolStatuses: {}, attendance: [] };
+        return {
+          summary: null,
+          teacherTodayStatus: {},
+          teacherTodaySchoolStatuses: {},
+          attendance: [],
+        };
       const dateFilter: { gte?: Date; lte?: Date } = {};
       if (from) dateFilter.gte = new Date(`${from}T00:00:00.000Z`);
       if (to) dateFilter.lte = new Date(`${to}T23:59:59.999Z`);
@@ -254,7 +270,9 @@ export class AdminTeacherAttendanceService {
     // one month's calendar per school and keeps only today's date.
     const todayStr = today.toISOString().split('T')[0];
     const schoolIdsForToday = [
-      ...new Set(filtered.flatMap((u) => u.teacherSchools.map((ts) => ts.schoolId))),
+      ...new Set(
+        filtered.flatMap((u) => u.teacherSchools.map((ts) => ts.schoolId)),
+      ),
     ];
     const holidaySchoolIdsToday = new Set<string>();
     await Promise.all(
@@ -265,7 +283,8 @@ export class AdminTeacherAttendanceService {
           today.getUTCMonth() + 1,
         );
         const isHolidayToday = entries.some(
-          (e) => e.date === todayStr && (e.type === 'Holiday' || e.type === 'Break'),
+          (e) =>
+            e.date === todayStr && (e.type === 'Holiday' || e.type === 'Break'),
         );
         if (isHolidayToday) holidaySchoolIdsToday.add(sid);
       }),
@@ -281,7 +300,10 @@ export class AdminTeacherAttendanceService {
     // immediately. Scoped to just the filtered school when one is passed,
     // otherwise "not scheduled at ANY of their schools today."
     const todayHistoryPairs = filtered.flatMap((u) =>
-      u.teacherSchools.map((ts) => ({ teacherId: u.id, schoolId: ts.schoolId })),
+      u.teacherSchools.map((ts) => ({
+        teacherId: u.id,
+        schoolId: ts.schoolId,
+      })),
     );
     const todayHistoryByPair = new Map(
       await Promise.all(
@@ -315,7 +337,11 @@ export class AdminTeacherAttendanceService {
     const [y, m, d] = todayStr.split('-').map(Number);
     const todayDayOfWeek = new Date(y, m - 1, d).getDay();
     const todaySchedules = await this.db.classSchedule.findMany({
-      where: { dayOfWeek: todayDayOfWeek, isActive: true, schoolId: { in: schoolIdsForToday } },
+      where: {
+        dayOfWeek: todayDayOfWeek,
+        isActive: true,
+        schoolId: { in: schoolIdsForToday },
+      },
       select: { teacherId: true, schoolId: true },
     });
     const scheduledSchoolIdsByTeacher = new Map<number, Set<string>>();
@@ -423,7 +449,10 @@ export class AdminTeacherAttendanceService {
     // Teachers on holiday, or simply not scheduled today per their assigned
     // weekdays, aren't expected to be present — excluded from the rate's
     // denominator rather than counted as absent.
-    const expectedTodayCount = Math.max(0, activeCount - onHolidayToday - offToday);
+    const expectedTodayCount = Math.max(
+      0,
+      activeCount - onHolidayToday - offToday,
+    );
     const attendanceRate =
       expectedTodayCount > 0
         ? Math.round((presentToday / expectedTodayCount) * 100)
@@ -435,13 +464,20 @@ export class AdminTeacherAttendanceService {
     // Attendance" figure. Reuse the same month-to-date percentage that backs
     // the Attendance tab (computeAttendanceMetrics via monthly()) so the
     // dashboard's "Avg Attendance" card reflects a real average instead.
-    const { monthlyData: monthToDateData } = await this.monthly(undefined, schoolId);
-    const ratedMonthEntries = monthToDateData.filter((m) => m.total_working_days > 0);
+    const { monthlyData: monthToDateData } = await this.monthly(
+      undefined,
+      schoolId,
+    );
+    const ratedMonthEntries = monthToDateData.filter(
+      (m) => m.total_working_days > 0,
+    );
     const averageAttendanceRate =
       ratedMonthEntries.length > 0
         ? Math.round(
-            ratedMonthEntries.reduce((sum, m) => sum + m.attendance_percentage, 0) /
-              ratedMonthEntries.length,
+            ratedMonthEntries.reduce(
+              (sum, m) => sum + m.attendance_percentage,
+              0,
+            ) / ratedMonthEntries.length,
           )
         : 0;
 
@@ -502,12 +538,20 @@ export class AdminTeacherAttendanceService {
 
     const presentDayDates = new Set(
       attendanceRecords
-        .filter((a) => a.status === 'Present' && isWorkingDay(a.date.toISOString().split('T')[0]))
+        .filter(
+          (a) =>
+            a.status === 'Present' &&
+            isWorkingDay(a.date.toISOString().split('T')[0]),
+        )
         .map((a) => a.date.toISOString().split('T')[0]),
     );
     const absentDayDates = new Set(
       attendanceRecords
-        .filter((a) => a.status === 'Absent' && isWorkingDay(a.date.toISOString().split('T')[0]))
+        .filter(
+          (a) =>
+            a.status === 'Absent' &&
+            isWorkingDay(a.date.toISOString().split('T')[0]),
+        )
         .map((a) => a.date.toISOString().split('T')[0]),
     );
     const leaveDayDates = new Set<string>();
@@ -517,7 +561,11 @@ export class AdminTeacherAttendanceService {
       const current = new Date(overlapStart);
       while (current <= overlapEnd) {
         const dateStr = current.toISOString().split('T')[0];
-        if (isWorkingDay(dateStr) && !presentDayDates.has(dateStr) && !leaveDayDates.has(dateStr)) {
+        if (
+          isWorkingDay(dateStr) &&
+          !presentDayDates.has(dateStr) &&
+          !leaveDayDates.has(dateStr)
+        ) {
           leaveDayDates.add(dateStr);
         }
         current.setUTCDate(current.getUTCDate() + 1);
@@ -555,10 +603,13 @@ export class AdminTeacherAttendanceService {
       absent_days: absentDayDates.size,
       leave_days: leaveDayDates.size,
       unreported_days: unreportedDayDates.size,
-      late_report_days: [...absentDayDates].filter((d) => reportedDates.has(d)).length,
+      late_report_days: [...absentDayDates].filter((d) => reportedDates.has(d))
+        .length,
       total_working_days: totalWorkingDays,
       attendance_percentage:
-        totalWorkingDays > 0 ? Math.round((presentDays / totalWorkingDays) * 100) : 0,
+        totalWorkingDays > 0
+          ? Math.round((presentDays / totalWorkingDays) * 100)
+          : 0,
     };
   }
 
@@ -586,9 +637,7 @@ export class AdminTeacherAttendanceService {
       where: {
         role: Role.teacher,
         isActive: true,
-        ...(schoolId
-          ? { teacherSchools: { some: { schoolId } } }
-          : {}),
+        ...(schoolId ? { teacherSchools: { some: { schoolId } } } : {}),
       },
       include: {
         profile: true,
@@ -596,7 +645,9 @@ export class AdminTeacherAttendanceService {
       },
     });
 
-    type SchoolMetrics = ReturnType<AdminTeacherAttendanceService['computeAttendanceMetrics']>;
+    type SchoolMetrics = ReturnType<
+      AdminTeacherAttendanceService['computeAttendanceMetrics']
+    >;
     const monthlyData: Array<
       {
         id: string;
@@ -604,7 +655,13 @@ export class AdminTeacherAttendanceService {
         month: string;
         profiles: { full_name: string; email: string };
         schools: { name: string; school_code: string };
-        by_school?: Array<{ school_id: string; school_name: string; working_days: number[] } & SchoolMetrics>;
+        by_school?: Array<
+          {
+            school_id: string;
+            school_name: string;
+            working_days: number[];
+          } & SchoolMetrics
+        >;
       } & SchoolMetrics
     > = [];
 
@@ -629,7 +686,13 @@ export class AdminTeacherAttendanceService {
       const schoolName = displaySchool?.school?.name ?? '';
       const schoolCode = displaySchool?.school?.schoolCode ?? '';
 
-      const [attendanceRecords, leaveRecords, workingSetEntries, historyEntries, monthReports] = await Promise.all([
+      const [
+        attendanceRecords,
+        leaveRecords,
+        workingSetEntries,
+        historyEntries,
+        monthReports,
+      ] = await Promise.all([
         this.db.attendance.findMany({
           where: {
             teacherId: t.id,
@@ -647,16 +710,24 @@ export class AdminTeacherAttendanceService {
           },
         }),
         Promise.all(
-          effectiveSchoolIds.map(async (sid) => [
-            sid,
-            await this.getWorkingDaySetCached(calendarCache, sid, year, monthNum),
-          ] as const),
+          effectiveSchoolIds.map(
+            async (sid) =>
+              [
+                sid,
+                await this.getWorkingDaySetCached(
+                  calendarCache,
+                  sid,
+                  year,
+                  monthNum,
+                ),
+              ] as const,
+          ),
         ),
         Promise.all(
-          effectiveSchoolIds.map(async (sid) => [
-            sid,
-            await this.getWorkingDaysHistory(t.id, sid, end),
-          ] as const),
+          effectiveSchoolIds.map(
+            async (sid) =>
+              [sid, await this.getWorkingDaysHistory(t.id, sid, end)] as const,
+          ),
         ),
         this.db.teacherReport.findMany({
           where: {
@@ -667,7 +738,8 @@ export class AdminTeacherAttendanceService {
           select: { schoolId: true, reportDate: true },
         }),
       ]);
-      const reportedDay = (r: { reportDate: Date }) => r.reportDate.toISOString().split('T')[0];
+      const reportedDay = (r: { reportDate: Date }) =>
+        r.reportDate.toISOString().split('T')[0];
       const reportedAll = new Set(monthReports.map(reportedDay));
       const historyBySchool = new Map(historyEntries);
       // Per-school working-day calendar (a school's declared holidays never
@@ -706,7 +778,15 @@ export class AdminTeacherAttendanceService {
       // specific school" is answerable without a second request — only
       // computed when unfiltered and the teacher actually has >1 school
       // (the overwhelmingly common single-school case skips this for free).
-      let bySchool: Array<{ school_id: string; school_name: string; working_days: number[] } & SchoolMetrics> | undefined;
+      let bySchool:
+        | Array<
+            {
+              school_id: string;
+              school_name: string;
+              working_days: number[];
+            } & SchoolMetrics
+          >
+        | undefined;
       if (!schoolId && allSchoolIds.length > 1) {
         bySchool = allSchoolIds.map((sid) => {
           const set = workingSetBySchool.get(sid) ?? new Set<string>();
@@ -716,13 +796,17 @@ export class AdminTeacherAttendanceService {
             start,
             end,
             set,
-            new Set(monthReports.filter((r) => r.schoolId === sid).map(reportedDay)),
+            new Set(
+              monthReports.filter((r) => r.schoolId === sid).map(reportedDay),
+            ),
           );
           const ts = t.teacherSchools.find((x) => x.schoolId === sid);
           return {
             school_id: sid,
             school_name: ts?.school?.name ?? '',
-            working_days: ts?.workingDays?.length ? ts.workingDays : [1, 2, 3, 4, 5],
+            working_days: ts?.workingDays?.length
+              ? ts.workingDays
+              : [1, 2, 3, 4, 5],
             ...metrics,
           };
         });
@@ -765,8 +849,12 @@ export class AdminTeacherAttendanceService {
     end: Date,
   ): Promise<Set<string>> {
     const offDates = new Set<string>();
-    const cursor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
-    const endMonth = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+    const cursor = new Date(
+      Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1),
+    );
+    const endMonth = new Date(
+      Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1),
+    );
     while (cursor <= endMonth) {
       const entries = await this.schoolCalendar.getHolidayDatesForMonth(
         schoolId,
@@ -840,7 +928,10 @@ export class AdminTeacherAttendanceService {
       await Promise.all(
         distinctSchoolIds.map(
           async (sid) =>
-            [sid, await this.getHolidayOffDatesForRange(sid, start, end)] as const,
+            [
+              sid,
+              await this.getHolidayOffDatesForRange(sid, start, end),
+            ] as const,
         ),
       ),
     );
@@ -864,7 +955,8 @@ export class AdminTeacherAttendanceService {
         // whichever working-days pattern was in effect on THIS date, so no
         // Unreported row should be created.
         const assignedDaysToday = resolveWorkingDaysForDate(history, d);
-        if (d.getUTCDay() === 0 || !assignedDaysToday.includes(d.getUTCDay())) continue;
+        if (d.getUTCDay() === 0 || !assignedDaysToday.includes(d.getUTCDay()))
+          continue;
         const dateStr = d.toISOString().split('T')[0];
         if (offDates.has(dateStr)) {
           holidaysSkipped++;
@@ -927,7 +1019,9 @@ export class AdminTeacherAttendanceService {
     if (teacherSchools.length === 0) {
       return { summary: { skipped: 'no_teachers', records_created: 0 } };
     }
-    const distinctSchoolIds = [...new Set(teacherSchools.map((t) => t.schoolId))];
+    const distinctSchoolIds = [
+      ...new Set(teacherSchools.map((t) => t.schoolId)),
+    ];
     const allTeacherIds = [...new Set(teacherSchools.map((t) => t.teacherId))];
 
     // Schools closed today (holiday/break) — every teacher there is skipped.
@@ -935,7 +1029,11 @@ export class AdminTeacherAttendanceService {
     let holidaySchoolsSkipped = 0;
     await Promise.all(
       distinctSchoolIds.map(async (sid) => {
-        const offDates = await this.getHolidayOffDatesForRange(sid, dateOnly, dateOnly);
+        const offDates = await this.getHolidayOffDatesForRange(
+          sid,
+          dateOnly,
+          dateOnly,
+        );
         const dateStr = dateOnly.toISOString().split('T')[0];
         if (offDates.has(dateStr)) {
           closedSchoolIds.add(sid);
@@ -949,7 +1047,9 @@ export class AdminTeacherAttendanceService {
       where: { date: dateOnly },
       select: { teacherId: true, schoolId: true },
     });
-    const existingSet = new Set(existingRows.map((r) => `${r.teacherId}-${r.schoolId}`));
+    const existingSet = new Set(
+      existingRows.map((r) => `${r.teacherId}-${r.schoolId}`),
+    );
 
     // Teachers on approved leave covering today.
     const leaves = await this.db.teacherLeave.findMany({
@@ -966,7 +1066,11 @@ export class AdminTeacherAttendanceService {
     // Today's weekday computed the same way reports.service.ts derives it
     // (local Date components from the IST date string), so it agrees with
     // how ClassSchedule.dayOfWeek is interpreted at report-submission time.
-    const [y, m, d] = dateOnly.toISOString().split('T')[0].split('-').map(Number);
+    const [y, m, d] = dateOnly
+      .toISOString()
+      .split('T')[0]
+      .split('-')
+      .map(Number);
     const dayOfWeek = new Date(y, m - 1, d).getDay();
 
     // Working-days history, resolved for today, per teacher+school pair —
@@ -986,7 +1090,10 @@ export class AdminTeacherAttendanceService {
             [
               `${teacherId}-${schoolId}`,
               await this.getWorkingDaysHistory(teacherId, schoolId, dateOnly),
-            ] as [string, Array<{ effectiveFrom: Date; workingDays: number[] }>],
+            ] as [
+              string,
+              Array<{ effectiveFrom: Date; workingDays: number[] }>,
+            ],
         ),
       ),
     );
@@ -1012,7 +1119,9 @@ export class AdminTeacherAttendanceService {
         // submitted BEFORE that day's 8pm cutoff count — this matters when the
         // catch-up run settles a day whose 8pm run was missed (a 9pm report
         // must not rescue it).
-        createdAt: { lt: attendanceCutoffInstant(dateOnly.toISOString().split('T')[0]) },
+        createdAt: {
+          lt: attendanceCutoffInstant(dateOnly.toISOString().split('T')[0]),
+        },
       },
       select: { teacherId: true, schoolId: true, periodId: true },
     });
@@ -1024,7 +1133,12 @@ export class AdminTeacherAttendanceService {
       reportedByPair.get(key)!.add(r.periodId);
     }
 
-    const toCreate: Array<{ teacherId: number; schoolId: string; date: Date; status: string }> = [];
+    const toCreate: Array<{
+      teacherId: number;
+      schoolId: string;
+      date: Date;
+      status: string;
+    }> = [];
     let notWorkingDaySkipped = 0;
     const teachersMarkedAbsent = new Set<number>();
 
@@ -1043,8 +1157,10 @@ export class AdminTeacherAttendanceService {
 
       // No timetable => nothing to cover, so the only evidence of presence
       // is a report that day; none means Absent (rule: no report = Absent).
-      const scheduledPeriodIds = scheduledByPair.get(pairKey) ?? new Set<string>();
-      const reportedPeriodIds = reportedByPair.get(pairKey) ?? new Set<string>();
+      const scheduledPeriodIds =
+        scheduledByPair.get(pairKey) ?? new Set<string>();
+      const reportedPeriodIds =
+        reportedByPair.get(pairKey) ?? new Set<string>();
       const allCovered =
         scheduledPeriodIds.size === 0
           ? reportedPeriodIds.size > 0
@@ -1059,7 +1175,10 @@ export class AdminTeacherAttendanceService {
     // a row after our check is skipped instead of aborting the whole run.
     // A report submitted afterwards still upserts the row to Present.
     const { count: recordsCreated } = toCreate.length
-      ? await this.db.attendance.createMany({ data: toCreate, skipDuplicates: true })
+      ? await this.db.attendance.createMany({
+          data: toCreate,
+          skipDuplicates: true,
+        })
       : { count: 0 };
 
     return {
@@ -1082,9 +1201,13 @@ export class AdminTeacherAttendanceService {
       const y = getTodayIstDateOnly();
       y.setUTCDate(y.getUTCDate() - 1);
       const result = await this.markAbsentForToday(y);
-      this.logger.log(`Catch-up absence marking: ${JSON.stringify(result.summary)}`);
+      this.logger.log(
+        `Catch-up absence marking: ${JSON.stringify(result.summary)}`,
+      );
     } catch (err) {
-      this.logger.error(`Catch-up absence marking failed: ${(err as Error)?.message}`);
+      this.logger.error(
+        `Catch-up absence marking failed: ${(err as Error)?.message}`,
+      );
     }
   }
 
@@ -1092,9 +1215,13 @@ export class AdminTeacherAttendanceService {
   async dailyAbsentMarkingCron(): Promise<void> {
     try {
       const result = await this.markAbsentForToday();
-      this.logger.log(`Daily absence marking: ${JSON.stringify(result.summary)}`);
+      this.logger.log(
+        `Daily absence marking: ${JSON.stringify(result.summary)}`,
+      );
     } catch (err) {
-      this.logger.error(`Daily absence marking failed: ${(err as Error)?.message}`);
+      this.logger.error(
+        `Daily absence marking failed: ${(err as Error)?.message}`,
+      );
     }
   }
 }

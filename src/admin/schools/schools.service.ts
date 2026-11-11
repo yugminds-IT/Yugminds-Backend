@@ -387,7 +387,10 @@ export class AdminSchoolsService {
       // entries of everyone tied to this school so the change applies at once
       // instead of after the 2-minute cache TTL.
       const [tenantUsers, teachers] = await Promise.all([
-        this.db.user.findMany({ where: { tenantId: id }, select: { id: true } }),
+        this.db.user.findMany({
+          where: { tenantId: id },
+          select: { id: true },
+        }),
         this.db.teacherSchool.findMany({
           where: { schoolId: school.id },
           select: { teacherId: true },
@@ -667,7 +670,10 @@ export class AdminSchoolsService {
       school.schoolCode ??
       (await this.deriveUniqueSchoolCode(school.name, schoolId));
     if (!school.schoolCode) {
-      await this.db.school.update({ where: { id: schoolId }, data: { schoolCode } });
+      await this.db.school.update({
+        where: { id: schoolId },
+        data: { schoolCode },
+      });
     }
     await this.createDefaultAcademicStructure(schoolId, schoolCode);
     return {
@@ -844,7 +850,8 @@ export class AdminSchoolsService {
     // back to `sectionNames`, so existing callers that never send this field
     // (Postman collection, older clients, init-academic-structure) are
     // completely unaffected.
-    const rawSectionsPerGrade = body.sections_per_grade ?? body.sectionsPerGrade;
+    const rawSectionsPerGrade =
+      body.sections_per_grade ?? body.sectionsPerGrade;
     const sectionsPerGrade =
       rawSectionsPerGrade && typeof rawSectionsPerGrade === 'object'
         ? (rawSectionsPerGrade as Record<string, unknown>)

@@ -1,7 +1,11 @@
 import request from 'supertest';
 import { INestApplication } from '@nestjs/common';
 import { bootstrapApp } from './support/app';
-import { createQaFixture, teardownQaFixture, QaFixture } from './support/fixtures';
+import {
+  createQaFixture,
+  teardownQaFixture,
+  QaFixture,
+} from './support/fixtures';
 import { authHeader } from './support/auth';
 import { closePool, pool } from './support/db';
 
@@ -41,7 +45,9 @@ describe('Admin password-reset-requests approve -> teacher can log in with new p
       .set(...authHeader(fixture.admin.token))
       .expect(200);
     const list = res.body?.data ?? res.body;
-    const items = Array.isArray(list) ? list : (list?.requests ?? list?.items ?? []);
+    const items = Array.isArray(list)
+      ? list
+      : (list?.requests ?? list?.items ?? []);
     expect(items.some((r: { id: string }) => r.id === requestId)).toBe(true);
   });
 

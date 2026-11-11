@@ -50,7 +50,9 @@ export class SavedViewsController {
     },
   ) {
     const tableKey = String(body.table_key ?? '').trim();
-    const name = String(body.name ?? '').trim().slice(0, 60);
+    const name = String(body.name ?? '')
+      .trim()
+      .slice(0, 60);
     if (!tableKey || !name) {
       throw new BadRequestException('table_key and name are required');
     }

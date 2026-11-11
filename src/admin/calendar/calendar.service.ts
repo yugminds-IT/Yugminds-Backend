@@ -61,10 +61,17 @@ export class AdminCalendarService {
    * (brand new / not staffed) — callers treat that as having NO working
    * days until a teacher is assigned, not as unrestricted.
    */
-  async getActiveWeekdaysBySchool(date: Date): Promise<Record<string, number[]>> {
+  async getActiveWeekdaysBySchool(
+    date: Date,
+  ): Promise<Record<string, number[]>> {
     const rows = await this.db.teacherWorkingDaysHistory.findMany({
       where: { effectiveFrom: { lte: date } },
-      select: { teacherId: true, schoolId: true, workingDays: true, effectiveFrom: true },
+      select: {
+        teacherId: true,
+        schoolId: true,
+        workingDays: true,
+        effectiveFrom: true,
+      },
       orderBy: { effectiveFrom: 'asc' },
     });
 
@@ -98,6 +105,200 @@ export class AdminCalendarService {
   }
 
   /**
+   * Who a calendar entry affects: the schools it covers, and the teachers who have classes scheduled
+   * on those dates (their timetable slots on the matching weekdays, counted for every date in the
+   * entry's range). Teachers assigned to these schools with no class in that window are listed apart.
+   * All entries of one declaration (a batch) share the same dates and type.
+   */
+  async impact(entryIds: string[]) {
+    const ids = [
+      ...new Set((entryIds ?? []).filter((x) => typeof x === 'string' && x)),
+    ].slice(0, 200);
+    if (ids.length === 0)
+      throw new BadRequestException('Provide at least one entry id');
+
+    const entries = await this.db.schoolCalendar.findMany({
+      where: { id: { in: ids } },
+      select: {
+        id: true,
+        schoolId: true,
+        date: true,
+        endDate: true,
+        type: true,
+        name: true,
+        school: { select: { id: true, name: true } },
+      },
+    });
+    if (entries.length === 0)
+      throw new NotFoundException('Calendar entry not found');
+
+    const schoolIds = [...new Set(entries.map((e) => e.schoolId))];
+    const [assignments, schedules] = await Promise.all([
+      this.db.teacherSchool.findMany({
+        where: {
+          schoolId: { in: schoolIds },
+          teacher: { isActive: true, deletedAt: null },
+        },
+        select: {
+          teacherId: true,
+          schoolId: true,
+          assignedFrom: true,
+          assignedUntil: true,
+          teacher: {
+            select: { email: true, profile: { select: { fullName: true } } },
+          },
+        },
+      }),
+      this.db.classSchedule.findMany({
+        where: {
+          schoolId: { in: schoolIds },
+          isActive: true,
+          teacherId: { not: null },
+        },
+        select: { schoolId: true, teacherId: true, dayOfWeek: true },
+      }),
+    ]);
+
+    // Classes per teacher and school: each timetable slot counts once for every date in the entry's range
+    // that falls on its weekday (a break runs over several dates).
+    const MAX_DAYS = 62;
+    const key = (teacherId: number, schoolId: string) =>
+      `${teacherId}:${schoolId}`;
+    const classCount = new Map<string, number>();
+    for (const e of entries) {
+      const weekdays: number[] = [];
+      const end = new Date(e.endDate ?? e.date);
+      for (
+        let d = new Date(e.date), n = 0;
+        d <= end && n < MAX_DAYS;
+        d.setUTCDate(d.getUTCDate() + 1), n++
+      ) {
+        weekdays.push(d.getUTCDay());
+      }
+      for (const sc of schedules) {
+        if (sc.schoolId !== e.schoolId || sc.teacherId == null) continue;
+        const hits = weekdays.filter((w) => w === sc.dayOfWeek).length;
+        if (hits > 0)
+          classCount.set(
+            key(sc.teacherId, sc.schoolId),
+            (classCount.get(key(sc.teacherId, sc.schoolId)) ?? 0) + hits,
+          );
+      }
+    }
+
+    // A teacher assigned to the school only from a later date (or until an earlier one) is not working on these dates.
+    const windowOf = new Map(
+      entries.map((e) => [
+        e.schoolId,
+        { from: e.date, to: e.endDate ?? e.date },
+      ]),
+    );
+    const assignedHere = new Map(
+      assignments.map((a) => [key(a.teacherId, a.schoolId), a]),
+    );
+    const inWindow = (a: {
+      schoolId: string;
+      assignedFrom: Date | null;
+      assignedUntil: Date | null;
+    }) => {
+      const w = windowOf.get(a.schoolId)!;
+      return (
+        (!a.assignedFrom || a.assignedFrom <= w.to) &&
+        (!a.assignedUntil || a.assignedUntil >= w.from)
+      );
+    };
+
+    // The timetable is the stronger signal: a teacher with classes is affected even if the assignment row is missing.
+    const strangers = [
+      ...new Set(
+        [...classCount.keys()]
+          .filter((k) => !assignedHere.has(k))
+          .map((k) => Number(k.split(':')[0])),
+      ),
+    ];
+    const strangerUsers = strangers.length
+      ? await this.db.user.findMany({
+          where: { id: { in: strangers }, isActive: true, deletedAt: null },
+          select: {
+            id: true,
+            email: true,
+            profile: { select: { fullName: true } },
+          },
+        })
+      : [];
+    const nameOf = new Map<number, { name: string; email: string }>();
+    for (const a of assignments)
+      nameOf.set(a.teacherId, {
+        name: a.teacher.profile?.fullName ?? a.teacher.email ?? '',
+        email: a.teacher.email ?? '',
+      });
+    for (const u of strangerUsers)
+      nameOf.set(u.id, {
+        name: u.profile?.fullName ?? u.email ?? '',
+        email: u.email ?? '',
+      });
+
+    const schoolName = new Map(
+      entries.map((e) => [e.schoolId, e.school?.name ?? '']),
+    );
+    const people = new Map<
+      number,
+      {
+        id: number;
+        name: string;
+        email: string;
+        classes: number;
+        schools: { id: string; name: string; classes: number }[];
+      }
+    >();
+    for (const [k, n] of classCount) {
+      const [tid, sid] = [Number(k.split(':')[0]), k.slice(k.indexOf(':') + 1)];
+      const a = assignedHere.get(k);
+      const who = nameOf.get(tid);
+      if (!who || (a && !inWindow(a))) continue; // inactive/removed teacher, or not assigned on these dates
+      const p = people.get(tid) ?? {
+        id: tid,
+        name: who.name,
+        email: who.email,
+        classes: 0,
+        schools: [],
+      };
+      p.classes += n;
+      p.schools.push({ id: sid, name: schoolName.get(sid) ?? '', classes: n });
+      people.set(tid, p);
+    }
+    const assignedOnly = new Map<number, { id: number; name: string }>();
+    for (const a of assignments) {
+      if (!people.has(a.teacherId) && inWindow(a))
+        assignedOnly.set(a.teacherId, {
+          id: a.teacherId,
+          name: nameOf.get(a.teacherId)?.name ?? '',
+        });
+    }
+
+    const byName = (a: { name: string }, b: { name: string }) =>
+      a.name.localeCompare(b.name);
+    const teachers = [...people.values()].sort(byName);
+    const first = entries[0];
+    return {
+      name: first.name,
+      type: first.type,
+      date: first.date.toISOString().slice(0, 10),
+      end_date: first.endDate ? first.endDate.toISOString().slice(0, 10) : null,
+      schools: schoolIds
+        .map((id) => ({
+          id,
+          name: schoolName.get(id) ?? '',
+          teachers: teachers.filter((t) => t.schools.some((s) => s.id === id))
+            .length,
+        }))
+        .sort(byName),
+      teachers,
+      without_classes: [...assignedOnly.values()].sort(byName),
+    };
+  }
+
+  /**
    * Per school, the exact set of dates in [year, month] that were an active
    * working day for at least one teacher there — resolved DAY BY DAY against
    * each teacher's working-days history, not one flat weekday pattern for
@@ -116,19 +317,31 @@ export class AdminCalendarService {
 
     const rows = await this.db.teacherWorkingDaysHistory.findMany({
       where: { effectiveFrom: { lte: end } },
-      select: { teacherId: true, schoolId: true, workingDays: true, effectiveFrom: true },
+      select: {
+        teacherId: true,
+        schoolId: true,
+        workingDays: true,
+        effectiveFrom: true,
+      },
       orderBy: { effectiveFrom: 'asc' },
     });
 
     // Group into one history timeline per (teacher, school) pair.
     const byPair = new Map<
       string,
-      { schoolId: string; entries: Array<{ effectiveFrom: Date; workingDays: number[] }> }
+      {
+        schoolId: string;
+        entries: Array<{ effectiveFrom: Date; workingDays: number[] }>;
+      }
     >();
     for (const r of rows) {
       const key = `${r.teacherId}:${r.schoolId}`;
-      if (!byPair.has(key)) byPair.set(key, { schoolId: r.schoolId, entries: [] });
-      byPair.get(key)!.entries.push({ effectiveFrom: r.effectiveFrom, workingDays: r.workingDays });
+      if (!byPair.has(key))
+        byPair.set(key, { schoolId: r.schoolId, entries: [] });
+      byPair.get(key)!.entries.push({
+        effectiveFrom: r.effectiveFrom,
+        workingDays: r.workingDays,
+      });
     }
 
     const activeDatesBySchool = new Map<string, Set<string>>();
@@ -140,7 +353,8 @@ export class AdminCalendarService {
       ) {
         const days = resolveWorkingDaysForDate(entries, d);
         if (days.includes(d.getUTCDay())) {
-          if (!activeDatesBySchool.has(schoolId)) activeDatesBySchool.set(schoolId, new Set());
+          if (!activeDatesBySchool.has(schoolId))
+            activeDatesBySchool.set(schoolId, new Set());
           activeDatesBySchool.get(schoolId)!.add(d.toISOString().split('T')[0]);
         }
       }
@@ -154,7 +368,9 @@ export class AdminCalendarService {
   }
 
   private toDto(
-    entry: Awaited<ReturnType<DatabaseService['schoolCalendar']['findFirstOrThrow']>> & {
+    entry: Awaited<
+      ReturnType<DatabaseService['schoolCalendar']['findFirstOrThrow']>
+    > & {
       school?: { name: string } | null;
     },
   ): CalendarEntryDto {
@@ -163,7 +379,9 @@ export class AdminCalendarService {
       school_id: entry.schoolId,
       school_name: entry.school?.name ?? '',
       date: entry.date.toISOString().split('T')[0],
-      end_date: entry.endDate ? entry.endDate.toISOString().split('T')[0] : null,
+      end_date: entry.endDate
+        ? entry.endDate.toISOString().split('T')[0]
+        : null,
       name: entry.name,
       type: entry.type,
       academic_year: entry.academicYear,
@@ -253,12 +471,16 @@ export class AdminCalendarService {
   }> {
     if (!body.date) throw new BadRequestException('date is required');
     if (!body.name?.trim()) {
-      throw new BadRequestException('A reason for the holiday/entry is required');
+      throw new BadRequestException(
+        'A reason for the holiday/entry is required',
+      );
     }
     this.assertValidType(body.type);
 
     const date = new Date(body.date + 'T00:00:00.000Z');
-    const endDate = body.end_date ? new Date(body.end_date + 'T00:00:00.000Z') : null;
+    const endDate = body.end_date
+      ? new Date(body.end_date + 'T00:00:00.000Z')
+      : null;
     if (endDate && endDate < date) {
       throw new BadRequestException('end_date must be on or after date');
     }
@@ -291,7 +513,10 @@ export class AdminCalendarService {
     // it open for reports on a declared holiday.
     const isSchoolEligible = (schoolId: string) => {
       const days = activeWeekdaysBySchool[schoolId];
-      return (!!days && days.includes(weekday)) || hasClassesThatWeekday.has(schoolId);
+      return (
+        (!!days && days.includes(weekday)) ||
+        hasClassesThatWeekday.has(schoolId)
+      );
     };
 
     if (body.apply_to_all_schools) {

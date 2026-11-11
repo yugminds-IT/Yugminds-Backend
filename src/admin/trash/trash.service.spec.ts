@@ -9,23 +9,44 @@ describe('TrashService', () => {
     user: { findFirst: jest.Mock; delete: jest.Mock };
     teacherReport: { deleteMany: jest.Mock };
     teacherLeave: { deleteMany: jest.Mock };
+    schoolAdmin: { deleteMany: jest.Mock };
   };
   let schoolsService: { purge: jest.Mock };
 
   beforeEach(() => {
     db = {
       user: {
-        findFirst: jest.fn().mockResolvedValue({ id: 5, deletedAt: new Date() }),
+        findFirst: jest
+          .fn()
+          .mockResolvedValue({ id: 5, deletedAt: new Date() }),
         delete: jest.fn().mockResolvedValue({}),
       },
       teacherReport: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
       teacherLeave: { deleteMany: jest.fn().mockResolvedValue({ count: 0 }) },
+      schoolAdmin: { deleteMany: jest.fn().mockResolvedValue({ count: 1 }) },
     };
     schoolsService = { purge: jest.fn().mockResolvedValue({}) };
     service = new TrashService(
       db as unknown as DatabaseService,
       schoolsService as unknown as AdminSchoolsService,
     );
+  });
+
+  describe('school admins', () => {
+    it('purge removes the SchoolAdmin link before the user', async () => {
+      db.user.findFirst.mockResolvedValue({ id: 5, role: 'school_admin' });
+      await service.purge('school_admins', '5');
+      expect(db.schoolAdmin.deleteMany).toHaveBeenCalledWith({
+        where: { userId: 5 },
+      });
+      expect(db.user.delete).toHaveBeenCalledWith({ where: { id: 5 } });
+    });
+
+    it('purging a student leaves SchoolAdmin rows alone', async () => {
+      db.user.findFirst.mockResolvedValue({ id: 5, role: 'student' });
+      await service.purge('students', '5');
+      expect(db.schoolAdmin.deleteMany).not.toHaveBeenCalled();
+    });
   });
 
   describe('purge("teachers", id)', () => {

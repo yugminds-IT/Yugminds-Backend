@@ -31,7 +31,10 @@ export class StudentDashboardService {
             })
             .then((rows) => rows.length)
         : 0;
-    return { pending: Math.max(0, ids.length - submitted), completed: submitted };
+    return {
+      pending: Math.max(0, ids.length - submitted),
+      completed: submitted,
+    };
   }
 
   async get(user: { id: number }) {

@@ -54,7 +54,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
        GROUP BY s.id, s.name`,
       [teacherId],
     );
-    dawnBudsId = schools.rows.find((r: any) => r.name.includes('Dawn Buds'))?.id;
+    dawnBudsId = schools.rows.find((r: any) =>
+      r.name.includes('Dawn Buds'),
+    )?.id;
     stLouisId = schools.rows.find((r: any) => r.name.includes('St Louis'))?.id;
     expect(dawnBudsId).toBeDefined();
     expect(stLouisId).toBeDefined();
@@ -69,7 +71,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
         .set(...teacherAuth)
         .expect(200);
       const unassigned: string[] = res.body.unassigned_dates;
-      expect(unassigned).toEqual(expect.arrayContaining(['2026-07-01', '2026-07-10', '2026-07-22']));
+      expect(unassigned).toEqual(
+        expect.arrayContaining(['2026-07-01', '2026-07-10', '2026-07-22']),
+      );
       expect(unassigned).not.toEqual(expect.arrayContaining(['2026-07-23']));
     },
   );
@@ -79,9 +83,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
       .get('/teacher/calendar?year=2026&month=07')
       .set(...teacherAuth)
       .expect(200);
-    const day = (res.body.schedule as Array<{ date: string; school_id: string }>).filter(
-      (s) => s.date === '2026-07-23',
-    );
+    const day = (
+      res.body.schedule as Array<{ date: string; school_id: string }>
+    ).filter((s) => s.date === '2026-07-23');
     expect(day).toHaveLength(1);
     expect(day[0].school_id).toBe(dawnBudsId);
   });
@@ -109,9 +113,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
       .get('/teacher/calendar?year=2026&month=07')
       .set(...teacherAuth)
       .expect(200);
-    const day = (res.body.schedule as Array<{ date: string; school_id: string }>).filter(
-      (s) => s.date === '2026-07-27',
-    );
+    const day = (
+      res.body.schedule as Array<{ date: string; school_id: string }>
+    ).filter((s) => s.date === '2026-07-27');
     expect(day).toHaveLength(1);
     expect(day[0].school_id).toBe(stLouisId);
   });
@@ -121,9 +125,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
       .get('/teacher/calendar?year=2026&month=07')
       .set(...teacherAuth)
       .expect(200);
-    const day = (res.body.schedule as Array<{ date: string; school_id: string }>).filter(
-      (s) => s.date === '2026-07-28',
-    );
+    const day = (
+      res.body.schedule as Array<{ date: string; school_id: string }>
+    ).filter((s) => s.date === '2026-07-28');
     expect(day).toHaveLength(1);
     expect(day[0].school_id).toBe(dawnBudsId);
   });
@@ -143,9 +147,9 @@ describe('Teacher calendar (real multi-school teacher, read-only)', () => {
       .set(...teacherAuth)
       .expect(200);
     // 2026-08-03 is a Monday -> St Louis under the pattern effective 07-26.
-    const day = (res.body.schedule as Array<{ date: string; school_id: string }>).filter(
-      (s) => s.date === '2026-08-03',
-    );
+    const day = (
+      res.body.schedule as Array<{ date: string; school_id: string }>
+    ).filter((s) => s.date === '2026-08-03');
     expect(day).toHaveLength(1);
     expect(day[0].school_id).toBe(stLouisId);
     expect(res.body.unassigned_dates).toEqual([]);

@@ -8,7 +8,9 @@ describe('assertLeaveSpan', () => {
 
   it('rejects a leave longer than MAX_LEAVE_DAYS', () => {
     expect(MAX_LEAVE_DAYS).toBe(366);
-    expect(() => assertLeaveSpan('2026-01-01', '2027-01-02')).toThrow(/more than 366 days/);
+    expect(() => assertLeaveSpan('2026-01-01', '2027-01-02')).toThrow(
+      /more than 366 days/,
+    );
     expect(() => assertLeaveSpan('2026-01-01', '2999-01-01')).toThrow();
   });
 });

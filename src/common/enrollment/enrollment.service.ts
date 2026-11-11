@@ -223,7 +223,9 @@ export class EnrollmentService {
 
     const courseIdsToEnroll: string[] = [];
     for (const access of accessRecords) {
-      if (this.shouldEnroll(this.toGrants(access.gradeAccess), grade, section)) {
+      if (
+        this.shouldEnroll(this.toGrants(access.gradeAccess), grade, section)
+      ) {
         courseIdsToEnroll.push(access.courseId);
       }
     }

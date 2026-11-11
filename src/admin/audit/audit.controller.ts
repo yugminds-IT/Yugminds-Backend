@@ -19,6 +19,12 @@ export class AuditController {
     return this.audit.list(query);
   }
 
+  /** Who is behind the failed attempts and deletions, per role and per person. */
+  @Get('summary')
+  summary(@Query() query: AuditQuery) {
+    return this.audit.summary(query);
+  }
+
   @Get('entity-types')
   entityTypes() {
     return this.audit.entityTypes();

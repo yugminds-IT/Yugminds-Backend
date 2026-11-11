@@ -22,11 +22,11 @@ async function bootstrap() {
   // Must be registered before any body parsers.
   app.use(
     compression({
-      level: 6,           // Balanced speed vs ratio (1=fast, 9=smallest)
-      threshold: 1024,    // Only compress responses > 1 KB
+      level: 6, // Balanced speed vs ratio (1=fast, 9=smallest)
+      threshold: 1024, // Only compress responses > 1 KB
       filter: (req, res) => {
         // Don't compress SSE streams or already-compressed formats
-        const contentType = res.getHeader('Content-Type') as string ?? '';
+        const contentType = (res.getHeader('Content-Type') as string) ?? '';
         if (contentType.includes('text/event-stream')) return false;
         return compression.filter(req, res);
       },
@@ -83,8 +83,11 @@ async function bootstrap() {
   const server = app.getHttpServer() as http.Server;
 
   // Keep-alive: reuse TCP connections for multiple requests (critical at 5k+ users)
-  server.keepAliveTimeout = 65_000;   // must be > load-balancer idle timeout (60s)
-  server.headersTimeout = 66_000;     // slightly above keepAliveTimeout
+  server.keepAliveTimeout = 65_000; // must be > load-balancer idle timeout (60s)
+  server.headersTimeout = 66_000; // slightly above keepAliveTimeout
+
+  // So the monitoring history is saved when the server is stopped or redeployed, not lost.
+  app.enableShutdownHooks();
 
   await app.listen(process.env.PORT ?? 3000);
 }

@@ -1,8 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
-import { MonitoringService } from '../../common/monitoring/monitoring.service';
+import {
+  MONITORING_ROLES,
+  MonitoringRole,
+  MonitoringService,
+} from '../../common/monitoring/monitoring.service';
+import { MonitoringHistoryService } from '../../common/monitoring/monitoring-history.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 import { Role } from '@prisma/client';
+import { enrolmentProgress } from '../../common/utils/enrolment-progress';
 
 @Injectable()
 export class AdminDashboardService {
@@ -12,6 +18,7 @@ export class AdminDashboardService {
   constructor(
     private readonly db: DatabaseService,
     private readonly monitoring: MonitoringService,
+    private readonly monitoringHistory: MonitoringHistoryService,
     private readonly studentRanking: StudentRankingService,
   ) {}
 
@@ -34,17 +41,17 @@ export class AdminDashboardService {
       // schema comment history), so hard-deleting a teacher or school can
       // leave orphaned "pending" rows behind — a plain status count would
       // include leave requests for teachers/schools that no longer exist.
-      this.db
-        .$queryRaw<
-          Array<{ count: bigint }>
-        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`
-        .then((rows) => Number(rows[0]?.count ?? 0)),
+      this.db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending'`.then(
+        (rows) => Number(rows[0]?.count ?? 0),
+      ),
       // Of those, how many are emergency leaves (shown separately on the dashboard).
-      this.db
-        .$queryRaw<
-          Array<{ count: bigint }>
-        >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending' AND tl."leaveType" = 'Emergency'`
-        .then((rows) => Number(rows[0]?.count ?? 0)),
+      this.db.$queryRaw<
+        Array<{ count: bigint }>
+      >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" JOIN "School" sc ON sc.id = tl."schoolId" WHERE tl.status = 'pending' AND tl."leaveType" = 'Emergency'`.then(
+        (rows) => Number(rows[0]?.count ?? 0),
+      ),
     ]);
 
     return {
@@ -99,9 +106,15 @@ export class AdminDashboardService {
         await Promise.all([
           // Keep analytics card totals aligned with school listing source of truth.
           this.db.tenant.count(),
-          this.db.user.count({ where: { role: Role.teacher, isActive: true } }),
-          this.db.user.count({ where: { role: Role.student, isActive: true } }),
-          this.db.course.count({ where: { isPublished: true } }),
+          this.db.user.count({
+            where: { role: Role.teacher, isActive: true, deletedAt: null },
+          }),
+          this.db.user.count({
+            where: { role: Role.student, isActive: true, deletedAt: null },
+          }),
+          this.db.course.count({
+            where: { isPublished: true, deletedAt: null },
+          }),
         ]);
 
       // ── "as of last month" totals, for the trend % shown next to each
@@ -124,6 +137,7 @@ export class AdminDashboardService {
           where: {
             role: Role.teacher,
             isActive: true,
+            deletedAt: null,
             createdAt: { lt: startOfThisMonth },
           },
         }),
@@ -131,11 +145,16 @@ export class AdminDashboardService {
           where: {
             role: Role.student,
             isActive: true,
+            deletedAt: null,
             createdAt: { lt: startOfThisMonth },
           },
         }),
         this.db.course.count({
-          where: { isPublished: true, createdAt: { lt: startOfThisMonth } },
+          where: {
+            isPublished: true,
+            deletedAt: null,
+            createdAt: { lt: startOfThisMonth },
+          },
         }),
       ]);
 
@@ -143,28 +162,46 @@ export class AdminDashboardService {
         where: { date: { gte: last30Days } },
         select: { status: true },
       });
-      const presentCount = attendance30.filter(
+      // Approved leave is not an absence, so it stays out of the rate. "Unreported" counts against it.
+      const counted30 = attendance30.filter(
+        (a) => !String(a.status).toLowerCase().startsWith('leave'),
+      );
+      const presentCount = counted30.filter(
         (a) => String(a.status).toLowerCase() === 'present',
       ).length;
       const avgAttendance =
-        attendance30.length > 0
-          ? Math.round((presentCount / attendance30.length) * 100)
+        counted30.length > 0
+          ? Math.round((presentCount / counted30.length) * 100)
           : 0;
 
-      const progressRows = await this.db.courseProgress.findMany({
-        where: { updatedAt: { gte: last30Days } },
-        select: { progress: true },
-        take: 5000,
-      });
-      const avgProgress =
-        progressRows.length > 0
-          ? progressRows.reduce(
-              (sum, r) => sum + (Number(r.progress) || 0),
-              0,
-            ) / progressRows.length
+      // How far enrolled students are through their courses: the same live-content calculation the Course
+      // progress page uses, over every enrolment in a course that still exists, for students still active.
+      const [liveCourses, activeStudents] = await Promise.all([
+        this.db.course.findMany({
+          where: { deletedAt: null },
+          select: { id: true },
+        }),
+        this.db.user.findMany({
+          where: { role: Role.student, isActive: true, deletedAt: null },
+          select: { id: true },
+        }),
+      ]);
+      const liveCourseIds = liveCourses.map((c) => c.id);
+      const activeStudentIds = activeStudents.map((u) => u.id);
+      const enrolments =
+        liveCourseIds.length > 0 && activeStudentIds.length > 0
+          ? await enrolmentProgress(this.db, {
+              courseIds: liveCourseIds,
+              studentIds: activeStudentIds,
+            })
+          : [];
+      const completionRate =
+        enrolments.length > 0
+          ? Math.round(
+              enrolments.reduce((sum, e) => sum + e.progressPercentage, 0) /
+                enrolments.length,
+            )
           : 0;
-      // progress is stored as 0–100 in DB; no need to multiply again
-      const completionRate = Math.round(avgProgress);
 
       // ── Monthly Growth (new additions per month, last 6 months) ─────────────
       // PERFORMANCE FIX (HIGH-03): Use single aggregation query instead of N+1
@@ -183,21 +220,21 @@ export class AdminDashboardService {
           this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
         SELECT TO_CHAR(DATE_TRUNC('month', "createdAt"), 'Mon YY') as month, COUNT(*) as count
         FROM "User"
-        WHERE role = 'teacher' AND "isActive" = true AND "createdAt" >= ${sixMonthsAgo}
+        WHERE role = 'teacher' AND "isActive" = true AND "deletedAt" IS NULL AND "createdAt" >= ${sixMonthsAgo}
         GROUP BY DATE_TRUNC('month', "createdAt")
         ORDER BY DATE_TRUNC('month', "createdAt")
       `,
           this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
         SELECT TO_CHAR(DATE_TRUNC('month', "createdAt"), 'Mon YY') as month, COUNT(*) as count
         FROM "User"
-        WHERE role = 'student' AND "isActive" = true AND "createdAt" >= ${sixMonthsAgo}
+        WHERE role = 'student' AND "isActive" = true AND "deletedAt" IS NULL AND "createdAt" >= ${sixMonthsAgo}
         GROUP BY DATE_TRUNC('month', "createdAt")
         ORDER BY DATE_TRUNC('month', "createdAt")
       `,
           this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
         SELECT TO_CHAR(DATE_TRUNC('month', "createdAt"), 'Mon YY') as month, COUNT(*) as count
         FROM "Course"
-        WHERE "isPublished" = true AND "createdAt" >= ${sixMonthsAgo}
+        WHERE "isPublished" = true AND "deletedAt" IS NULL AND "createdAt" >= ${sixMonthsAgo}
         GROUP BY DATE_TRUNC('month', "createdAt")
         ORDER BY DATE_TRUNC('month', "createdAt")
       `,
@@ -274,6 +311,7 @@ export class AdminDashboardService {
       try {
         const schoolStudentCounts = await this.db.studentSchool.groupBy({
           by: ['schoolId'],
+          where: { isActive: true, studentId: { in: activeStudentIds } },
           _count: { studentId: true },
           orderBy: { _count: { studentId: 'desc' } },
           take: 5,
@@ -303,6 +341,10 @@ export class AdminDashboardService {
       try {
         const courseEnrollments = await this.db.studentCourse.groupBy({
           by: ['courseId'],
+          where: {
+            courseId: { in: liveCourseIds },
+            studentId: { in: activeStudentIds },
+          },
           _count: { studentId: true },
           orderBy: { _count: { studentId: 'desc' } },
           take: 5,
@@ -331,10 +373,12 @@ export class AdminDashboardService {
         good: 0,
         average: 0,
         needsImprovement: 0,
+        /** active teachers with no attendance record in the period: no data, not poor attendance */
+        noRecords: 0,
       };
       try {
         const allTeachers = await this.db.user.findMany({
-          where: { role: Role.teacher, isActive: true },
+          where: { role: Role.teacher, isActive: true, deletedAt: null },
           select: { id: true },
         });
 
@@ -350,6 +394,7 @@ export class AdminDashboardService {
           const totalMap = new Map<number, number>();
           const presentMap = new Map<number, number>();
           for (const rec of teacherAttendanceRaw) {
+            if (String(rec.status).toLowerCase().startsWith('leave')) continue; // approved leave is not an absence
             totalMap.set(rec.teacherId, (totalMap.get(rec.teacherId) ?? 0) + 1);
             if (String(rec.status).toLowerCase() === 'present') {
               presentMap.set(
@@ -362,17 +407,28 @@ export class AdminDashboardService {
           let excellent = 0,
             good = 0,
             average = 0,
-            needsImprovement = 0;
+            needsImprovement = 0,
+            noRecords = 0;
           for (const t of allTeachers) {
             const total = totalMap.get(t.id) ?? 0;
             const present = presentMap.get(t.id) ?? 0;
-            const rate = total > 0 ? (present / total) * 100 : 0;
+            if (total === 0) {
+              noRecords++;
+              continue;
+            }
+            const rate = (present / total) * 100;
             if (rate >= 90) excellent++;
             else if (rate >= 75) good++;
             else if (rate >= 50) average++;
             else needsImprovement++;
           }
-          teacherPerformance = { excellent, good, average, needsImprovement };
+          teacherPerformance = {
+            excellent,
+            good,
+            average,
+            needsImprovement,
+            noRecords,
+          };
         }
       } catch (e) {
         console.error('[Analytics] teacherPerformance error:', e);
@@ -380,30 +436,22 @@ export class AdminDashboardService {
 
       // ── Course Engagement (last 6 months) ────────────────────────────────────
       // PERFORMANCE FIX (HIGH-03): Use aggregation queries instead of N+1
-      const [enrollmentsByMonth, completionsByMonth] = await Promise.all([
-        this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
-        SELECT TO_CHAR(DATE_TRUNC('month', "enrolledAt"), 'Mon YY') as month, COUNT(*) as count
-        FROM "StudentCourse"
-        WHERE "enrolledAt" >= ${sixMonthsAgo}
-        GROUP BY DATE_TRUNC('month', "enrolledAt")
-        ORDER BY DATE_TRUNC('month', "enrolledAt")
-      `,
-        // Use StudentCourse.completedAt as the single source of truth for completions.
-        this.db.$queryRaw<Array<{ month: string; count: bigint }>>`
-        SELECT TO_CHAR(DATE_TRUNC('month', "completedAt"), 'Mon YY') as month, COUNT(*) as count
-        FROM "StudentCourse"
-        WHERE "completedAt" IS NOT NULL AND "completedAt" >= ${sixMonthsAgo}
-        GROUP BY DATE_TRUNC('month', "completedAt")
-        ORDER BY DATE_TRUNC('month', "completedAt")
-      `,
-      ]);
-
-      const enrollmentsMap = new Map(
-        enrollmentsByMonth.map((r) => [r.month, Number(r.count)]),
-      );
-      const completionsMap = new Map(
-        completionsByMonth.map((r) => [r.month, Number(r.count)]),
-      );
+      // Enrolments per month by enrolment date. A completion is an enrolment whose live progress says
+      // "completed", counted in the month of its last activity. (StudentCourse.completedAt is never
+      // written anywhere, so it cannot be used.)
+      const enrollmentsMap = new Map<string, number>();
+      const completionsMap = new Map<string, number>();
+      const bump = (m: Map<string, number>, d: Date) =>
+        m.set(this.monthLabel(d), (m.get(this.monthLabel(d)) ?? 0) + 1);
+      for (const e of enrolments) {
+        if (e.enrolledAt >= sixMonthsAgo) bump(enrollmentsMap, e.enrolledAt);
+        if (
+          e.status === 'completed' &&
+          e.lastAccessed &&
+          e.lastAccessed >= sixMonthsAgo
+        )
+          bump(completionsMap, e.lastAccessed);
+      }
 
       const courseEngagement: Array<{
         name: string;
@@ -479,7 +527,10 @@ export class AdminDashboardService {
       };
 
       if (isDefaultRange) {
-        this.analyticsCache = { data: result, expiresAt: Date.now() + this.ANALYTICS_TTL_MS };
+        this.analyticsCache = {
+          data: result,
+          expiresAt: Date.now() + this.ANALYTICS_TTL_MS,
+        };
       }
       return result;
     } catch (err) {
@@ -510,6 +561,7 @@ export class AdminDashboardService {
           good: 0,
           average: 0,
           needsImprovement: 0,
+          noRecords: 0,
         },
         courseEngagement: [],
       };
@@ -520,8 +572,48 @@ export class AdminDashboardService {
     return { success: true, refreshed_at: new Date().toISOString() };
   }
 
-  getMonitoring() {
-    return this.monitoring.getSnapshot();
+  /** Live traffic since the server started, optionally for one role and/or one school. */
+  async getMonitoring(role?: string, schoolId?: string) {
+    const r = MONITORING_ROLES.includes(role as MonitoringRole)
+      ? (role as MonitoringRole)
+      : undefined;
+    const snap = this.monitoring.getSnapshot({
+      role: r,
+      schoolId: schoolId || undefined,
+    });
+    const ids = [
+      ...new Set(
+        snap.recent.map((x) => x.schoolId).filter((x): x is string => !!x),
+      ),
+    ];
+    const names = ids.length
+      ? new Map(
+          (
+            await this.db.school.findMany({
+              where: { id: { in: ids } },
+              select: { id: true, name: true },
+            })
+          ).map((s) => [s.id, s.name]),
+        )
+      : new Map<string, string>();
+    return {
+      ...snap,
+      recent: snap.recent.map((x) => ({
+        ...x,
+        schoolName: x.schoolId ? (names.get(x.schoolId) ?? null) : null,
+      })),
+    };
+  }
+
+  /** Hourly totals kept in the database (survive restarts, deleted after the retention period). */
+  getMonitoringHistory(hours?: string, role?: string, schoolId?: string) {
+    return this.monitoringHistory.history({
+      hours: hours ? Number(hours) : undefined,
+      role: MONITORING_ROLES.includes(role as MonitoringRole)
+        ? (role as MonitoringRole)
+        : undefined,
+      schoolId: schoolId || undefined,
+    });
   }
 
   getMaterializedViewStats() {
@@ -580,7 +672,9 @@ export class AdminDashboardService {
     // direct courseId column would treat every real course assignment as
     // "not linked to any school."
     const chapterIds = [
-      ...new Set(assignments.map((a) => a.chapterId).filter((c): c is string => !!c)),
+      ...new Set(
+        assignments.map((a) => a.chapterId).filter((c): c is string => !!c),
+      ),
     ];
     const chapters = chapterIds.length
       ? await this.db.chapter.findMany({
@@ -589,8 +683,12 @@ export class AdminDashboardService {
         })
       : [];
     const courseIdByChapter = new Map(chapters.map((c) => [c.id, c.courseId]));
-    const courseIdOf = (a: { courseId: string | null; chapterId: string | null }) =>
-      a.courseId ?? (a.chapterId ? (courseIdByChapter.get(a.chapterId) ?? null) : null);
+    const courseIdOf = (a: {
+      courseId: string | null;
+      chapterId: string | null;
+    }) =>
+      a.courseId ??
+      (a.chapterId ? (courseIdByChapter.get(a.chapterId) ?? null) : null);
 
     const courseIds = [
       ...new Set(
@@ -608,7 +706,10 @@ export class AdminDashboardService {
         }),
         submittingStudentIds.length
           ? this.db.studentSchool.findMany({
-              where: { studentId: { in: submittingStudentIds }, isActive: true },
+              where: {
+                studentId: { in: submittingStudentIds },
+                isActive: true,
+              },
               select: { studentId: true, schoolId: true },
             })
           : Promise.resolve([]),
@@ -625,7 +726,8 @@ export class AdminDashboardService {
     // school -> set of courseIds granted to it
     const coursesBySchool = new Map<string, Set<string>>();
     for (const ca of courseAccessRows) {
-      if (!coursesBySchool.has(ca.schoolId)) coursesBySchool.set(ca.schoolId, new Set());
+      if (!coursesBySchool.has(ca.schoolId))
+        coursesBySchool.set(ca.schoolId, new Set());
       coursesBySchool.get(ca.schoolId)!.add(ca.courseId);
     }
     // Real per-school assignment relevance: a DAILY assignment counts for
@@ -660,7 +762,10 @@ export class AdminDashboardService {
     // with what the canonical service (and every other dashboard) reports
     // for the identical submission.
     const retakeRuleByAssignment = new Map(
-      assignments.map((a) => [a.id, String(a.retakeScoringRule ?? 'latest').toLowerCase()]),
+      assignments.map((a) => [
+        a.id,
+        String(a.retakeScoringRule ?? 'latest').toLowerCase(),
+      ]),
     );
     const submissionsByKeyInOrder = [...submissions].sort(
       (a, b) => a.attemptNumber - b.attemptNumber,
@@ -697,7 +802,13 @@ export class AdminDashboardService {
     const ensureAgg = (sid: string) => {
       let cur = agg.get(sid);
       if (!cur) {
-        cur = { attempts: 0, total: 0, max: 0, retakes: 0, submitters: new Set() };
+        cur = {
+          attempts: 0,
+          total: 0,
+          max: 0,
+          retakes: 0,
+          submitters: new Set(),
+        };
         agg.set(sid, cur);
       }
       return cur;

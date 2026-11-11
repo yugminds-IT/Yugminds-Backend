@@ -12,6 +12,7 @@ describe('AuthController', () => {
     login: jest.fn(),
     refresh: jest.fn(),
     logout: jest.fn(),
+    endBrowserSession: jest.fn().mockResolvedValue(undefined),
     recordLoginActivity: jest.fn().mockResolvedValue(undefined),
   };
   const mockConfigService = {
@@ -80,6 +81,25 @@ describe('AuthController', () => {
       );
     });
 
+    it("replaces the browser's previous session using the cookie it already holds", async () => {
+      mockAuthService.login.mockResolvedValue({
+        user: { id: 1, email: 'a@b.c', role: 'admin' },
+        tokens: { accessToken: 'access', refreshToken: 'new-refresh' },
+      });
+      await controller.login(
+        { email: 'a@b.c', password: 'x' } as never,
+        {
+          ip: '1.2.3.4',
+          headers: { 'user-agent': 'jest' },
+          cookies: { refresh_token: 'old-refresh' },
+        } as never,
+        mockRes() as never,
+      );
+      expect(mockAuthService.endBrowserSession).toHaveBeenCalledWith(
+        'old-refresh',
+      );
+    });
+
     it('sets an httpOnly refresh cookie and omits refreshToken from the JSON body', async () => {
       mockAuthService.login.mockResolvedValue({
         user: { id: 1, email: 'a@b.c', role: 'admin' },
@@ -122,7 +142,10 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('old-refresh', expect.anything());
+      expect(mockAuthService.refresh).toHaveBeenCalledWith(
+        'old-refresh',
+        expect.anything(),
+      );
       expect(res.cookie).toHaveBeenCalledWith(
         'refresh_token',
         'rotated-refresh',
@@ -137,7 +160,10 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-bff', expect.anything());
+      expect(mockAuthService.refresh).toHaveBeenCalledWith(
+        'from-bff',
+        expect.anything(),
+      );
     });
 
     it('prefers the cookie over a body token', async () => {
@@ -150,7 +176,10 @@ describe('AuthController', () => {
 
       await controller.refresh(req as never, res as never);
 
-      expect(mockAuthService.refresh).toHaveBeenCalledWith('from-cookie', expect.anything());
+      expect(mockAuthService.refresh).toHaveBeenCalledWith(
+        'from-cookie',
+        expect.anything(),
+      );
     });
 
     it('rejects and clears the cookie when neither cookie nor body has a token', async () => {

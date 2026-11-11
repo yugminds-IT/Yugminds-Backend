@@ -35,7 +35,6 @@ if (!process.env.DATABASE_URL) {
   );
 }
 
-// eslint-disable-next-line no-console
 console.log(
   `[admin e2e] DATABASE_URL host: ${new URL(process.env.DATABASE_URL).host}`,
 );

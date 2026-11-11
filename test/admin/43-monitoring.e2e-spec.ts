@@ -78,7 +78,9 @@ describe('Admin monitoring / cache', () => {
   });
 
   it('rejects unauthenticated requests on every monitoring route', async () => {
-    await request(app.getHttpServer()).get('/admin/monitoring-dashboard').expect(401);
+    await request(app.getHttpServer())
+      .get('/admin/monitoring-dashboard')
+      .expect(401);
     await request(app.getHttpServer()).get('/admin/cache-monitor').expect(401);
     await request(app.getHttpServer()).post('/admin/warm-cache').expect(401);
   });

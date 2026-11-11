@@ -33,10 +33,7 @@ export class AdminSearchService {
       role,
       deletedAt: null,
       isActive: true,
-      OR: [
-        { email: contains },
-        { profile: { is: { fullName: contains } } },
-      ],
+      OR: [{ email: contains }, { profile: { is: { fullName: contains } } }],
     });
     const userSelect = {
       id: true,
@@ -48,13 +45,25 @@ export class AdminSearchService {
       this.db.school.findMany({
         where: {
           deletedAt: null,
-          OR: [{ name: contains }, { city: contains }, { schoolCode: contains }],
+          OR: [
+            { name: contains },
+            { city: contains },
+            { schoolCode: contains },
+          ],
         },
         select: { id: true, name: true, city: true },
         take: PER_TYPE,
       }),
-      this.db.user.findMany({ where: userWhere(Role.teacher), select: userSelect, take: PER_TYPE }),
-      this.db.user.findMany({ where: userWhere(Role.student), select: userSelect, take: PER_TYPE }),
+      this.db.user.findMany({
+        where: userWhere(Role.teacher),
+        select: userSelect,
+        take: PER_TYPE,
+      }),
+      this.db.user.findMany({
+        where: userWhere(Role.student),
+        select: userSelect,
+        take: PER_TYPE,
+      }),
       this.db.course.findMany({
         where: { deletedAt: null, title: contains },
         select: { id: true, title: true, isPublished: true },

@@ -217,7 +217,9 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           day_of_week: 'Saturday',
         });
       expect(res.status).toBe(400);
-      expect(res.body.message).toMatch(/doesn't work at your school on Saturdays/i);
+      expect(res.body.message).toMatch(
+        /doesn't work at your school on Saturdays/i,
+      );
     });
 
     it("rejects scheduling before the teacher's assignedFrom date, and allows it again once cleared", async () => {
@@ -246,7 +248,9 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
         .put(`/admin/teachers/${fixture.teachers[1].id}`)
         .set(...adminAuth)
         .send({
-          school_assignments: [{ ...baseAssignment, assigned_from: '2099-01-01' }],
+          school_assignments: [
+            { ...baseAssignment, assigned_from: '2099-01-01' },
+          ],
         })
         .expect(200);
 
@@ -262,7 +266,9 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           day_of_week: 'Wednesday',
         });
       expect(blocked.status).toBe(400);
-      expect(blocked.body.message).toMatch(/assignment to your school starts on 2099-01-01/i);
+      expect(blocked.body.message).toMatch(
+        /assignment to your school starts on 2099-01-01/i,
+      );
 
       // Clear the restriction (both null = no restriction) and confirm
       // scheduling now succeeds.

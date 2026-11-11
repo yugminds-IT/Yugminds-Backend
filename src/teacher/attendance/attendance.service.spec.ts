@@ -48,9 +48,9 @@ describe('TeacherAttendanceService.getToday', () => {
 
   it('rejects a school_id the teacher is not assigned to', async () => {
     db.teacherSchool.findFirst.mockResolvedValue(null);
-    await expect(
-      service.getToday(1, 'school-b', '2026-07-20'),
-    ).rejects.toThrow(ForbiddenException);
+    await expect(service.getToday(1, 'school-b', '2026-07-20')).rejects.toThrow(
+      ForbiddenException,
+    );
   });
 
   it('reports Holiday status and skips ClassSchedule lookups when the school is closed today', async () => {
@@ -60,7 +60,10 @@ describe('TeacherAttendanceService.getToday', () => {
       offScheduleSchoolIds: [],
     });
     const result = await service.getToday(1, 'school-a', '2026-07-20');
-    expect(result.attendance).toEqual({ status: 'Holiday', date: '2026-07-20' });
+    expect(result.attendance).toEqual({
+      status: 'Holiday',
+      date: '2026-07-20',
+    });
     expect(result.notScheduledToday).toBe(true);
     expect(db.classSchedule.findMany).not.toHaveBeenCalled();
   });
@@ -72,7 +75,10 @@ describe('TeacherAttendanceService.getToday', () => {
       offScheduleSchoolIds: ['school-a'],
     });
     const result = await service.getToday(1, 'school-a', '2026-07-20');
-    expect(result.attendance).toEqual({ status: 'Not-Scheduled', date: '2026-07-20' });
+    expect(result.attendance).toEqual({
+      status: 'Not-Scheduled',
+      date: '2026-07-20',
+    });
   });
 
   it('restricts the ClassSchedule lookup to only the schools working today', async () => {

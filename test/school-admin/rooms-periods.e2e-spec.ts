@@ -112,12 +112,14 @@ describe('school-admin rooms & periods CRUD', () => {
         .post('/school-admin/rooms/bulk')
         .set(...auth)
         .send({
-          rooms: ['QA-BULK-101', 'QA-BULK-102', 'QA-BULK-103'].map((room_number) => ({
-            room_number,
-            capacity: 30,
-            location: 'Block B',
-            facilities: ['Projector'],
-          })),
+          rooms: ['QA-BULK-101', 'QA-BULK-102', 'QA-BULK-103'].map(
+            (room_number) => ({
+              room_number,
+              capacity: 30,
+              location: 'Block B',
+              facilities: ['Projector'],
+            }),
+          ),
         })
         .expect(201);
       expect(res.body.rooms).toHaveLength(3);
@@ -150,7 +152,9 @@ describe('school-admin rooms & periods CRUD', () => {
       await request(app.getHttpServer())
         .post('/school-admin/rooms/bulk')
         .set(...auth)
-        .send({ rooms: [{ room_number: 'QA-BULK-201' }, { room_number: '  ' }] })
+        .send({
+          rooms: [{ room_number: 'QA-BULK-201' }, { room_number: '  ' }],
+        })
         .expect(400);
     });
 
@@ -159,7 +163,9 @@ describe('school-admin rooms & periods CRUD', () => {
         .post('/school-admin/rooms/bulk')
         .set(...auth)
         .send({
-          rooms: Array.from({ length: 101 }, (_, i) => ({ room_number: `QA-BULK-BIG-${i}` })),
+          rooms: Array.from({ length: 101 }, (_, i) => ({
+            room_number: `QA-BULK-BIG-${i}`,
+          })),
         })
         .expect(400);
     });

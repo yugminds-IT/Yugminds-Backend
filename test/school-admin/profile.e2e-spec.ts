@@ -52,7 +52,7 @@ describe('school-admin profile', () => {
 
   it(
     'ignores a blank/whitespace-only full_name instead of clearing it ' +
-      '(regression: this endpoint used to trim to \'\' and still write it as null, ' +
+      "(regression: this endpoint used to trim to '' and still write it as null, " +
       'silently wiping the name — unlike AdminProfileService.update, which treats a ' +
       'blank value as "no change requested")',
     async () => {
