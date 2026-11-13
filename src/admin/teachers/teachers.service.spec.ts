@@ -278,3 +278,297 @@ describe('AdminTeachersService.list — tenant scoping', () => {
     expect(db.user.findMany).not.toHaveBeenCalled();
   });
 });
+
+describe('AdminTeachersService — split-day slots', () => {
+  let service: AdminTeachersService;
+  let db: any;
+  const A = { school_id: 'school-a', subjects: ['Coding'] };
+  const B = { school_id: 'school-b', subjects: ['Coding'] };
+  const am = { '1': { slot: 'MORNING', start: '08:00', end: '12:30' } };
+  const pm = { '1': { slot: 'AFTERNOON', start: '12:30', end: '17:00' } };
+  const body = (assignments: unknown[]) => ({
+    email: 'split@example.test',
+    password: 'ValidPass123',
+    full_name: 'Split Teacher',
+    school_assignments: assignments,
+  });
+
+  beforeEach(() => {
+    db = {
+      user: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockResolvedValue({ id: 42 }),
+        update: jest.fn().mockResolvedValue({}),
+        findFirst: jest.fn().mockResolvedValue({
+          id: 42,
+          teacherSchools: [],
+          teacherSectionAssignments: [],
+        }),
+      },
+      profile: { upsert: jest.fn().mockResolvedValue({}) },
+      teacherSchool: {
+        upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+        delete: jest.fn(),
+      },
+      teacherSectionAssignment: {
+        deleteMany: jest.fn().mockResolvedValue({}),
+        create: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      teacherWorkingDaysHistory: {
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _min: { effectiveFrom: null } }),
+        upsert: jest.fn().mockResolvedValue({}),
+      },
+      classSchedule: { findMany: jest.fn().mockResolvedValue([]) },
+      period: { findMany: jest.fn().mockResolvedValue([]) },
+      school: {
+        findUnique: jest
+          .fn()
+          .mockResolvedValue({ name: 'S', operatingDays: [1, 2, 3, 4, 5, 6] }),
+        findMany: jest.fn().mockResolvedValue([
+          { id: 'school-a', name: 'School A' },
+          { id: 'school-b', name: 'School B' },
+        ]),
+      },
+      $transaction: jest.fn(async (arg: unknown) =>
+        typeof arg === 'function' ? arg(db) : Promise.all(arg as unknown[]),
+      ),
+    };
+    service = new AdminTeachersService(
+      db as DatabaseService,
+      { invalidate: jest.fn() } as unknown as AuthCacheService,
+      {} as unknown as RefreshTokenStoreService,
+      { revokeAll: jest.fn(), revokeMany: jest.fn() } as never,
+    );
+  });
+
+  it('create: morning at one school + afternoon at the other is allowed and stored', async () => {
+    await service.create(
+      body([
+        { ...A, working_days: [1], day_slots: am },
+        { ...B, working_days: [1], day_slots: pm },
+      ]),
+    );
+    const stored = db.teacherSchool.upsert.mock.calls.map(
+      (c: any) => c[0].create.workingDaySlots,
+    );
+    expect(stored[0]['1'].slot).toBe('MORNING');
+    expect(stored[1]['1'].slot).toBe('AFTERNOON');
+  });
+
+  it('create: two full days on the same weekday are rejected, naming both schools', async () => {
+    await expect(
+      service.create(
+        body([
+          { ...A, working_days: [1, 2] },
+          { ...B, working_days: [2, 3] },
+        ]),
+      ),
+    ).rejects.toThrow(/Tuesday.*School A.*School B/);
+    expect(db.teacherSchool.upsert).not.toHaveBeenCalled();
+  });
+
+  it('create: two morning slots on the same day are rejected', async () => {
+    await expect(
+      service.create(
+        body([
+          { ...A, working_days: [1], day_slots: am },
+          { ...B, working_days: [1], day_slots: am },
+        ]),
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it('create: a slot whose end is before its start is a 400', async () => {
+    await expect(
+      service.create(
+        body([
+          {
+            ...A,
+            working_days: [1],
+            day_slots: {
+              '1': { slot: 'MORNING', start: '12:00', end: '09:00' },
+            },
+          },
+        ]),
+      ),
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  describe('update', () => {
+    // Legacy data: both schools already full-day on Thursday.
+    const legacy = (id: string) => ({
+      teacherId: 42,
+      schoolId: id,
+      workingDays: [4],
+      workingDaySlots: null,
+    });
+    beforeEach(() => {
+      db.teacherSchool.findMany.mockResolvedValue([
+        legacy('school-a'),
+        legacy('school-b'),
+      ]);
+    });
+
+    it('re-saving an unchanged legacy overlap is NOT blocked', async () => {
+      await service.update('42', {
+        school_assignments: [
+          { ...A, working_days: [4] },
+          { ...B, working_days: [4] },
+        ],
+      });
+      expect(db.teacherSchool.upsert).toHaveBeenCalledTimes(2);
+    });
+
+    it('changing one school into the clash is blocked and writes nothing', async () => {
+      await expect(
+        service.update('42', {
+          school_assignments: [
+            { ...A, working_days: [4, 5] },
+            { ...B, working_days: [4] },
+          ],
+        }),
+      ).rejects.toThrow(/Thursday/);
+      expect(db.teacherSchool.upsert).not.toHaveBeenCalled();
+      expect(db.teacherSchool.delete).not.toHaveBeenCalled();
+    });
+
+    it('fixing the overlap with morning/afternoon slots succeeds and records slot history', async () => {
+      const sl = (d: string, s: string, e: string, k: string) => ({
+        [d]: { slot: k, start: s, end: e },
+      });
+      await service.update('42', {
+        school_assignments: [
+          {
+            ...A,
+            working_days: [4],
+            day_slots: sl('4', '08:00', '12:30', 'MORNING'),
+          },
+          {
+            ...B,
+            working_days: [4],
+            day_slots: sl('4', '12:30', '17:00', 'AFTERNOON'),
+          },
+        ],
+      });
+      const hist = db.teacherWorkingDaysHistory.upsert.mock.calls.map(
+        (c: any) => c[0].create.workingDaySlots['4'].slot,
+      );
+      expect(hist).toEqual(['MORNING', 'AFTERNOON']);
+    });
+
+    it('primary school: the school flagged is_primary becomes the teacher tenantId (not just the first)', async () => {
+      await service.update('42', {
+        school_assignments: [
+          { ...A, working_days: [4], is_primary: false },
+          { ...B, working_days: [5], is_primary: true },
+        ],
+      });
+      const tenantWrites = db.user.update.mock.calls
+        .map((c: any) => c[0].data.tenantId)
+        .filter(Boolean);
+      expect(tenantWrites).toEqual(['school-b']);
+    });
+
+    it('primary school: falls back to the first assignment when none is flagged', async () => {
+      await service.update('42', {
+        school_assignments: [
+          { ...A, working_days: [4] },
+          { ...B, working_days: [5] },
+        ],
+      });
+      const tenantWrites = db.user.update.mock.calls
+        .map((c: any) => c[0].data.tenantId)
+        .filter(Boolean);
+      expect(tenantWrites).toEqual(['school-a']);
+    });
+
+    it('school order: each assignment is saved with its position in the list', async () => {
+      await service.update('42', {
+        school_assignments: [
+          { ...B, working_days: [5] },
+          { ...A, working_days: [4] },
+        ],
+      });
+      const order = db.teacherSchool.upsert.mock.calls.map((c: any) => [
+        c[0].create.schoolId,
+        c[0].create.displayOrder,
+      ]);
+      expect(order).toEqual([
+        ['school-b', 0],
+        ['school-a', 1],
+      ]);
+    });
+
+    it('warns (without blocking) when new slots leave existing classes outside the window', async () => {
+      db.classSchedule.findMany.mockResolvedValue([
+        {
+          dayOfWeek: 4,
+          periodId: 'p1',
+          subject: 'Coding',
+          grade: '6',
+          section: 'A',
+        },
+        {
+          dayOfWeek: 4,
+          periodId: 'p2',
+          subject: 'Coding',
+          grade: '6',
+          section: 'B',
+        },
+      ]);
+      db.period.findMany.mockResolvedValue([
+        { id: 'p1', periodNumber: 1, startTime: '09:00', endTime: '09:45' },
+        { id: 'p2', periodNumber: 6, startTime: '13:15', endTime: '14:00' },
+      ]);
+      const res = await service.update('42', {
+        school_assignments: [
+          {
+            ...A,
+            working_days: [4],
+            day_slots: {
+              '4': { slot: 'MORNING', start: '08:00', end: '12:30' },
+            },
+          },
+        ],
+      });
+      expect(db.teacherSchool.upsert).toHaveBeenCalled();
+      expect(res.scheduleWarnings).toHaveLength(1);
+      expect(res.scheduleWarnings![0]).toMatchObject({
+        schoolId: 'school-a',
+        count: 1,
+      });
+      expect(res.scheduleWarnings![0].examples[0]).toMatch(/Thu P6/);
+    });
+
+    it('no warning when every existing class still fits', async () => {
+      db.classSchedule.findMany.mockResolvedValue([
+        {
+          dayOfWeek: 4,
+          periodId: 'p1',
+          subject: 'Coding',
+          grade: '6',
+          section: 'A',
+        },
+      ]);
+      db.period.findMany.mockResolvedValue([
+        { id: 'p1', periodNumber: 1, startTime: '09:00', endTime: '09:45' },
+      ]);
+      const res = await service.update('42', {
+        school_assignments: [
+          {
+            ...A,
+            working_days: [4],
+            day_slots: {
+              '4': { slot: 'MORNING', start: '08:00', end: '12:30' },
+            },
+          },
+        ],
+      });
+      expect(res.scheduleWarnings).toBeUndefined();
+    });
+  });
+});

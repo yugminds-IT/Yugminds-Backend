@@ -54,27 +54,17 @@ describe('EnrollmentService.shouldEnroll', () => {
     expect(service.shouldEnroll(grants, null, 'A')).toBe(false);
   });
 
-  it('matches grade and section case/space-insensitively', () => {
+  it('matches grade and section exactly', () => {
     const grants: CourseGradeGrant[] = [
       { gradeName: 'Grade 4', sectionNames: ['Section A'] },
     ];
-    expect(service.shouldEnroll(grants, 'grade4', 'sectiona')).toBe(true);
-    expect(service.shouldEnroll(grants, 'GRADE 4', 'SECTION A')).toBe(true);
-  });
-
-  it('treats Grade/Section prefixes as equivalent to bare labels', () => {
-    const grants: CourseGradeGrant[] = [
-      { gradeName: 'Grade 4', sectionNames: ['Section A'] },
-    ];
-    // School structure names vs student records that store just "4" / "A".
-    expect(service.shouldEnroll(grants, 'Grade 4', 'A')).toBe(true);
-    expect(service.shouldEnroll(grants, '4', 'A')).toBe(true);
-    expect(service.shouldEnroll(grants, '4', 'Sec A')).toBe(true);
     expect(service.shouldEnroll(grants, 'Grade 4', 'Section A')).toBe(true);
-
-    const bareGrants: CourseGradeGrant[] = [
-      { gradeName: '4', sectionNames: ['A'] },
-    ];
-    expect(service.shouldEnroll(bareGrants, 'Grade 4', 'Section A')).toBe(true);
+    // Non-standard grade / section spellings never match.
+    expect(service.shouldEnroll(grants, 'grade4', 'Section A')).toBe(false);
+    expect(service.shouldEnroll(grants, '4', 'Section A')).toBe(false);
+    expect(service.shouldEnroll(grants, 'Grade 4', 'A')).toBe(false);
+    expect(service.shouldEnroll(grants, 'Grade 4', 'Sec A')).toBe(false);
+    expect(service.shouldEnroll(grants, 'Grade 4', 'SECTION A')).toBe(false);
+    expect(service.shouldEnroll(grants, 'Grade 4', 'Section B')).toBe(false);
   });
 });

@@ -1,3 +1,5 @@
+import { ExamAnalyticsService } from '../../common/assignment/exam-analytics.service';
+import { AssignmentReportService } from '../../common/assignment/assignment-report.service';
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import {
@@ -7,6 +9,7 @@ import {
 } from '../../common/monitoring/monitoring.service';
 import { MonitoringHistoryService } from '../../common/monitoring/monitoring-history.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
+import { AdminTeacherAttendanceService } from '../teacher-attendance/teacher-attendance.service';
 import { Role } from '@prisma/client';
 import { enrolmentProgress } from '../../common/utils/enrolment-progress';
 
@@ -20,6 +23,9 @@ export class AdminDashboardService {
     private readonly monitoring: MonitoringService,
     private readonly monitoringHistory: MonitoringHistoryService,
     private readonly studentRanking: StudentRankingService,
+    private readonly teacherAttendance: AdminTeacherAttendanceService,
+    private readonly examAnalytics: ExamAnalyticsService,
+    private readonly assignmentReport: AssignmentReportService,
   ) {}
 
   async getStats() {
@@ -98,10 +104,6 @@ export class AdminDashboardService {
 
     try {
       const now = to ? new Date(`${to}T23:59:59.999Z`) : new Date();
-      const last30Days = from
-        ? new Date(`${from}T00:00:00.000Z`)
-        : new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
-
       const [schoolCount, teacherCount, studentCount, activeCourses] =
         await Promise.all([
           // Keep analytics card totals aligned with school listing source of truth.
@@ -158,20 +160,21 @@ export class AdminDashboardService {
         }),
       ]);
 
-      const attendance30 = await this.db.attendance.findMany({
-        where: { date: { gte: last30Days } },
-        select: { status: true },
-      });
-      // Approved leave is not an absence, so it stays out of the rate. "Unreported" counts against it.
-      const counted30 = attendance30.filter(
-        (a) => !String(a.status).toLowerCase().startsWith('leave'),
+      // Month-to-date, same rule as the Teacher attendance tab: no report on a past working day = absent.
+      // Reading stored Attendance rows alone misses those days and reads ~100%.
+      const monthlyAttendance = (await this.teacherAttendance.monthly())
+        .monthlyData;
+      const ratedTeachers = monthlyAttendance.filter(
+        (m) => m.total_working_days > 0,
       );
-      const presentCount = counted30.filter(
-        (a) => String(a.status).toLowerCase() === 'present',
-      ).length;
       const avgAttendance =
-        counted30.length > 0
-          ? Math.round((presentCount / counted30.length) * 100)
+        ratedTeachers.length > 0
+          ? Math.round(
+              ratedTeachers.reduce(
+                (sum, m) => sum + m.attendance_percentage,
+                0,
+              ) / ratedTeachers.length,
+            )
           : 0;
 
       // How far enrolled students are through their courses: the same live-content calculation the Course
@@ -383,26 +386,12 @@ export class AdminDashboardService {
         });
 
         if (allTeachers.length > 0) {
-          const teacherIds = allTeachers.map((t) => t.id);
-
-          // Count total attendance records per teacher
-          const teacherAttendanceRaw = await this.db.attendance.findMany({
-            where: { teacherId: { in: teacherIds }, date: { gte: last30Days } },
-            select: { teacherId: true, status: true },
-          });
-
-          const totalMap = new Map<number, number>();
-          const presentMap = new Map<number, number>();
-          for (const rec of teacherAttendanceRaw) {
-            if (String(rec.status).toLowerCase().startsWith('leave')) continue; // approved leave is not an absence
-            totalMap.set(rec.teacherId, (totalMap.get(rec.teacherId) ?? 0) + 1);
-            if (String(rec.status).toLowerCase() === 'present') {
-              presentMap.set(
-                rec.teacherId,
-                (presentMap.get(rec.teacherId) ?? 0) + 1,
-              );
-            }
-          }
+          const rateByTeacher = new Map(
+            monthlyAttendance.map((m) => [
+              Number(m.teacher_id),
+              m.total_working_days > 0 ? m.attendance_percentage : null,
+            ]),
+          );
 
           let excellent = 0,
             good = 0,
@@ -410,13 +399,11 @@ export class AdminDashboardService {
             needsImprovement = 0,
             noRecords = 0;
           for (const t of allTeachers) {
-            const total = totalMap.get(t.id) ?? 0;
-            const present = presentMap.get(t.id) ?? 0;
-            if (total === 0) {
+            const rate = rateByTeacher.get(t.id);
+            if (rate == null) {
               noRecords++;
               continue;
             }
-            const rate = (present / total) * 100;
             if (rate >= 90) excellent++;
             else if (rate >= 75) good++;
             else if (rate >= 50) average++;
@@ -621,12 +608,25 @@ export class AdminDashboardService {
     return { views: [], checked_at: new Date().toISOString() };
   }
 
+  /** All schools by default; `schoolId` narrows to one. The school list is always the full set (for the filter). */
+  getAssignmentReport(assignmentId: string) {
+    return this.assignmentReport.get(assignmentId);
+  }
+
+  async getExamAnalytics(schoolId?: string) {
+    const schools = await this.db.school.findMany({ select: { id: true, name: true }, orderBy: { name: 'asc' } });
+    const ids = schoolId ? schools.filter((x) => x.id === schoolId).map((x) => x.id) : schools.map((x) => x.id);
+    const analytics = await this.examAnalytics.compute(ids);
+    return { analytics: { ...analytics, schools } };
+  }
+
   async getAssignmentAnalytics() {
     const assignments = await this.db.assignment.findMany({
       // Matches school-admin's equivalent counts (stats.service.ts) — an
       // unpublished draft assignment isn't visible to any student and
       // shouldn't count toward "Assignments" or a school's assignments_created.
-      where: { isPublished: true },
+      // Exams are reported by getExamAnalytics, not in course/daily totals.
+      where: { isPublished: true, assignmentType: { not: 'EXAM' } },
       select: {
         id: true,
         title: true,

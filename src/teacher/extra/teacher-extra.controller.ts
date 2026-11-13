@@ -12,6 +12,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
+import { TeacherAttendanceService } from '../attendance/attendance.service';
 import { lastLoginByUser } from '../../admin/last-login';
 import { JwtAuthGuard } from '../../auth/jwt-auth/jwt-auth.guard';
 import { RolesGuard } from '../../auth/roles/roles.guard';
@@ -21,19 +22,19 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { RankingService } from '../../common/assignment/ranking.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
+import { SchoolPerformanceService } from '../../school-admin/stats/performance.service';
 import { NotificationIdParamDto } from './dto/notification-id-param.dto';
 import { NotificationsService } from '../../common/notifications/notifications.service';
 import { tenantContext } from '../../tenants/tenant-context';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
 import { assertQuestionMarksFitTotal } from '../../common/assignment/question-marks';
-
-// Section.name and StudentSchool.section aren't guaranteed to share a
-// format across the app's data (e.g. "Section A" vs bare "A") — strip an
-// optional "Section " prefix so joins between the two match regardless of
-// which convention produced the value.
-function normalizeSection(section: string): string {
-  return section.replace(/^Section\s+/i, '').trim();
-}
+import { ExamAnalyticsService } from '../../common/assignment/exam-analytics.service';
+import {
+  parseAssignmentType,
+  parseExamFields,
+  parseLatePolicy,
+  resolveCloseDate,
+} from '../../common/assignment/assignment-types';
 
 @Controller('teacher')
 @UseGuards(JwtAuthGuard, RolesGuard)
@@ -44,6 +45,9 @@ export class TeacherExtraController {
     private readonly ranking: RankingService,
     private readonly studentRanking: StudentRankingService,
     private readonly notificationsService: NotificationsService,
+    private readonly attendance: TeacherAttendanceService,
+    private readonly performance: SchoolPerformanceService,
+    private readonly examAnalytics: ExamAnalyticsService,
   ) {}
 
   /**
@@ -197,6 +201,8 @@ export class TeacherExtraController {
       subject: string | null;
       gradeId: string | null;
       assignmentType?: string;
+      startsAt?: Date | null;
+      endsAt?: Date | null;
       publishScope?: string;
       publishedGradeIds?: string[];
       publishedSectionIds?: string[];
@@ -219,6 +225,25 @@ export class TeacherExtraController {
     const subjectPart = assignment.subject
       ? `. Subject: ${assignment.subject}`
       : '';
+    if (assignment.assignmentType === 'EXAM') {
+      const fmt = (d?: Date | null) =>
+        d
+          ? d.toLocaleString('en-IN', {
+              timeZone: 'Asia/Kolkata',
+              dateStyle: 'medium',
+              timeStyle: 'short',
+            })
+          : '';
+      await this.notificationsService.createManyRespectingPrefs(
+        studentIds.map((userId) => ({
+          userId,
+          title: `Exam scheduled: ${assignment.title}`,
+          message: `Exam scheduled: ${assignment.title}. Opens ${fmt(assignment.startsAt)}, closes ${fmt(assignment.endsAt)}${subjectPart}.`,
+          mode: 'exam_scheduled',
+        })),
+      );
+      return;
+    }
     await this.notificationsService.createManyRespectingPrefs(
       studentIds.map((userId) => ({
         userId,
@@ -565,7 +590,6 @@ export class TeacherExtraController {
       sentNotifications,
       reports,
       leaves,
-      attendanceRows,
     ] = await Promise.all([
       this.db.teacherSectionAssignment.count({
         where: {
@@ -605,14 +629,6 @@ export class TeacherExtraController {
         },
         select: { status: true, createdAt: true },
       }),
-      this.db.attendance.findMany({
-        where: {
-          teacherId: user.id,
-          schoolId: { in: schoolIds },
-          date: { gte: safeFrom, lte: safeTo },
-        },
-        select: { status: true, date: true },
-      }),
     ]);
 
     const norm = (s: string | null | undefined) =>
@@ -639,14 +655,28 @@ export class TeacherExtraController {
       (l) => norm(l.status) === 'pending',
     ).length;
 
-    const presentDays = new Set(
-      attendanceRows
-        .filter((a) => a.status === 'Present')
-        .map((a) => a.date.toISOString().split('T')[0]),
-    ).size;
-    const totalAttendanceDays = new Set(
-      attendanceRows.map((a) => a.date.toISOString().split('T')[0]),
-    ).size;
+    // Weighted figure (that school when filtered, else all schools) for the months the range touches (no report on a past working day =
+    // absent). Stored Attendance rows alone miss those days.
+    const monthsBack =
+      (now.getUTCFullYear() - safeFrom.getUTCFullYear()) * 12 +
+      now.getUTCMonth() -
+      safeFrom.getUTCMonth() +
+      1;
+    const { monthlyData } = await this.attendance.getMonthly(
+      user.id,
+      schoolId || undefined,
+      Math.min(Math.max(monthsBack, 1), 24),
+    );
+    const inRange = monthlyData.filter((m) => {
+      const [y, mo] = m.month.split('-').map(Number);
+      const s = Date.UTC(y, mo - 1, 1);
+      return s <= safeTo.getTime() && Date.UTC(y, mo, 1) > safeFrom.getTime();
+    });
+    const presentDays = inRange.reduce((n, m) => n + m.present_days, 0);
+    const totalAttendanceDays = inRange.reduce(
+      (n, m) => n + m.total_working_days,
+      0,
+    );
     const attendancePercentage =
       totalAttendanceDays > 0
         ? Math.round((presentDays / totalAttendanceDays) * 100)
@@ -687,6 +717,121 @@ export class TeacherExtraController {
     };
   }
 
+  /**
+   * Active students in the teacher's own sections, per school. Grade-aware and
+   * tolerant of "Section A" vs "A" so two grades that both have a section A
+   * never bleed into each other. When `schoolId` is given only that school is
+   * read (required under the tenant lock, see getStudentProgress).
+   */
+  private async teacherStudentIds(teacherId: number, schoolId?: string) {
+    const norm = (v?: string | null) =>
+      String(v ?? '')
+        .toLowerCase()
+        .replace(/\b(grade|section|class)\b/g, '')
+        .replace(/\s+/g, '')
+        .trim();
+    const assignments = await this.db.teacherSectionAssignment.findMany({
+      where: { teacherId, ...(schoolId ? { schoolId } : {}) },
+      include: { section: { include: { grade: true } } },
+    });
+    const keys = new Set(
+      assignments.map(
+        (a) =>
+          `${a.schoolId}:${norm(a.section?.grade?.name)}:${norm(a.section?.name)}`,
+      ),
+    );
+    const schoolIds = [...new Set(assignments.map((a) => a.schoolId))];
+    const out = new Map<string, Set<number>>();
+    if (!schoolIds.length) return out;
+    const rows = await this.db.studentSchool.findMany({
+      where: { schoolId: { in: schoolIds }, isActive: true },
+      select: { studentId: true, schoolId: true, grade: true, section: true },
+    });
+    for (const r of rows) {
+      if (!keys.has(`${r.schoolId}:${norm(r.grade)}:${norm(r.section)}`)) {
+        continue;
+      }
+      if (!out.has(r.schoolId)) out.set(r.schoolId, new Set());
+      out.get(r.schoolId)!.add(r.studentId);
+    }
+    return out;
+  }
+
+  /** Same payload as GET school-admin/leaderboard, limited to the teacher's students. */
+  @Get('leaderboard')
+  async getLeaderboard(
+    @CurrentUser() user: { id: number },
+    @Query('school_id') schoolId?: string,
+  ) {
+    const byScope = await this.teacherStudentIds(user.id, schoolId);
+    const empty = {
+      summary: {},
+      leaderboard: [],
+      grade_breakdown: [],
+      section_breakdown: [],
+      subject_breakdown: [],
+      daily_subject_breakdown: [],
+      assignment_table: [],
+    };
+    const parts = await Promise.all(
+      [...byScope].map(([sid, ids]) =>
+        this.performance.getLeaderboard(sid, ids),
+      ),
+    );
+    if (parts.length === 0) return empty;
+    if (parts.length === 1) return parts[0];
+    // "All schools": merge. Ranks stay per-school (they are computed per school).
+    // ponytail: assignment_table/breakdowns concatenated, not re-aggregated across schools.
+    const sum = (k: string) =>
+      parts.reduce((n, p) => n + Number((p.summary as any)[k] ?? 0), 0);
+    const scored = parts
+      .flatMap((p) => p.leaderboard)
+      .filter((r) => r.graded_assignments_count > 0);
+    return {
+      summary: {
+        school_name: 'All schools',
+        total_students: sum('total_students'),
+        total_assignments_published: sum('total_assignments_published'),
+        course_assignments_published: sum('course_assignments_published'),
+        daily_assignments_published: sum('daily_assignments_published'),
+        overall_avg_score: scored.length
+          ? Number(
+              (
+                scored.reduce((n, r) => n + r.overall_score, 0) / scored.length
+              ).toFixed(2),
+            )
+          : 0,
+      },
+      leaderboard: parts.flatMap((p) => p.leaderboard),
+      grade_breakdown: parts.flatMap((p) => p.grade_breakdown),
+      section_breakdown: parts.flatMap((p) => p.section_breakdown),
+      subject_breakdown: parts.flatMap((p) => p.subject_breakdown),
+      daily_subject_breakdown: parts.flatMap((p) => p.daily_subject_breakdown),
+      assignment_table: parts.flatMap((p) => p.assignment_table),
+    };
+  }
+
+  @Get('leaderboard/assignments/:assignmentId/marks')
+  async getLeaderboardMarks(
+    @CurrentUser() user: { id: number },
+    @Param('assignmentId') assignmentId: string,
+    @Query('school_id') schoolId?: string,
+  ) {
+    const byScope = await this.teacherStudentIds(user.id, schoolId);
+    for (const [sid, ids] of byScope) {
+      try {
+        return await this.performance.getAssignmentMarks(
+          sid,
+          assignmentId,
+          ids,
+        );
+      } catch (e) {
+        if (!(e instanceof NotFoundException)) throw e;
+      }
+    }
+    throw new NotFoundException('Assignment not found');
+  }
+
   @Get('student-progress')
   async getStudentProgress(
     @CurrentUser() user: { id: number },
@@ -705,37 +850,9 @@ export class TeacherExtraController {
     // "Cross-tenant schoolId access denied" — which the frontend's generic
     // 401 handler misreads as an expired session and force-logs the user
     // out, even though nothing was actually wrong with their session.
-    const assignments = await this.db.teacherSectionAssignment.findMany({
-      where: { teacherId: user.id, ...(schoolId ? { schoolId } : {}) },
-      include: { section: true },
-    });
-    const schoolSectionPairs = new Set<string>();
-    assignments.forEach((a) => {
-      // Section.name and StudentSchool.section aren't guaranteed to share a
-      // format — real production data stores Section.name as "Section A"
-      // and StudentSchool.section as the bare "A", while some fixture/older
-      // data stores both as "Section A". Normalize both sides (strip an
-      // optional "Section " prefix) before comparing so either convention
-      // matches.
-      const sectionName = normalizeSection(a.section?.name ?? '');
-      schoolSectionPairs.add(`${a.schoolId}:${sectionName}`);
-    });
-    const assignedSchoolIds = Array.from(
-      new Set(assignments.map((a) => a.schoolId)),
-    );
-    const studentSchools = assignedSchoolIds.length
-      ? await this.db.studentSchool.findMany({
-          where: { schoolId: { in: assignedSchoolIds } },
-          select: { studentId: true, schoolId: true, section: true },
-        })
-      : [];
+    const byScope = await this.teacherStudentIds(user.id, schoolId);
     const allowedStudentIds = new Set<number>();
-    studentSchools.forEach((ss) => {
-      const key = `${ss.schoolId}:${normalizeSection(ss.section ?? '')}`;
-      if (schoolSectionPairs.has(key)) {
-        allowedStudentIds.add(ss.studentId);
-      }
-    });
+    byScope.forEach((ids) => ids.forEach((id) => allowedStudentIds.add(id)));
     if (allowedStudentIds.size === 0) {
       return {
         students: [],
@@ -1428,6 +1545,12 @@ export class TeacherExtraController {
         description: a.description,
         assignment_type: (a as any).assignmentType ?? 'COURSE',
         due_date: a.dueDate?.toISOString() ?? null,
+        late_policy: a.lateSubmissionPolicy,
+        close_date: a.closeDate?.toISOString() ?? null,
+        exam_type: a.examType,
+        starts_at: a.startsAt?.toISOString() ?? null,
+        ends_at: a.endsAt?.toISOString() ?? null,
+        duration_minutes: a.durationMinutes,
         total_marks: a.totalMarks ?? 0,
         school_id: a.schoolId,
         grade_id: a.gradeId,
@@ -1479,10 +1602,10 @@ export class TeacherExtraController {
     if (!teacherSchool)
       throw new ForbiddenException('Not assigned to this school');
 
-    const rawType = String(
-      body.assignmentType ?? body.assignment_type ?? 'DAILY',
-    ).toUpperCase();
-    const assignmentType = rawType === 'COURSE' ? 'COURSE' : 'DAILY';
+    const assignmentType = parseAssignmentType(
+      body.assignmentType ?? body.assignment_type,
+    );
+    const exam = assignmentType === 'EXAM' ? parseExamFields(body) : null;
 
     // COURSE assignments need a chapter context; DAILY assignments are school-scoped and need none
     let chapterId: string | null = null;
@@ -1551,7 +1674,20 @@ export class TeacherExtraController {
         title,
         description: body.description ? String(body.description) : null,
         instructions: body.instructions ? String(body.instructions) : null,
-        dueDate: body.dueDate ? new Date(String(body.dueDate)) : null,
+        dueDate: exam
+          ? exam.endsAt
+          : body.dueDate
+            ? new Date(String(body.dueDate))
+            : null,
+        ...(exam ? exam : {}),
+        ...(() => {
+          const policy = parseLatePolicy(body.lateSubmissionPolicy);
+          const due = exam ? null : body.dueDate ? new Date(String(body.dueDate)) : null;
+          return {
+            lateSubmissionPolicy: policy,
+            closeDate: exam ? null : resolveCloseDate(policy, due, body.closeDate),
+          };
+        })(),
         totalMarks: body.totalMarks ? Number(body.totalMarks) : null,
         isPublished: !!body.isPublished,
         publishScope,
@@ -1633,11 +1769,20 @@ export class TeacherExtraController {
         title: assignment.title,
         description: assignment.description,
         due_date: assignment.dueDate?.toISOString() ?? null,
+        late_policy: assignment.lateSubmissionPolicy,
+        close_date: assignment.closeDate?.toISOString() ?? null,
+        assignment_type: assignment.assignmentType,
+        exam_type: assignment.examType,
+        starts_at: assignment.startsAt?.toISOString() ?? null,
+        ends_at: assignment.endsAt?.toISOString() ?? null,
+        duration_minutes: assignment.durationMinutes,
+        instructions: assignment.instructions,
         total_marks: assignment.totalMarks,
         subject: assignment.subject,
         school_id: assignment.schoolId,
         is_published: assignment.isPublished,
         retake_enabled: assignment.retakeEnabled,
+        retake_rule: assignment.retakeScoringRule,
         academic_year: assignment.academicYear,
         publish_scope: assignment.publishScope,
         published_grade_ids: assignment.publishedGradeIds ?? [],
@@ -1675,12 +1820,19 @@ export class TeacherExtraController {
         isPublished: true,
         title: true,
         dueDate: true,
+        closeDate: true,
+        lateSubmissionPolicy: true,
         subject: true,
         gradeId: true,
         publishScope: true,
         publishedGradeIds: true,
         publishedSectionIds: true,
         totalMarks: true,
+        assignmentType: true,
+        examType: true,
+        startsAt: true,
+        endsAt: true,
+        durationMinutes: true,
       },
     });
     if (
@@ -1690,6 +1842,16 @@ export class TeacherExtraController {
       throw new NotFoundException('Assignment not found');
     }
     this.assertMayModifyAssignment(user.id, current);
+
+    // The type is fixed at creation (a DAILY can't become an EXAM or back).
+    const incomingType = body.assignmentType ?? body.assignment_type;
+    if (
+      incomingType != null &&
+      parseAssignmentType(incomingType) !== current.assignmentType
+    )
+      throw new BadRequestException('Assignment type cannot be changed');
+    const examUpdate =
+      current.assignmentType === 'EXAM' ? parseExamFields(body, current) : null;
 
     if (Array.isArray(body.questions) || body.totalMarks != null) {
       const questionRows = Array.isArray(body.questions)
@@ -1704,6 +1866,25 @@ export class TeacherExtraController {
       );
     }
 
+    // Policy / close date: re-validated against the effective due date every save.
+    const effPolicy =
+      body.lateSubmissionPolicy != null
+        ? parseLatePolicy(body.lateSubmissionPolicy)
+        : current.lateSubmissionPolicy;
+    const effDue =
+      body.dueDate != null ? new Date(String(body.dueDate)) : current.dueDate;
+    const closeUpdate =
+      current.assignmentType === 'EXAM'
+        ? {}
+        : {
+            lateSubmissionPolicy: effPolicy,
+            closeDate: resolveCloseDate(
+              effPolicy,
+              effDue,
+              body.closeDate === undefined ? current.closeDate : body.closeDate,
+            ),
+          };
+
     const wasPublished = current.isPublished;
     const updated = await this.db.assignment.update({
       where: { id: assignmentId },
@@ -1712,8 +1893,13 @@ export class TeacherExtraController {
         description:
           body.description != null ? String(body.description) : undefined,
         subject: body.subject != null ? String(body.subject) : undefined,
-        dueDate:
-          body.dueDate != null ? new Date(String(body.dueDate)) : undefined,
+        dueDate: examUpdate
+          ? examUpdate.endsAt
+          : body.dueDate != null
+            ? new Date(String(body.dueDate))
+            : undefined,
+        ...(examUpdate ?? {}),
+        ...closeUpdate,
         totalMarks:
           body.totalMarks != null ? Number(body.totalMarks) : undefined,
         isPublished: body.isPublished != null ? !!body.isPublished : undefined,
@@ -2218,6 +2404,7 @@ export class TeacherExtraController {
   async listRetakeRequests(
     @CurrentUser() user: { id: number },
     @Query('status') status?: string,
+    @Query('school_id') schoolId?: string,
   ) {
     // targetTeacherIds is a snapshot taken at request time; also require the
     // teacher to still belong to the request's school.
@@ -2230,7 +2417,9 @@ export class TeacherExtraController {
     const requests = await this.db.retakeRequest.findMany({
       where: {
         targetTeacherIds: { has: user.id },
-        OR: [{ schoolId: null }, { schoolId: { in: mySchoolIds } }],
+        OR: schoolId
+          ? [{ schoolId }]
+          : [{ schoolId: null }, { schoolId: { in: mySchoolIds } }],
         ...(status ? { status } : {}),
       },
       orderBy: { createdAt: 'desc' },
@@ -2239,6 +2428,7 @@ export class TeacherExtraController {
           select: {
             title: true,
             schoolId: true,
+            assignmentType: true,
             course: { select: { title: true } },
             chapter: { select: { course: { select: { title: true } } } },
           },
@@ -2283,6 +2473,7 @@ export class TeacherExtraController {
           id: r.id,
           assignment_id: r.assignmentId,
           assignment_title: r.assignment.title,
+          assignment_type: r.assignment.assignmentType,
           course_title:
             r.assignment.course?.title ??
             r.assignment.chapter?.course?.title ??
@@ -2576,7 +2767,9 @@ export class TeacherExtraController {
     // Only published DAILY work: course audiences follow enrolment, not
     // grade/section targeting, and drafts aren't visible to students yet.
     const schoolId =
-      assignment.assignmentType === 'DAILY' && assignment.isPublished
+      (assignment.assignmentType === 'DAILY' ||
+        assignment.assignmentType === 'EXAM') &&
+      assignment.isPublished
         ? assignment.schoolId
         : null;
     const { targetIds, missing } = schoolId
@@ -2629,6 +2822,7 @@ export class TeacherExtraController {
           submitted_at: s.submittedAt.toISOString(),
           graded_at: s.gradedAt?.toISOString() ?? null,
           is_retake: s.isRetake,
+          is_late: s.isLate,
           grade: ss?.grade ?? null,
           section: ss?.section ?? null,
           school_name: ss?.school?.name ?? null,
@@ -2845,8 +3039,8 @@ export class TeacherExtraController {
     };
   }
 
-  @Get('assignment-analytics')
-  async getTeacherAssignmentAnalytics(
+  @Get('exam-analytics')
+  async getTeacherExamAnalytics(
     @CurrentUser() user: { id: number },
     @Query('school_id') schoolId?: string,
   ) {
@@ -2854,228 +3048,10 @@ export class TeacherExtraController {
       where: { teacherId: user.id, ...(schoolId ? { schoolId } : {}) },
       select: { schoolId: true },
     });
-    const schoolIds = teacherSchools.map((s) => s.schoolId);
-
-    // ── Student-centric approach ─────────────────────────────────────────────
-    // Rather than guessing which assignments are visible via courseAccess, we
-    // find the actual students in the teacher's schools and look up every
-    // assignment they have submitted. This captures BOTH Daily assignments
-    // (school-scoped) and Course assignments (course-enrolled) without relying
-    // on courseAccess rows being present.
-    if (!schoolIds.length) {
-      return {
-        analytics: {
-          summary: {},
-          assignments: [],
-          top_students: [],
-          subject_breakdown: [],
-        },
-      };
-    }
-
-    const studentSchools = await this.db.studentSchool.findMany({
-      where: { schoolId: { in: schoolIds }, isActive: true },
-      select: { studentId: true },
-    });
-    const studentIds = [...new Set(studentSchools.map((s) => s.studentId))];
-
-    if (!studentIds.length) {
-      return {
-        analytics: {
-          summary: {},
-          assignments: [],
-          top_students: [],
-          subject_breakdown: [],
-        },
-      };
-    }
-
-    // Fetch all submissions by these students ordered for correct dedup.
-    const allSubmissions = await this.db.assignmentSubmission.findMany({
-      where: { studentId: { in: studentIds } },
-      include: { student: { include: { profile: true } } },
-      orderBy: [
-        { studentId: 'asc' },
-        { assignmentId: 'asc' },
-        { attemptNumber: 'asc' },
-      ],
-    });
-
-    // Resolve the distinct assignment IDs that appear in these submissions.
-    const submittedAssignmentIds = [
-      ...new Set(allSubmissions.map((s) => s.assignmentId)),
-    ];
-
-    // Also include published assignments explicitly created by this teacher or
-    // scoped to teacher's schools (covers assignments with zero submissions yet).
-    const courseAccess = await this.db.courseAccess.findMany({
-      where: {
-        schoolId: { in: schoolIds },
-        course: { isPublished: true, deletedAt: null },
-      },
-      select: { courseId: true },
-    });
-    const visibleCourseIds = [...new Set(courseAccess.map((c) => c.courseId))];
-
-    const directAssignments = await this.db.assignment.findMany({
-      where: {
-        isPublished: true,
-        OR: [
-          { teacherId: user.id },
-          { schoolId: { in: schoolIds } },
-          ...(visibleCourseIds.length
-            ? [
-                { courseId: { in: visibleCourseIds } },
-                { chapter: { courseId: { in: visibleCourseIds } } },
-              ]
-            : []),
-        ],
-      },
-      select: { id: true },
-    });
-    const directIds = directAssignments.map((a) => a.id);
-
-    const allAssignmentIds = [
-      ...new Set([...submittedAssignmentIds, ...directIds]),
-    ];
-
-    if (!allAssignmentIds.length) {
-      return {
-        analytics: {
-          summary: {},
-          assignments: [],
-          top_students: [],
-          subject_breakdown: [],
-        },
-      };
-    }
-
-    const assignments = await this.db.assignment.findMany({
-      where: { id: { in: allAssignmentIds } },
-      select: {
-        id: true,
-        title: true,
-        subject: true,
-        totalMarks: true,
-        assignmentType: true,
-        retakeEnabled: true,
-        retakeScoringRule: true,
-      },
-    });
-
-    // Canonical deduplication: graded-only, respect retakeScoringRule per assignment
-    const asgnRuleMap = new Map(
-      assignments.map((a) => [
-        a.id,
-        String(a.retakeScoringRule ?? 'latest').toLowerCase(),
-      ]),
-    );
-    const bestByKey = new Map<string, (typeof allSubmissions)[0]>();
-    for (const s of allSubmissions) {
-      if (s.status !== 'graded') continue;
-      const key = `${s.studentId}:${s.assignmentId}`;
-      const rule = asgnRuleMap.get(s.assignmentId) ?? 'latest';
-      const existing = bestByKey.get(key);
-      if (!existing) {
-        bestByKey.set(key, s);
-      } else if (
-        rule === 'highest' &&
-        Number(s.score ?? 0) > Number(existing.score ?? 0)
-      ) {
-        bestByKey.set(key, s);
-      } else if (rule !== 'highest') {
-        // latest: ascending order means last write wins
-        bestByKey.set(key, s);
-      }
-    }
-    const bestSubmissions = [...bestByKey.values()];
-
-    // Assignment performance table
-    const assignmentRows = assignments.map((a) => {
-      const rows = bestSubmissions.filter((s) => s.assignmentId === a.id);
-      const scores = rows
-        .filter((s) => s.status === 'graded')
-        .map((s) => Number(s.score ?? 0));
-      const maxScores = rows
-        .filter((s) => s.status === 'graded')
-        .map((s) => Number(s.maxScore ?? 0));
-      const totalScore = scores.reduce((sum, v) => sum + v, 0);
-      const totalMax = maxScores.reduce((sum, v) => sum + v, 0);
-      const retakeCount = allSubmissions.filter(
-        (s) => s.assignmentId === a.id && s.attemptNumber > 1,
-      ).length;
-      return {
-        assignment_id: a.id,
-        title: a.title,
-        subject: a.subject,
-        assignment_type: a.assignmentType ?? 'DAILY',
-        retake_enabled: a.retakeEnabled,
-        total_submissions: rows.length,
-        graded_count: scores.length,
-        retake_count: retakeCount,
-        avg_score_percentage:
-          totalMax > 0 ? Number(((totalScore / totalMax) * 100).toFixed(2)) : 0,
-        highest_score: scores.length ? Math.max(...scores) : 0,
-        lowest_score: scores.length ? Math.min(...scores) : 0,
-      };
-    });
-
-    // Student leaderboard — canonical scores/ranks from the shared service,
-    // scoped to this teacher's school(s). (Ranks across all the teacher's
-    // schools combined, matching the prior behavior.)
-    const { rows: teacherGlobalRows } =
-      await this.studentRanking.getGlobalRanking();
-    const ranked = this.studentRanking.buildLeaderboard(
-      teacherGlobalRows.filter((r) => schoolIds.includes(r.schoolId)),
-    );
-
-    // Subject breakdown
-    const subjectMap = new Map<
-      string,
-      { total: number; max: number; count: number }
-    >();
-    for (const s of bestSubmissions) {
-      const asgn = assignments.find((a) => a.id === s.assignmentId);
-      const subj = asgn?.subject ?? 'General';
-      const sm = subjectMap.get(subj) ?? { total: 0, max: 0, count: 0 };
-      sm.total += Number(s.score ?? 0);
-      sm.max += Number(s.maxScore ?? 0);
-      sm.count += 1;
-      subjectMap.set(subj, sm);
-    }
-    const subject_breakdown = [...subjectMap.entries()]
-      .map(([subject, sm]) => ({
-        subject,
-        avg_score:
-          sm.max > 0 ? Number(((sm.total / sm.max) * 100).toFixed(2)) : 0,
-        submissions: sm.count,
-      }))
-      .sort((a, b) => b.avg_score - a.avg_score);
-
-    const allScores = assignmentRows
-      .filter((a) => a.graded_count > 0)
-      .map((a) => a.avg_score_percentage);
     return {
-      analytics: {
-        summary: {
-          assignments_count: assignments.length,
-          total_submissions: bestSubmissions.length,
-          graded_count: bestSubmissions.filter((s) => s.status === 'graded')
-            .length,
-          avg_score: allScores.length
-            ? Number(
-                (
-                  allScores.reduce((a, b) => a + b, 0) / allScores.length
-                ).toFixed(2),
-              )
-            : 0,
-          retake_count: allSubmissions.filter((s) => s.attemptNumber > 1)
-            .length,
-        },
-        assignments: assignmentRows,
-        top_students: ranked.slice(0, 20),
-        subject_breakdown,
-      },
+      analytics: await this.examAnalytics.compute(
+        teacherSchools.map((t) => t.schoolId),
+      ),
     };
   }
 }

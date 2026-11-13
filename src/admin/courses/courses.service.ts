@@ -733,7 +733,12 @@ export class AdminCoursesService {
     assignmentsPayload: AssignmentPayload[],
   ): Promise<void> {
     const existingAssignments = await this.db.assignment.findMany({
-      where: { chapterId: { in: keptServerChapterIds } },
+      // Only COURSE assignments are managed by the course editor; a school's
+      // DAILY/EXAM work must never be deleted by a course save.
+      where: {
+        chapterId: { in: keptServerChapterIds },
+        assignmentType: 'COURSE',
+      },
       select: { id: true },
     });
     const existingAssignmentIds = new Set(existingAssignments.map((a) => a.id));

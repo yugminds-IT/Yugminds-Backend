@@ -217,9 +217,11 @@ export class StudentRankingService {
       if (asgn?.assignmentType === 'COURSE') {
         cur.cTotal += score;
         cur.cMax += max;
-      } else {
+      } else if (asgn?.assignmentType === 'DAILY') {
         cur.dTotal += score;
         cur.dMax += max;
+      } else {
+        continue; // EXAM (and unknown types) never count toward course/daily/overall
       }
       cur.graded += 1;
       agg.set(s.studentId, cur);

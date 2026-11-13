@@ -1,3 +1,4 @@
+import { parsePhone } from '../../common/utils/phone.util';
 import {
   Injectable,
   BadRequestException,
@@ -102,7 +103,7 @@ export class AdminSchoolAdminsService {
     const schoolId = String(body.school_id ?? '').trim();
     const fullName =
       body.full_name != null ? String(body.full_name).trim() : '';
-    const phone = body.phone != null ? String(body.phone).trim() : '';
+    const phone = parsePhone(body.phone) ?? '';
 
     if (!email) throw new BadRequestException('Email is required');
     if (!password) throw new BadRequestException('Password is required');
@@ -175,7 +176,8 @@ export class AdminSchoolAdminsService {
 
     const fullName =
       body.full_name != null ? String(body.full_name).trim() : undefined;
-    const phone = body.phone != null ? String(body.phone).trim() : undefined;
+    const phone =
+      body.phone != null ? (parsePhone(body.phone) ?? '') : undefined;
     const schoolId =
       body.school_id != null ? String(body.school_id).trim() : undefined;
     const isActive =

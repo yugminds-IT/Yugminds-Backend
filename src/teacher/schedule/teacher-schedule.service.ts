@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { AdminCalendarService } from '../../admin/calendar/calendar.service';
-import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import {
+  resolveSlotsForDate,
+  resolveWorkingDaysForDate,
+} from '../../common/utils/working-days-history.util';
+import { DaySlot, DaySlots } from '../../common/utils/day-slots.util';
 
 export interface TeacherWorkStatusForDate {
   /** Schools where the teacher is actually on duty today: assigned that weekday (per history) AND not a declared Holiday/Break, OR a declared CompensatoryWork day. */
@@ -12,6 +16,8 @@ export interface TeacherWorkStatusForDate {
   offScheduleSchoolIds: string[];
   /** Reason for each entry in holidaySchoolIds, e.g. { name: 'Diwali', type: 'Holiday' }. */
   holidays: Record<string, { name: string; type: string }>;
+  /** Half-day window per working school today (absent = full day), e.g. { schoolId: { slot: 'MORNING', start, end } }. */
+  slots: Record<string, DaySlot>;
 }
 
 /**
@@ -43,6 +49,7 @@ export class TeacherScheduleService {
       holidaySchoolIds: [],
       offScheduleSchoolIds: [],
       holidays: {},
+      slots: {},
     };
     if (schoolIds.length === 0) return result;
 
@@ -56,7 +63,11 @@ export class TeacherScheduleService {
         const [history, holidayEntries, compDates] = await Promise.all([
           this.db.teacherWorkingDaysHistory.findMany({
             where: { teacherId, schoolId, effectiveFrom: { lte: date } },
-            select: { effectiveFrom: true, workingDays: true },
+            select: {
+              effectiveFrom: true,
+              workingDays: true,
+              workingDaySlots: true,
+            },
             orderBy: { effectiveFrom: 'asc' },
           }),
           this.calendar.getHolidayDatesForMonth(schoolId, year, month),
@@ -72,6 +83,13 @@ export class TeacherScheduleService {
           history,
           date,
         ).includes(dayOfWeek);
+
+        const daySlot = (
+          resolveSlotsForDate(history, date) as DaySlots | null
+        )?.[String(dayOfWeek)];
+        if (daySlot && isAssignedToday && !isCompWork) {
+          result.slots[schoolId] = daySlot;
+        }
 
         if (isCompWork) {
           result.workingSchoolIds.push(schoolId);

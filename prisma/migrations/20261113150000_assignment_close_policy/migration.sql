@@ -1,0 +1,2 @@
+ALTER TABLE "Assignment" ADD COLUMN IF NOT EXISTS "lateSubmissionPolicy" TEXT NOT NULL DEFAULT 'allow';
+ALTER TABLE "AssignmentSubmission" ADD COLUMN IF NOT EXISTS "isLate" BOOLEAN NOT NULL DEFAULT false;

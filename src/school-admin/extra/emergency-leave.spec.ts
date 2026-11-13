@@ -57,6 +57,7 @@ function make(
     {} as any,
     notifications,
     {} as any,
+    {} as any,
   );
   return { ctl, db, attendanceUpsert, leaveCreate, notifications };
 }

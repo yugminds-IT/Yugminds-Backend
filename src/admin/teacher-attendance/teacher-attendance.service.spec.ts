@@ -127,3 +127,29 @@ describe('AdminTeacherAttendanceService.markMissing', () => {
     expect([...statuses]).toEqual(['Absent']);
   });
 });
+
+describe('AdminTeacherAttendanceService.averageRate', () => {
+  const svcWith = (rows: Array<[number, number]>) => {
+    const svc = new AdminTeacherAttendanceService({} as any, {} as any);
+    const monthly = jest.spyOn(svc, 'monthly').mockResolvedValue({
+      monthlyData: rows.map(([pct, days]) => ({
+        attendance_percentage: pct,
+        total_working_days: days,
+      })),
+    } as any);
+    return { svc, monthly };
+  };
+  it('averages only teachers who had working days, rounded', async () => {
+    const { svc } = svcWith([
+      [85, 6.5],
+      [0, 2.5],
+      [100, 0], // no working days yet -> ignored, not counted as 100% or 0%
+    ]);
+    expect(await svc.averageRate()).toBe(43);
+  });
+  it('is 0 with nobody rated, and scopes to the school it is given', async () => {
+    const { svc, monthly } = svcWith([[100, 0]]);
+    expect(await svc.averageRate('s1')).toBe(0);
+    expect(monthly).toHaveBeenCalledWith(undefined, 's1');
+  });
+});

@@ -1,3 +1,4 @@
+import { parsePhone } from '../../common/utils/phone.util';
 import {
   Injectable,
   NotFoundException,
@@ -17,6 +18,14 @@ import {
   WEEKDAY_NAMES,
   DEFAULT_OPERATING_DAYS,
 } from '../../common/utils/weekdays.util';
+import {
+  DaySlots,
+  classesOutsideAvailability,
+  findSlotClash,
+  normalizeDaySlots,
+  slotsKey,
+  SlotAssignment,
+} from '../../common/utils/day-slots.util';
 
 type SchoolAssignment = {
   school_id: string;
@@ -27,6 +36,8 @@ type SchoolAssignment = {
   working_days_per_week?: number;
   /** Which weekdays the teacher works at this school — 0=Sun..6=Sat. */
   working_days?: number[];
+  /** Half-day windows per weekday ({"1":{slot:"MORNING",start,end}}); a day not listed is a full day. */
+  day_slots?: Record<string, { slot?: string; start?: string; end?: string }>;
   /** When this working-days pattern takes effect (YYYY-MM-DD); defaults to today. */
   effective_from?: string;
   /** Calendar date the teacher's assignment to this school begins (YYYY-MM-DD); optional, no default. */
@@ -36,6 +47,18 @@ type SchoolAssignment = {
   max_students_per_session?: number;
   is_primary?: boolean;
 };
+
+/**
+ * The teacher's primary school (stored as User.tenantId): the assignment the
+ * admin flagged `is_primary`, else the first one. Previously only the first
+ * was ever used, so ticking "Primary School" on another school did nothing.
+ */
+function primarySchoolId(assignments: SchoolAssignment[]): string | null {
+  return (
+    (assignments.find((a) => a.is_primary && a.school_id) ?? assignments[0])
+      ?.school_id ?? null
+  );
+}
 
 /** Dedupe/sort/clamp to 0-6; falls back to Mon-Fri when absent or empty. */
 function normalizeWorkingDays(input?: number[]): number[] {
@@ -75,7 +98,17 @@ export type SectionAssignedToOtherDto = {
 };
 
 /** Enriched teacher detail for API response */
+/** Classes already in a school's timetable that a changed assignment no longer allows. */
+export type ScheduleWarning = {
+  schoolId: string;
+  schoolName: string;
+  count: number;
+  examples: string[];
+};
+
 export type TeacherDetailResponse = {
+  /** Present on update(): timetable classes now outside the teacher's days/half-day window. */
+  scheduleWarnings?: ScheduleWarning[];
   id: number;
   email: string;
   name: string;
@@ -93,6 +126,8 @@ export type TeacherDetailResponse = {
     gradesAssigned: GradeAssignedDto[];
     subjects: string[];
     workingDays: number[];
+    daySlots: DaySlots | null;
+    isPrimary: boolean;
     assignedFrom: string | null;
     assignedUntil: string | null;
     sectionsAssignedToOtherTeachers?: SectionAssignedToOtherDto[];
@@ -114,6 +149,7 @@ type UserWithRelations = Awaited<
     school: { name: string };
     subjects: string[];
     workingDays: number[];
+    workingDaySlots?: unknown;
     assignedFrom: Date | null;
     assignedUntil: Date | null;
   }>;
@@ -173,6 +209,8 @@ export class AdminTeachersService {
       ),
       subjects: Array.isArray(ts.subjects) ? ts.subjects : [],
       workingDays: normalizeWorkingDays(ts.workingDays),
+      daySlots: (ts.workingDaySlots as DaySlots | null) ?? null,
+      isPrimary: ts.schoolId === u.tenantId,
       assignedFrom: ts.assignedFrom
         ? ts.assignedFrom.toISOString().split('T')[0]
         : null,
@@ -283,7 +321,10 @@ export class AdminTeachersService {
         ...(page && take ? { skip: (page - 1) * take } : {}),
         include: {
           profile: true,
-          teacherSchools: { include: { school: true } },
+          teacherSchools: {
+            include: { school: true },
+            orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }],
+          },
           teacherSectionAssignments: {
             include: { section: { include: { grade: true } } },
           },
@@ -345,7 +386,10 @@ export class AdminTeachersService {
       where: { id: parseInt(id, 10) || 0, role: Role.teacher },
       include: {
         profile: true,
-        teacherSchools: { include: { school: true } },
+        teacherSchools: {
+          include: { school: true },
+          orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }],
+        },
         teacherSectionAssignments: {
           include: { section: { include: { grade: true } } },
         },
@@ -394,7 +438,7 @@ export class AdminTeachersService {
     return this.toTeacherDetail(u, otherAssignmentsBySchool);
   }
 
-  /** Resolve section name (e.g. "A" or "Section A") to Section id for a given grade in a school. */
+  /** Resolve a standard section name (e.g. "Section A") to Section id for a given grade in a school. */
   private async resolveSectionId(
     schoolId: string,
     gradeName: string,
@@ -405,13 +449,8 @@ export class AdminTeachersService {
       include: { sections: true },
     });
     if (!grade) return null;
-    const normalized = sectionNameOrLetter.trim();
-    const withPrefix = normalized.toLowerCase().startsWith('section')
-      ? normalized
-      : `Section ${normalized}`;
-    const section = grade.sections.find(
-      (s) => s.name === normalized || s.name === withPrefix,
-    );
+    // Sections are stored in one standard form ("Section A"): exact match.
+    const section = grade.sections.find((s) => s.name === sectionNameOrLetter);
     return section?.id ?? null;
   }
 
@@ -441,6 +480,111 @@ export class AdminTeachersService {
         `${school.name} doesn't operate on ${names} — remove ${disallowed.length > 1 ? 'these days' : 'this day'} from this teacher's working days.`,
       );
     }
+  }
+
+  /** Parses day_slots for one assignment; bad windows become a 400. */
+  private parseDaySlots(
+    assignment: SchoolAssignment,
+    workingDays: number[],
+  ): DaySlots | null {
+    try {
+      return normalizeDaySlots(assignment.day_slots, workingDays);
+    } catch (e) {
+      throw new BadRequestException((e as Error).message);
+    }
+  }
+
+  /**
+   * A teacher can't be at two schools in the same hours: for every pair of
+   * schools sharing a weekday (while both assignments are active) the time
+   * windows must not overlap — MORNING+AFTERNOON is fine, FULL+anything or
+   * MORNING+MORNING is not. Only pairs touching `changedIds` are checked so a
+   * legacy overlap doesn't block an unrelated edit.
+   */
+  private async assertNoSlotClashes(
+    all: SlotAssignment[],
+    changedIds: Set<string>,
+  ): Promise<void> {
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        if (
+          !changedIds.has(all[i].schoolId) &&
+          !changedIds.has(all[j].schoolId)
+        )
+          continue;
+        const clash = findSlotClash(all[i], all[j]);
+        if (!clash) continue;
+        const schools = await this.db.school.findMany({
+          where: { id: { in: [all[i].schoolId, all[j].schoolId] } },
+          select: { id: true, name: true },
+        });
+        const name = (id: string) =>
+          schools.find((x) => x.id === id)?.name ?? 'another school';
+        const win = (w: [string, string]) =>
+          w[0] === '00:00' && w[1] === '24:00' ? 'full day' : `${w[0]}–${w[1]}`;
+        throw new BadRequestException(
+          `Time clash on ${WEEKDAY_NAMES[clash.day]}: ${name(all[i].schoolId)} (${win(clash.a)}) overlaps ${name(all[j].schoolId)} (${win(clash.b)}). Make one a morning and the other an afternoon slot, or use different days.`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Timetable classes for this teacher+school that fall on a day the teacher
+   * no longer works, or outside the day's half-day window. Warn-only: the
+   * school admin fixes them in Class scheduling.
+   */
+  private async findStaleClasses(
+    teacherId: number,
+    schoolId: string,
+    workingDays: number[],
+    slots: DaySlots | null,
+  ): Promise<ScheduleWarning | null> {
+    const classes = await this.db.classSchedule.findMany({
+      where: { teacherId, schoolId, isActive: true },
+      select: {
+        dayOfWeek: true,
+        periodId: true,
+        subject: true,
+        grade: true,
+        section: true,
+      },
+    });
+    if (classes.length === 0) return null;
+    const periods = await this.db.period.findMany({
+      where: { id: { in: [...new Set(classes.map((c) => c.periodId))] } },
+      select: { id: true, periodNumber: true, startTime: true, endTime: true },
+    });
+    const byId = new Map(periods.map((p) => [p.id, p] as const));
+    const timed = classes.flatMap((c) => {
+      const p = byId.get(c.periodId);
+      return p
+        ? [
+            {
+              ...c,
+              startTime: p.startTime,
+              endTime: p.endTime,
+              n: p.periodNumber,
+            },
+          ]
+        : [];
+    });
+    const stale = classesOutsideAvailability(timed, workingDays, slots);
+    if (stale.length === 0) return null;
+    const school = await this.db.school.findUnique({
+      where: { id: schoolId },
+      select: { name: true },
+    });
+    return {
+      schoolId,
+      schoolName: school?.name ?? '',
+      count: stale.length,
+      examples: stale
+        .slice(0, 3)
+        .map((c) =>
+          `${WEEKDAY_NAMES[c.dayOfWeek].slice(0, 3)} P${c.n} (${c.startTime}–${c.endTime}) ${c.grade ?? ''}${c.section ? `-${c.section}` : ''} ${c.subject ?? ''}`.trim(),
+        ),
+    };
   }
 
   private async checkDuplicateSectionAssignments(
@@ -512,6 +656,7 @@ export class AdminTeachersService {
     workingDays: number[],
     effectiveFrom: Date,
     actorId?: number,
+    daySlots: DaySlots | null = null,
   ): Promise<void> {
     await this.assertEffectiveFromNotBeforeStart(
       db,
@@ -531,10 +676,11 @@ export class AdminTeachersService {
         teacherId,
         schoolId,
         workingDays,
+        workingDaySlots: daySlots ?? Prisma.DbNull,
         effectiveFrom,
         createdByUserId: actorId,
       },
-      update: { workingDays },
+      update: { workingDays, workingDaySlots: daySlots ?? Prisma.DbNull },
     });
   }
 
@@ -554,6 +700,8 @@ export class AdminTeachersService {
       subjects: string[];
       workingDays: number[];
       workingDaysPerWeek: number;
+      daySlots: DaySlots | null;
+      displayOrder: number;
       effectiveFrom: Date;
       assignedFrom: Date | null;
       assignedUntil: Date | null;
@@ -565,6 +713,8 @@ export class AdminTeachersService {
       schoolId,
       subjects,
       workingDays,
+      daySlots,
+      displayOrder,
       workingDaysPerWeek,
       effectiveFrom,
       assignedFrom,
@@ -585,6 +735,8 @@ export class AdminTeachersService {
         schoolId,
         subjects,
         workingDays,
+        workingDaySlots: daySlots ?? Prisma.DbNull,
+        displayOrder,
         workingDaysPerWeek,
         assignedFrom,
         assignedUntil,
@@ -592,6 +744,8 @@ export class AdminTeachersService {
       update: {
         subjects,
         workingDays,
+        workingDaySlots: daySlots ?? Prisma.DbNull,
+        displayOrder,
         workingDaysPerWeek,
         assignedFrom,
         assignedUntil,
@@ -605,6 +759,7 @@ export class AdminTeachersService {
       workingDays,
       effectiveFrom,
       actorId,
+      daySlots,
     );
 
     await tx.teacherSectionAssignment.deleteMany({
@@ -625,6 +780,7 @@ export class AdminTeachersService {
     const password = (body.password ?? body.temp_password) as string;
     const fullName = body.full_name as string | undefined;
     const phone = body.phone as string | undefined;
+    parsePhone(phone); // reject before any row is written
     const qualification = body.qualification as string | undefined;
     const specialization = body.specialization as string | undefined;
     const experienceRaw = body.experience as string | undefined;
@@ -640,8 +796,7 @@ export class AdminTeachersService {
       (body.school_assignments as SchoolAssignment[] | undefined) ?? [];
     // Compute the first school assignment now so we can use it as a tenantId
     // fallback during user creation (avoiding a null-then-patch pattern).
-    const firstSchoolIdEarly =
-      schoolAssignments.length > 0 ? schoolAssignments[0].school_id : null;
+    const firstSchoolIdEarly = primarySchoolId(schoolAssignments);
 
     if (!email || !password) {
       throw new BadRequestException('Email and password required');
@@ -658,8 +813,7 @@ export class AdminTeachersService {
 
     const hash = await bcrypt.hash(password, 10);
 
-    const firstSchoolId =
-      schoolAssignments.length > 0 ? schoolAssignments[0].school_id : null;
+    const firstSchoolId = primarySchoolId(schoolAssignments);
 
     // Pre-validate all section assignments before writing any DB rows
     const resolvedAssignments: Array<{
@@ -668,6 +822,8 @@ export class AdminTeachersService {
       subjects: string[];
       workingDays: number[];
       workingDaysPerWeek: number;
+      daySlots: DaySlots | null;
+      displayOrder: number;
       effectiveFrom: Date;
       assignedFrom: Date | null;
       assignedUntil: Date | null;
@@ -680,6 +836,7 @@ export class AdminTeachersService {
       const subjects = assignment.subjects ?? [];
       const workingDays = normalizeWorkingDays(assignment.working_days);
       const workingDaysPerWeek = workingDays.length;
+      const daySlots = this.parseDaySlots(assignment, workingDays);
       const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
       const assignedFrom = normalizeAssignedDate(assignment.assigned_from);
       const assignedUntil = normalizeAssignedDate(assignment.assigned_until);
@@ -701,7 +858,11 @@ export class AdminTeachersService {
             gs.grade,
             sectionName,
           );
-          if (sectionId) sectionIdsToAssign.push(sectionId);
+          if (!sectionId)
+            throw new BadRequestException(
+              `Section "${sectionName}" not found in ${gs.grade}. Use the standard form, e.g. "Section A".`,
+            );
+          sectionIdsToAssign.push(sectionId);
         }
       }
 
@@ -711,12 +872,18 @@ export class AdminTeachersService {
         subjects,
         workingDays,
         workingDaysPerWeek,
+        daySlots,
+        displayOrder: resolvedAssignments.length,
         effectiveFrom,
         assignedFrom,
         assignedUntil,
         sectionIdsToAssign,
       });
     }
+    await this.assertNoSlotClashes(
+      resolvedAssignments,
+      new Set(resolvedAssignments.map((r) => r.schoolId)),
+    );
 
     const created = await this.db.$transaction(async (tx) => {
       const user = await tx.user.create({
@@ -764,7 +931,10 @@ export class AdminTeachersService {
         where: { id: user.id },
         include: {
           profile: true,
-          teacherSchools: { include: { school: true } },
+          teacherSchools: {
+            include: { school: true },
+            orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }],
+          },
           teacherSectionAssignments: {
             include: { section: { include: { grade: true } } },
           },
@@ -782,6 +952,7 @@ export class AdminTeachersService {
     body: Record<string, unknown>,
     actorId?: number,
   ): Promise<TeacherDetailResponse> {
+    parsePhone(body.phone); // reject before any row is written
     const teacherId = parseInt(id, 10);
     const data: Record<string, unknown> = {};
     if (body.email) data.email = body.email;
@@ -871,6 +1042,7 @@ export class AdminTeachersService {
       });
     }
 
+    const scheduleWarnings: ScheduleWarning[] = [];
     const schoolAssignments = body.school_assignments as
       | SchoolAssignment[]
       | undefined;
@@ -888,6 +1060,36 @@ export class AdminTeachersService {
       const beforeWorkingDaysBySchool = new Map(
         existingSchoolLinks.map((l) => [l.schoolId, l.workingDays] as const),
       );
+      const beforeSlotsKeyBySchool = new Map(
+        existingSchoolLinks.map(
+          (l) => [l.schoolId, slotsKey(l.workingDaySlots)] as const,
+        ),
+      );
+      // Validate the whole resulting set for same-hours clashes up front,
+      // before anything is deleted/written. Only schools whose days or
+      // slots changed are checked so legacy data doesn't block other edits.
+      const pending: SlotAssignment[] = [];
+      const changedIds = new Set<string>();
+      for (const a of schoolAssignments) {
+        const days = normalizeWorkingDays(a.working_days);
+        const slots = this.parseDaySlots(a, days);
+        pending.push({
+          schoolId: a.school_id,
+          workingDays: days,
+          daySlots: slots,
+          assignedFrom: normalizeAssignedDate(a.assigned_from),
+          assignedUntil: normalizeAssignedDate(a.assigned_until),
+        });
+        const b = beforeWorkingDaysBySchool.get(a.school_id);
+        if (
+          !b ||
+          b.length !== days.length ||
+          b.some((d, i) => d !== days[i]) ||
+          beforeSlotsKeyBySchool.get(a.school_id) !== slotsKey(slots)
+        )
+          changedIds.add(a.school_id);
+      }
+      await this.assertNoSlotClashes(pending, changedIds);
       for (const link of existingSchoolLinks) {
         if (!keepSchoolIds.has(link.schoolId)) {
           await this.db.teacherSectionAssignment.deleteMany({
@@ -901,14 +1103,14 @@ export class AdminTeachersService {
         }
       }
 
-      const firstSchoolId =
-        schoolAssignments.length > 0 ? schoolAssignments[0].school_id : null;
-      for (const assignment of schoolAssignments) {
+      const firstSchoolId = primarySchoolId(schoolAssignments);
+      for (const [displayOrder, assignment] of schoolAssignments.entries()) {
         const schoolId = assignment.school_id;
         const gradeSectionsAssigned = assignment.grade_sections_assigned ?? [];
         const subjects = assignment.subjects ?? [];
         const workingDays = normalizeWorkingDays(assignment.working_days);
         const workingDaysPerWeek = workingDays.length;
+        const daySlots = this.parseDaySlots(assignment, workingDays);
 
         // Only record a new dated history entry when the pattern actually
         // changed (or this is a brand-new school for this teacher) — this is
@@ -919,7 +1121,8 @@ export class AdminTeachersService {
         const changed =
           !before ||
           before.length !== workingDays.length ||
-          before.some((d, i) => d !== workingDays[i]);
+          before.some((d, i) => d !== workingDays[i]) ||
+          beforeSlotsKeyBySchool.get(schoolId) !== slotsKey(daySlots);
         const effectiveFrom = normalizeEffectiveFrom(assignment.effective_from);
         const assignedFrom = normalizeAssignedDate(assignment.assigned_from);
         const assignedUntil = normalizeAssignedDate(assignment.assigned_until);
@@ -955,6 +1158,8 @@ export class AdminTeachersService {
               schoolId,
               subjects,
               workingDays,
+              workingDaySlots: daySlots ?? Prisma.DbNull,
+              displayOrder,
               workingDaysPerWeek,
               assignedFrom,
               assignedUntil,
@@ -962,6 +1167,8 @@ export class AdminTeachersService {
             update: {
               subjects,
               workingDays,
+              workingDaySlots: daySlots ?? Prisma.DbNull,
+              displayOrder,
               workingDaysPerWeek,
               assignedFrom,
               assignedUntil,
@@ -981,14 +1188,28 @@ export class AdminTeachersService {
                     teacherId,
                     schoolId,
                     workingDays,
+                    workingDaySlots: daySlots ?? Prisma.DbNull,
                     effectiveFrom,
                     createdByUserId: actorId,
                   },
-                  update: { workingDays },
+                  update: {
+                    workingDays,
+                    workingDaySlots: daySlots ?? Prisma.DbNull,
+                  },
                 }),
               ]
             : []),
         ]);
+
+        if (changed) {
+          const warning = await this.findStaleClasses(
+            teacherId,
+            schoolId,
+            workingDays,
+            daySlots,
+          );
+          if (warning) scheduleWarnings.push(warning);
+        }
 
         const sectionIdsToAssign: string[] = [];
         for (const gs of gradeSectionsAssigned) {
@@ -998,7 +1219,11 @@ export class AdminTeachersService {
               gs.grade,
               sectionName,
             );
-            if (sectionId) sectionIdsToAssign.push(sectionId);
+            if (!sectionId)
+              throw new BadRequestException(
+                `Section "${sectionName}" not found in ${gs.grade}. Use the standard form, e.g. "Section A".`,
+              );
+            sectionIdsToAssign.push(sectionId);
           }
         }
 
@@ -1017,12 +1242,14 @@ export class AdminTeachersService {
           });
         }
       }
-      // Keep teacher's tenantId in sync with first assigned school for JWT/legacy use
+      // Keep teacher's tenantId in sync with the primary assigned school for JWT/legacy use
       if (firstSchoolId) {
         await this.db.user.update({
           where: { id: teacherId },
           data: { tenantId: firstSchoolId },
         });
+        // tenantId is cached with the auth user — drop it so the new primary applies at once.
+        await this.authCache.invalidate(teacherId);
       }
     }
 
@@ -1030,13 +1257,19 @@ export class AdminTeachersService {
       where: { id: teacherId },
       include: {
         profile: true,
-        teacherSchools: { include: { school: true } },
+        teacherSchools: {
+          include: { school: true },
+          orderBy: [{ displayOrder: 'asc' }, { createdAt: 'asc' }],
+        },
         teacherSectionAssignments: {
           include: { section: { include: { grade: true } } },
         },
       },
     });
-    return this.toTeacherDetail(user as UserWithRelations);
+    return {
+      ...this.toTeacherDetail(user as UserWithRelations),
+      ...(scheduleWarnings.length > 0 && { scheduleWarnings }),
+    };
   }
 
   /**
@@ -1131,6 +1364,7 @@ export class AdminTeachersService {
       history: entries.map((e) => ({
         effective_from: e.effectiveFrom.toISOString().split('T')[0],
         working_days: e.workingDays,
+        day_slots: (e.workingDaySlots as DaySlots | null) ?? null,
       })),
     };
   }

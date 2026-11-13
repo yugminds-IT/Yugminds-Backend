@@ -1,0 +1,1 @@
+ALTER TABLE "Assignment" ADD COLUMN IF NOT EXISTS "closeDate" TIMESTAMP(3);

@@ -1,6 +1,8 @@
 export interface WorkingDaysHistoryEntry {
   effectiveFrom: Date;
   workingDays: number[];
+  /** Half-day windows (see day-slots.util); absent/null = all FULL days. */
+  workingDaySlots?: unknown;
 }
 
 /**
@@ -33,4 +35,17 @@ export function resolveWorkingDaysForDate(
     if (!best || entry.effectiveFrom > best.effectiveFrom) best = entry;
   }
   return best?.workingDays ?? [];
+}
+
+/** Slots map in effect on `date` (same entry `resolveWorkingDaysForDate` picks). */
+export function resolveSlotsForDate(
+  history: WorkingDaysHistoryEntry[],
+  date: Date,
+): unknown {
+  let best: WorkingDaysHistoryEntry | null = null;
+  for (const entry of history) {
+    if (entry.effectiveFrom > date) continue;
+    if (!best || entry.effectiveFrom > best.effectiveFrom) best = entry;
+  }
+  return best?.workingDaySlots ?? null;
 }

@@ -1,3 +1,6 @@
+import { parsePhone } from '../../common/utils/phone.util';
+import { parseGrade } from '../../common/utils/data-standards.util';
+import { parseSection } from '../../common/utils/section-name.util';
 import {
   BadRequestException,
   Body,
@@ -24,6 +27,7 @@ import * as bcrypt from 'bcrypt';
 import { deriveFriendlyPassword } from '../../common/utils/password.util';
 import { ResourceIdParamDto } from './dto/resource-id-param.dto';
 import { DataImportDto } from './dto/data-import.dto';
+import { AdminTeacherAttendanceService } from '../../admin/teacher-attendance/teacher-attendance.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 import { NotificationsService } from '../../common/notifications/notifications.service';
@@ -42,7 +46,15 @@ import {
   isEmergencyLeave,
   leaveStageFields,
 } from '../../common/utils/leave-rules.util';
-import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import {
+  resolveSlotsForDate,
+  resolveWorkingDaysForDate,
+} from '../../common/utils/working-days-history.util';
+import {
+  isFullWindow,
+  periodFitsWindow,
+  slotWindow,
+} from '../../common/utils/day-slots.util';
 import {
   WEEKDAY_NAMES,
   DEFAULT_OPERATING_DAYS,
@@ -70,6 +82,7 @@ export class SchoolAdminExtraController {
     private readonly enrollmentService: EnrollmentService,
     private readonly notificationsService: NotificationsService,
     private readonly authService: AuthService,
+    private readonly teacherAttendance: AdminTeacherAttendanceService,
   ) {}
 
   /** Resolve school ID for the current school admin. */
@@ -93,6 +106,7 @@ export class SchoolAdminExtraController {
     schoolId: string,
     teacherId: number,
     dayOfWeek: number,
+    periodId?: string,
   ): Promise<void> {
     const teacherSchool = await this.db.teacherSchool.findUnique({
       where: { teacherId_schoolId: { teacherId, schoolId } },
@@ -119,7 +133,7 @@ export class SchoolAdminExtraController {
 
     const history = await this.db.teacherWorkingDaysHistory.findMany({
       where: { teacherId, schoolId },
-      select: { effectiveFrom: true, workingDays: true },
+      select: { effectiveFrom: true, workingDays: true, workingDaySlots: true },
       orderBy: { effectiveFrom: 'asc' },
     });
     const workingDays =
@@ -130,6 +144,24 @@ export class SchoolAdminExtraController {
       throw new BadRequestException(
         `This teacher doesn't work at your school on ${WEEKDAY_NAMES[dayOfWeek]}s.`,
       );
+    }
+
+    // Split-day teacher: the period must sit inside this school's half-day
+    // window (periods are per-school, so 40- and 45-minute schools both fit).
+    const slots = history.length
+      ? resolveSlotsForDate(history, today)
+      : teacherSchool.workingDaySlots;
+    const window = slotWindow(slots, dayOfWeek);
+    if (periodId && !isFullWindow(window)) {
+      const p = await this.db.period.findFirst({
+        where: { id: periodId, schoolId },
+        select: { periodNumber: true, startTime: true, endTime: true },
+      });
+      if (p && !periodFitsWindow(p.startTime, p.endTime, window)) {
+        throw new BadRequestException(
+          `This teacher is only at your school ${window[0]}–${window[1]} on ${WEEKDAY_NAMES[dayOfWeek]}s (shared with another school); P${p.periodNumber} (${p.startTime}–${p.endTime}) is outside that.`,
+        );
+      }
     }
   }
 
@@ -701,39 +733,21 @@ export class SchoolAdminExtraController {
 
     const teacherIds = teacherSchools.map((ts) => ts.teacherId);
     const lastLogin = await lastLoginByUser(this.db, teacherIds);
-    const since = new Date();
-    since.setDate(since.getDate() - 30);
-
-    const [attendanceAgg, leavesAgg] = await Promise.all([
-      this.db.attendance.groupBy({
-        by: ['teacherId', 'status'],
-        where: {
-          schoolId,
-          teacherId: { in: teacherIds },
-          date: { gte: since },
-        },
-        _count: { _all: true },
-      }),
+    const [monthly, leavesAgg] = await Promise.all([
+      this.teacherAttendance.monthly(undefined, schoolId),
       this.db.teacherLeave.groupBy({
         by: ['teacherId', 'status'],
         where: { schoolId, teacherId: { in: teacherIds } },
         _count: { _all: true },
       }),
     ]);
-
-    const attendanceByTeacher: Record<
-      number,
-      { present: number; total: number }
-    > = {};
-    for (const row of attendanceAgg ?? []) {
-      const t = row.teacherId;
-      if (!attendanceByTeacher[t])
-        attendanceByTeacher[t] = { present: 0, total: 0 };
-      const count = row._count?._all ?? 0;
-      attendanceByTeacher[t].total += count;
-      if (String(row.status ?? '').toLowerCase() === 'present')
-        attendanceByTeacher[t].present += count;
-    }
+    // Same month-to-date figure as the dashboard card: no report on a past working day counts as absent.
+    const pctByTeacher = new Map(
+      monthly.monthlyData.map((m) => [
+        Number(m.teacher_id),
+        m.total_working_days > 0 ? m.attendance_percentage : 0,
+      ]),
+    );
 
     const leavesByTeacher: Record<number, number> = {};
     for (const row of leavesAgg ?? []) {
@@ -748,12 +762,7 @@ export class SchoolAdminExtraController {
       teachers: teacherSchools.map((ts) => {
         const u = ts.teacher;
         const p = u?.profile;
-        const att = attendanceByTeacher[ts.teacherId] ?? {
-          present: 0,
-          total: 0,
-        };
-        const attendancePercentage =
-          att.total > 0 ? Math.round((att.present / att.total) * 100) : 0;
+        const attendancePercentage = pctByTeacher.get(ts.teacherId) ?? 0;
         const expYears = (() => {
           const raw = String(p?.experience ?? '').trim();
           const n = parseInt(raw, 10);
@@ -812,6 +821,7 @@ export class SchoolAdminExtraController {
               working_days: Array.isArray(ts.workingDays)
                 ? ts.workingDays
                 : [1, 2, 3, 4, 5],
+              day_slots: ts.workingDaySlots ?? null,
               assigned_from: ts.assignedFrom
                 ? ts.assignedFrom.toISOString().split('T')[0]
                 : null,
@@ -859,7 +869,7 @@ export class SchoolAdminExtraController {
     if (gradeFilter && gradeFilter !== 'all')
       studentSchoolWhere.grade = gradeFilter;
     if (sectionFilter && sectionFilter !== 'all')
-      studentSchoolWhere.section = sectionFilter;
+      studentSchoolWhere.section = sectionFilter; // exact: "Section A"
     if (statusFilter === 'active') studentSchoolWhere.isActive = true;
     if (statusFilter === 'inactive') studentSchoolWhere.isActive = false;
 
@@ -883,17 +893,51 @@ export class SchoolAdminExtraController {
         : {}),
     };
 
-    const total = await this.db.user.count({ where });
-    const users = await this.db.user.findMany({
+    // Lowest grade first, then section, then name. Grade sits on a to-many
+    // relation and "Grade 10" string-sorts before "Grade 2", so sort the light
+    // rows here and load full rows for just this page.
+    // ponytail: sorts every match per request; move to SQL if a school passes ~10k students.
+    const light = await this.db.user.findMany({
       where,
-      take,
-      skip,
-      include: {
-        profile: true,
-        studentSchools: { where: { schoolId }, include: { school: true } },
+      select: {
+        id: true,
+        profile: { select: { fullName: true } },
+        studentSchools: {
+          where: { schoolId },
+          select: { grade: true, section: true },
+        },
       },
-      orderBy: { createdAt: 'desc' },
     });
+    const gradeNum = (g?: string | null) => {
+      const n = parseInt(String(g ?? '').replace(/\D+/g, ''), 10);
+      return Number.isNaN(n) ? Number.MAX_SAFE_INTEGER : n;
+    };
+    light.sort((a, b) => {
+      const sa = a.studentSchools[0];
+      const sb = b.studentSchools[0];
+      return (
+        gradeNum(sa?.grade) - gradeNum(sb?.grade) ||
+        String(sa?.section ?? '').localeCompare(String(sb?.section ?? '')) ||
+        String(a.profile?.fullName ?? '').localeCompare(
+          String(b.profile?.fullName ?? ''),
+        ) ||
+        a.id - b.id
+      );
+    });
+    const total = light.length;
+    const pageIds = light.slice(skip, skip + take).map((u) => u.id);
+    const byId = new Map(
+      (
+        await this.db.user.findMany({
+          where: { id: { in: pageIds } },
+          include: {
+            profile: true,
+            studentSchools: { where: { schoolId }, include: { school: true } },
+          },
+        })
+      ).map((u) => [u.id, u]),
+    );
+    const users = pageIds.flatMap((id) => byId.get(id) ?? []);
     const lastLogin = await lastLoginByUser(
       this.db,
       users.map((u) => u.id),
@@ -946,6 +990,9 @@ export class SchoolAdminExtraController {
     const password = body?.password;
     if (!email || !password)
       throw new BadRequestException('Email and password are required');
+    parseSection(body?.section); // reject before any row is created
+    parseGrade(body?.grade);
+    parsePhone(body?.parent_phone);
     const existing = await this.db.user.findUnique({ where: { email } });
     if (existing) throw new BadRequestException('Email already exists');
     const hash = await bcrypt.hash(password, 10);
@@ -1080,6 +1127,20 @@ export class SchoolAdminExtraController {
           email,
           success: false,
           error: 'Email already exists',
+        });
+        continue;
+      }
+
+      try {
+        parseSection(r.section);
+        parseGrade(r.grade);
+        parsePhone(r.parent_phone);
+      } catch (e: unknown) {
+        results.push({
+          index: i,
+          email,
+          success: false,
+          error: e instanceof Error ? e.message : 'Invalid section',
         });
         continue;
       }
@@ -1228,6 +1289,7 @@ export class SchoolAdminExtraController {
     const enrollment = (existing.studentSchools ?? [])[0];
     if (!enrollment) throw new BadRequestException('Enrollment not found');
 
+    parsePhone(body.parent_phone); // reject before any row is written
     const hasProfilePatch =
       body.full_name !== undefined ||
       body.parent_name !== undefined ||
@@ -1306,9 +1368,10 @@ export class SchoolAdminExtraController {
     // If grade or section changed, auto-enroll in courses now accessible to
     // the new grade/section (section-gated courses depend on section too).
     const gradeChanged =
-      body.grade !== undefined && body.grade !== enrollment.grade;
+      body.grade !== undefined && parseGrade(body.grade) !== enrollment.grade;
     const sectionChanged =
-      body.section !== undefined && body.section !== enrollment.section;
+      body.section !== undefined &&
+      parseSection(body.section) !== enrollment.section;
     if (gradeChanged || sectionChanged) {
       await this.enrollmentService.syncStudentEnrollments(studentId);
     }
@@ -2488,7 +2551,7 @@ export class SchoolAdminExtraController {
           : parseInt(String(body.teacher_id), 10);
     const roomId = body?.room_id == null ? null : String(body.room_id);
     const grade = String(body?.grade ?? '').trim();
-    const section = String(body?.section ?? '').trim() || null;
+    const section = parseSection(body?.section);
     const subject = String(body?.subject ?? '').trim();
     if (!grade || !subject)
       throw new BadRequestException('grade and subject are required');
@@ -2505,7 +2568,12 @@ export class SchoolAdminExtraController {
       if (!room) throw new BadRequestException('Invalid room_id');
     }
     await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
-    await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
+    await this.assertTeacherSchedulable(
+      schoolId,
+      teacherId,
+      dayOfWeek,
+      periodId,
+    );
 
     const academicYear = body?.academic_year ?? currentAcademicYear();
     // Conflict checks: same room or teacher in same day+period+academic year
@@ -2635,7 +2703,7 @@ export class SchoolAdminExtraController {
     const section =
       body?.section === undefined
         ? ((existing as { section?: string | null }).section ?? null)
-        : String(body.section ?? '').trim() || null;
+        : parseSection(body.section);
     const subject =
       body?.subject === undefined
         ? ((existing as { subject?: string | null }).subject ?? '')
@@ -2655,7 +2723,12 @@ export class SchoolAdminExtraController {
       if (!room) throw new BadRequestException('Invalid room_id');
     }
     await this.assertSchoolOperatesOnDay(schoolId, dayOfWeek);
-    await this.assertTeacherSchedulable(schoolId, teacherId, dayOfWeek);
+    await this.assertTeacherSchedulable(
+      schoolId,
+      teacherId,
+      dayOfWeek,
+      periodId,
+    );
 
     const updateAcademicYear =
       body?.academic_year !== undefined
@@ -3117,7 +3190,7 @@ export class SchoolAdminExtraController {
         const t = teacherMap.get(r.teacherId);
         return {
           id: r.id,
-          teacher_id: r.teacherId,
+          teacher_id: String(r.teacherId),
           school_id: r.schoolId,
           date: r.reportDate.toISOString(),
           grade: r.grade ?? '',
@@ -3163,7 +3236,7 @@ export class SchoolAdminExtraController {
     return {
       report: {
         id: report.id,
-        teacher_id: report.teacherId,
+        teacher_id: String(report.teacherId),
         school_id: report.schoolId,
         date: report.reportDate.toISOString(),
         grade: report.grade ?? '',

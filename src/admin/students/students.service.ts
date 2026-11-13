@@ -1,3 +1,6 @@
+import { parsePhone } from '../../common/utils/phone.util';
+import { parseGrade } from '../../common/utils/data-standards.util';
+import { parseSection } from '../../common/utils/section-name.util';
 import {
   Injectable,
   NotFoundException,
@@ -225,9 +228,10 @@ export class AdminStudentsService {
     const fullName = body.full_name as string | undefined;
     const parentName = body.parent_name as string | undefined;
     const parentPhone = body.parent_phone as string | undefined;
+    parsePhone(parentPhone); // reject before any row is written
     const schoolId = (body.school_id ?? body.tenantId) as string | undefined;
-    const grade = (body.grade as string | undefined) ?? null;
-    const section = (body.section as string | undefined) ?? null;
+    const grade = parseGrade(body.grade); // exact "Grade N" or null
+    const section = parseSection(body.section); // reject before any row is written
 
     if (!email || !password) {
       throw new BadRequestException('Email and password required');
@@ -419,6 +423,20 @@ export class AdminStudentsService {
         continue;
       }
 
+      try {
+        parseSection(r.section);
+        parseGrade(r.grade);
+        parsePhone(r.parent_phone);
+      } catch (e: unknown) {
+        results.push({
+          index: i,
+          email,
+          success: false,
+          error: e instanceof Error ? e.message : 'Invalid section',
+        });
+        continue;
+      }
+
       let effectivePassword: string;
       try {
         if (suppliedPassword) {
@@ -542,8 +560,9 @@ export class AdminStudentsService {
     }
 
     const schoolId = (body.school_id ?? body.tenantId) as string | undefined;
-    const grade = (body.grade as string | undefined) ?? null;
-    const section = (body.section as string | undefined) ?? null;
+    const grade = parseGrade(body.grade);
+    parsePhone(body.parent_phone);
+    const section = parseSection(body.section); // reject before any row is written
 
     // Credential / identity / active-state changes must end the account's live sessions.
     // An unchanged email re-sent by the edit form is not an email change.

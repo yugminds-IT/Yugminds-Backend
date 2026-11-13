@@ -208,8 +208,8 @@ describe('TeacherReportsService.create', () => {
       expect(db.teacherReport.create).not.toHaveBeenCalled();
     });
 
-    it('stores the subject the teacher chose, marked as teacher-confirmed, with the canonical spelling', async () => {
-      await service.create(7, { ...baseBody, subject: ' coding ' });
+    it('stores the subject the teacher chose, marked as teacher-confirmed', async () => {
+      await service.create(7, { ...baseBody, subject: 'Coding' });
       expect(db.teacherReport.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
@@ -220,13 +220,13 @@ describe('TeacherReportsService.create', () => {
       );
     });
 
-    it('keeps a school-specific subject as typed', async () => {
-      await service.create(7, { ...baseBody, subject: 'Maths' });
-      expect(db.teacherReport.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ subject: 'Maths' }),
-        }),
-      );
+    it('rejects a subject that is not exactly one from the fixed list', async () => {
+      for (const subject of [' coding ', 'coding', 'Maths']) {
+        await expect(
+          service.create(7, { ...baseBody, subject }),
+        ).rejects.toThrow(/Invalid subject/);
+      }
+      expect(db.teacherReport.create).not.toHaveBeenCalled();
     });
   });
 

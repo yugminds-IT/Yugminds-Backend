@@ -16,6 +16,8 @@ import { StorageModule } from './storage/storage.module';
 import { EnrollmentService } from './enrollment/enrollment.service';
 import { RankingService } from './assignment/ranking.service';
 import { StudentRankingService } from './assignment/student-ranking.service';
+import { ExamAnalyticsService } from './assignment/exam-analytics.service';
+import { AssignmentReportService } from './assignment/assignment-report.service';
 import { RetakeRequestTeacherResolver } from './assignment/retake-request-teacher-resolver.service';
 import { CertificateService } from './certificates/certificate.service';
 import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
@@ -38,6 +40,8 @@ import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
     EnrollmentService,
     RankingService,
     StudentRankingService,
+    ExamAnalyticsService,
+    AssignmentReportService,
     RetakeRequestTeacherResolver,
     CertificateService,
     LeadAlertsService,
@@ -47,6 +51,8 @@ import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
     EnrollmentService,
     RankingService,
     StudentRankingService,
+    ExamAnalyticsService,
+    AssignmentReportService,
     RetakeRequestTeacherResolver,
     CertificateService,
   ],

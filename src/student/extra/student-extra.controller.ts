@@ -1,3 +1,11 @@
+import { ExamAnalyticsService } from '../../common/assignment/exam-analytics.service';
+import {
+  examPhase,
+  examDeadline,
+  duePhase,
+  closeCutoff,
+} from '../../common/assignment/assignment-types';
+
 import {
   Body,
   Controller,
@@ -60,6 +68,10 @@ const SUBMISSION_FILE_TYPES: Record<string, string> = {
   webp: 'image/webp',
 };
 
+const EXAM_SUBMIT_GRACE_MS = 30_000;
+// A student mid-answer when the cutoff passes still gets to hand in.
+const DUE_CLOSE_GRACE_MS = 5 * 60_000;
+
 @Controller('student')
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.student)
@@ -74,6 +86,7 @@ export class StudentExtraController {
     private readonly retakeTeacherResolver: RetakeRequestTeacherResolver,
     private readonly certificateService: CertificateService,
     private readonly enrollmentService: EnrollmentService,
+    private readonly examAnalytics: ExamAnalyticsService,
   ) {}
 
   /** The student's enrollment, or null if absent or the course is unpublished/trashed. */
@@ -347,9 +360,11 @@ export class StudentExtraController {
     return certificateSvgUtil.buildCertificateSvg(params, templateSvg);
   }
 
+  /** Calendar days in IST (due dates are date-only): 0 = due today, negative = days past. */
   private static daysUntil(due: Date, now: Date) {
-    const ms = due.getTime() - now.getTime();
-    return Math.ceil(ms / (24 * 60 * 60 * 1000));
+    const day = 24 * 60 * 60 * 1000;
+    const istDay = (d: Date) => Math.floor((d.getTime() + 5.5 * 60 * 60 * 1000) / day);
+    return istDay(due) - istDay(now);
   }
 
   @Post('assignments/upload')
@@ -670,7 +685,14 @@ export class StudentExtraController {
       }),
       this.db.assignment.findMany({
         where: { chapterId: { in: chapterIds } },
-        select: { id: true, chapterId: true },
+        select: {
+          id: true,
+          chapterId: true,
+          dueDate: true,
+          closeDate: true,
+          lateSubmissionPolicy: true,
+          assignmentType: true,
+        },
       }),
       this.db.courseProgress.findMany({
         where: { studentId, courseId },
@@ -685,6 +707,8 @@ export class StudentExtraController {
     const assignmentsByChapter = new Map<string, Array<{ id: string }>>();
     chapterAssignments.forEach((a) => {
       if (!a.chapterId) return;
+      // Closed assignments can no longer be done, so they must not hold the next chapter shut.
+      if (duePhase(a) === 'closed') return;
       const list = assignmentsByChapter.get(a.chapterId) ?? [];
       list.push(a);
       assignmentsByChapter.set(a.chapterId, list);
@@ -990,6 +1014,25 @@ export class StudentExtraController {
     return { contents: [...contentItems, ...assignmentItems] };
   }
 
+  /** Exam-only response fields (type label, window, duration, phase). */
+  private examFields(
+    a: {
+      examType: string | null;
+      startsAt: Date | null;
+      endsAt: Date | null;
+      durationMinutes: number | null;
+    },
+    now: Date,
+  ) {
+    return {
+      exam_type: a.examType,
+      starts_at: a.startsAt?.toISOString() ?? null,
+      ends_at: a.endsAt?.toISOString() ?? null,
+      duration_minutes: a.durationMinutes,
+      exam_phase: examPhase(a, now),
+    };
+  }
+
   @Get('assignments')
   async listAssignments(
     @CurrentUser() user: { id: number },
@@ -999,9 +1042,10 @@ export class StudentExtraController {
     // If type=DAILY, serve school-scoped daily assignments for the student's grade.
     // Visibility (school + publishScope filtering) is resolved by the shared
     // StudentDailyAssignmentsService so this list and the dashboard counts agree.
-    if (type && String(type).toUpperCase() === 'DAILY') {
+    const listType = type ? String(type).toUpperCase() : '';
+    if (listType === 'DAILY' || listType === 'EXAM') {
       const { assignments: dailyAssignments, studentSchool } =
-        await this.dailyAssignments.getVisibleDailyAssignments(user.id);
+        await this.dailyAssignments.getVisibleAssignments(user.id, listType);
       if (dailyAssignments.length === 0) return { assignments: [] };
       const submissionRows = await this.db.assignmentSubmission.findMany({
         where: {
@@ -1080,12 +1124,14 @@ export class StudentExtraController {
             id: a.id,
             title: a.title,
             description: a.description,
-            assignment_type: 'DAILY',
+            assignment_type: listType,
+            ...(listType === 'EXAM' ? this.examFields(a, now) : {}),
             subject: a.subject,
             grade_name: a.grade?.name ?? studentSchool?.grade ?? null,
             due_date: due ? due.toISOString() : null,
+            ...this.dueFields(a, grantedIds.has(a.id), now),
             max_marks: maxMarks,
-            is_overdue: due ? due < now && !sub : false,
+            is_overdue: !!due && duePhase(a, now) !== 'open' && !sub,
             days_until_due: due
               ? StudentExtraController.daysUntil(due, now)
               : null,
@@ -1267,6 +1313,7 @@ export class StudentExtraController {
             0,
           ),
           status: submissionByAssignmentId.get(a.id)?.status ?? 'not_started',
+          ...this.dueFields(a, grantedIds.has(a.id)),
           ...this.retakeListFields(
             a,
             submissionsByAssignmentId.get(a.id)?.length ?? 0,
@@ -1276,7 +1323,7 @@ export class StudentExtraController {
             const due = (a as { dueDate?: Date | null }).dueDate;
             if (!due) return false;
             return (
-              due.getTime() < Date.now() &&
+              duePhase(a) !== 'open' &&
               (submissionByAssignmentId.get(a.id)?.status ?? 'not_started') ===
                 'not_started'
             );
@@ -1320,6 +1367,19 @@ export class StudentExtraController {
       select: { assignmentId: true },
     });
     return new Set(grants.map((g) => g.assignmentId));
+  }
+
+  /** Close state for the client; an active personal grant bypasses a close (shown as 'late'). */
+  private dueFields(
+    a: { dueDate: Date | null; closeDate?: Date | null; lateSubmissionPolicy?: string | null; assignmentType?: string | null },
+    grantActive: boolean,
+    now = new Date(),
+  ) {
+    const phase = duePhase(a, now);
+    return {
+      due_phase: phase === 'closed' && grantActive ? 'late' : phase,
+      closes_at: a.assignmentType === 'EXAM' ? null : (closeCutoff(a)?.toISOString() ?? null),
+    };
   }
 
   /** `retake_available`: the student has attempted and may start another attempt now. */
@@ -1447,7 +1507,10 @@ export class StudentExtraController {
     }
 
     // DAILY assignments are school-scoped — verify school membership, not course enrollment
-    if (assignment.assignmentType === 'DAILY') {
+    if (
+      assignment.assignmentType === 'DAILY' ||
+      assignment.assignmentType === 'EXAM'
+    ) {
       // Same publish + audience rule as the list, not just school membership.
       if (
         !(await this.dailyAssignments.isVisibleToStudent(user.id, assignment))
@@ -1517,6 +1580,24 @@ export class StudentExtraController {
         decidedAt: true,
       },
     });
+    // EXAM: server-clock phase + this attempt's start record. Questions stay
+    // hidden until the student has started (or already has results to review).
+    const isExam = assignment.assignmentType === 'EXAM';
+    const examNow = new Date();
+    const attemptStart = isExam
+      ? await this.db.assignmentAttemptStart.findUnique({
+          where: {
+            assignmentId_studentId_attemptNumber: {
+              assignmentId,
+              studentId: user.id,
+              attemptNumber: attempts.length + 1,
+            },
+          },
+          select: { startedAt: true },
+        })
+      : null;
+    const showQuestions =
+      !isExam || attempts.length > 0 || (!!attemptStart && examPhase(assignment, examNow) !== 'upcoming');
     const maxMarks = assignment.questions.reduce(
       (sum, q) =>
         sum +
@@ -1553,16 +1634,37 @@ export class StudentExtraController {
         title: assignment.title,
         description: assignment.description,
         assignment_type: assignmentType,
+        kind: assignment.assignmentType,
+        ...(isExam
+          ? {
+              ...this.examFields(assignment, examNow),
+              server_now: examNow.toISOString(),
+              started_at: attemptStart?.startedAt.toISOString() ?? null,
+              deadline:
+                attemptStart
+                  ? (examDeadline(assignment, attemptStart.startedAt)?.toISOString() ?? null)
+                  : null,
+              instructions: assignment.instructions ?? null,
+              question_count: assignment.questions.length,
+            }
+          : {}),
         due_date:
           (assignment as { dueDate?: Date | null }).dueDate?.toISOString() ??
           null,
+        ...this.dueFields(
+          assignment,
+          !!(await this.db.retakeGrant.findFirst({
+            where: { assignmentId, studentId: user.id, isActive: true },
+            select: { id: true },
+          })),
+        ),
         max_marks: maxMarks,
         max_attempts: assignment.maxRetakeAttempts ?? 1,
         retake_enabled: assignment.retakeEnabled,
         retake_scoring_rule: assignment.retakeScoringRule ?? 'latest',
         retake_window_open: assignment.retakeWindowOpen ?? false,
         retake_access_scope: assignment.retakeAccessScope ?? 'all',
-        questions: assignment.questions.map((q) => {
+        questions: (showQuestions ? assignment.questions : []).map((q) => {
           // Fill-blank `options` are the wrong choices only — never send them
           // raw, or students could tell the correct words apart.
           const isFillBlank = /^fill[-_]?blank$/i.test(q.questionType ?? '');
@@ -1757,6 +1859,71 @@ export class StudentExtraController {
     };
   }
 
+  /**
+   * Begin an EXAM attempt: records the server start time (so the duration
+   * limit can't be dodged client-side) and returns the attempt deadline.
+   * Idempotent for the same attempt number.
+   */
+  @Post('assignments/:assignmentId/start')
+  async startExam(
+    @CurrentUser() user: { id: number },
+    @Param('assignmentId') assignmentId: string,
+  ) {
+    const assignment = await this.db.assignment.findUnique({
+      where: { id: assignmentId },
+    });
+    if (
+      !assignment ||
+      assignment.assignmentType !== 'EXAM' ||
+      !(await this.dailyAssignments.isVisibleToStudent(user.id, assignment))
+    )
+      throw new NotFoundException('Exam not found');
+
+    const now = new Date();
+    const phase = examPhase(assignment, now);
+    if (phase === 'upcoming')
+      throw new BadRequestException('This exam has not started yet');
+    if (phase === 'closed')
+      throw new BadRequestException('This exam is closed');
+
+    const attempts = await this.db.assignmentSubmission.findMany({
+      where: { assignmentId, studentId: user.id },
+      select: { attemptNumber: true },
+      orderBy: { attemptNumber: 'asc' },
+    });
+    const attemptNumber = (attempts[attempts.length - 1]?.attemptNumber ?? 0) + 1;
+    if (attempts.length > 0) {
+      const grant = await this.db.retakeGrant.findUnique({
+        where: { assignmentId_studentId: { assignmentId, studentId: user.id } },
+        select: { isActive: true },
+      });
+      if (
+        process.env.ASSIGNMENT_RETAKE_FEATURE_ENABLED !== 'false' &&
+        !canRetakeAssignment(assignment, attempts.length, !!grant?.isActive)
+      )
+        throw new BadRequestException('Retake is not available for this exam');
+    }
+
+    const start = await this.db.assignmentAttemptStart.upsert({
+      where: {
+        assignmentId_studentId_attemptNumber: {
+          assignmentId,
+          studentId: user.id,
+          attemptNumber,
+        },
+      },
+      create: { assignmentId, studentId: user.id, attemptNumber, startedAt: now },
+      update: {},
+      select: { startedAt: true },
+    });
+    return {
+      attempt_number: attemptNumber,
+      started_at: start.startedAt.toISOString(),
+      deadline: examDeadline(assignment, start.startedAt)?.toISOString() ?? null,
+      server_now: now.toISOString(),
+    };
+  }
+
   @Post('assignments/:assignmentId/submit')
   async submitAssignment(
     @CurrentUser() user: { id: number },
@@ -1774,8 +1941,11 @@ export class StudentExtraController {
       throw new NotFoundException('Assignment not found');
     }
 
-    // DAILY assignments: verify school membership. COURSE assignments: verify enrollment.
-    if (assignment.assignmentType === 'DAILY') {
+    // DAILY/EXAM assignments: verify school membership. COURSE assignments: verify enrollment.
+    if (
+      assignment.assignmentType === 'DAILY' ||
+      assignment.assignmentType === 'EXAM'
+    ) {
       // Same publish + audience rule as the list, not just school membership.
       if (
         !(await this.dailyAssignments.isVisibleToStudent(user.id, assignment))
@@ -1833,6 +2003,42 @@ export class StudentExtraController {
       throw new BadRequestException(
         'Retake is not available for this assignment',
       );
+    }
+
+    let isLate = false;
+    if (assignment.assignmentType !== 'EXAM') {
+      const phase = duePhase(
+        assignment,
+        new Date(Date.now() - DUE_CLOSE_GRACE_MS),
+      );
+      // Late is judged on the real clock; the grace only keeps the door open.
+      const lateNow = duePhase(assignment) !== 'open';
+      if (phase === 'closed' && !activeRetakeGrant?.isActive)
+        throw new BadRequestException('This assignment is closed for submissions');
+      isLate = lateNow;
+    }
+
+    if (assignment.assignmentType === 'EXAM') {
+      // Server clock only. Needs a start record for THIS attempt; the
+      // deadline is the window end capped by the per-attempt duration.
+      const now = new Date();
+      if (examPhase(assignment, now) !== 'open')
+        throw new BadRequestException('This exam is not open for submission');
+      const start = await this.db.assignmentAttemptStart.findUnique({
+        where: {
+          assignmentId_studentId_attemptNumber: {
+            assignmentId,
+            studentId: user.id,
+            attemptNumber: nextAttemptNumber,
+          },
+        },
+        select: { startedAt: true },
+      });
+      if (!start)
+        throw new BadRequestException('Start the exam before submitting');
+      const deadline = examDeadline(assignment, start.startedAt);
+      if (deadline && now.getTime() > deadline.getTime() + EXAM_SUBMIT_GRACE_MS)
+        throw new BadRequestException('Time is up for this attempt');
     }
 
     const answers = (body?.answers ?? body) as unknown;
@@ -1985,6 +2191,7 @@ export class StudentExtraController {
         maxScore: canAutoGrade ? maxScore : null,
         gradedAt: canAutoGrade ? new Date() : null,
         isRetake: hasAttempted,
+        isLate,
       },
     });
 
@@ -2590,7 +2797,25 @@ export class StudentExtraController {
       (assignmentId) =>
         asgnMap.get(assignmentId)?.retakeScoringRule ?? 'latest',
     );
-    const bestSubs = [...bestByKey.values()];
+    const allBest = [...bestByKey.values()];
+    const isExamSub = (sub: { assignmentId: string }) =>
+      asgnMap.get(sub.assignmentId)?.assignmentType === 'EXAM';
+    // Exams are reported separately and never mix into course/daily/overall.
+    const bestSubs = allBest.filter((sub) => !isExamSub(sub));
+    const examHistory = allBest.filter(isExamSub).map((sub) => {
+      const asgn = asgnMap.get(sub.assignmentId);
+      const max = Number(sub.maxScore ?? 0);
+      return {
+        assignment_id: sub.assignmentId,
+        title: asgn?.title ?? '',
+        subject: asgn?.subject ?? 'General',
+        score: Number(sub.score ?? 0),
+        max_score: max,
+        percentage: max > 0 ? Number(((Number(sub.score ?? 0) / max) * 100).toFixed(2)) : 0,
+        attempt: sub.attemptNumber,
+        submitted_at: sub.submittedAt,
+      };
+    });
 
     // ── 5. Personal score summary ───────────────────────────────────────────
     let courseScore = 0,
@@ -2770,6 +2995,15 @@ export class StudentExtraController {
       },
       // Structured multi-scope rankings: { rank, total, percentile }
       rankings,
+      exam: {
+        ...((await this.examAnalytics.forStudent(user.id)) ?? {
+          score: null,
+          rank: null,
+          ranked_students: 0,
+          exams_taken: 0,
+        }),
+        history: examHistory,
+      },
       subject_breakdown,
       score_history: scoreHistory,
       school_leaderboard,

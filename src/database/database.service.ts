@@ -7,6 +7,15 @@ import { PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { tenantContext } from '../tenants/tenant-context';
+import { normalizeEmail } from '../common/utils/email.util';
+import {
+  parseGrade,
+  parseStatus,
+  parseSubject,
+  parseTime,
+} from '../common/utils/data-standards.util';
+import { parsePhone } from '../common/utils/phone.util';
+import { parseSection } from '../common/utils/section-name.util';
 
 export interface DatabaseService extends PrismaClient {}
 
@@ -70,6 +79,7 @@ export class DatabaseService extends PrismaClient implements OnModuleDestroy {
       'TeacherSectionAssignment',
       'TeacherLeave',
       'Assignment',
+      'TeacherWorkingDaysHistory',
     ]);
 
     // Same rationale for the student relation: these models are isolated by their
@@ -88,12 +98,123 @@ export class DatabaseService extends PrismaClient implements OnModuleDestroy {
       'NotificationReply',
     ]);
 
+    // Section names have ONE stored form ("Section A"). Every section value
+    // WRITTEN (StudentSchool.section, ClassSchedule.section, TeacherReport.section,
+    // CourseAccessSection.sectionName — including nested writes) is validated
+    // here and rejected (400) if not standard, so no code path (import, form,
+    // API, script) can store "A" / "sec a". Nothing is converted, and filters
+    // are not touched: callers must filter by the standard "Section A".
+    const JSON_COLUMNS = new Set([
+      'answers',
+      'attachments',
+      'cornerPillars',
+      'impactStats',
+      'metadata',
+      'options',
+      'payload',
+      'quiz',
+      'sectionColors',
+      'sectionEnabled',
+      'sectionTitles',
+      'snapshot',
+      'socialLinks',
+      'state',
+      'workingDaySlots',
+    ]);
+    // Phones have ONE stored form too ("+919876543210", "-"/blank → null):
+    // normalized in place on every write to a phone column, nested writes
+    // included. Unparseable numbers are rejected (400) like bad sections.
+    const PHONE_KEYS = new Set(['phone', 'parentPhone']);
+    // Grades ("Grade 4"), times ("09:05", 24h) and subjects (fixed list) are
+    // validated the same way: any string written under these keys, nested
+    // writes included, must be exactly the standard or the write is rejected.
+    const VALIDATE_KEYS: Record<string, (v: string) => unknown> = {
+      section: parseSection,
+      sectionName: parseSection,
+      grade: parseGrade,
+      gradeName: parseGrade,
+      startTime: parseTime,
+      endTime: parseTime,
+      subject: parseSubject,
+    };
+    const validateSectionIn = (node: any): void => {
+      if (!node || typeof node !== 'object') return;
+      if (Array.isArray(node)) return node.forEach(validateSectionIn);
+      for (const [k, v] of Object.entries(node)) {
+        if (JSON_COLUMNS.has(k)) continue;
+        if (typeof v === 'string' && VALIDATE_KEYS[k]) VALIDATE_KEYS[k](v);
+        else if (PHONE_KEYS.has(k) && typeof v === 'string')
+          node[k] = parsePhone(v);
+        else if (PHONE_KEYS.has(k) && v && typeof (v as any).set === 'string')
+          (v as any).set = parsePhone((v as any).set);
+        else validateSectionIn(v);
+      }
+    };
+    // `status` columns are enums-in-spirit (see STATUSES); Grade.name and
+    // TeacherSchool.subjects are model-specific, so only top-level data is
+    // checked here.
+    const validateModelFields = (model: string, d: any): void => {
+      if (!d || typeof d !== 'object') return;
+      if (Array.isArray(d))
+        return d.forEach((x) => validateModelFields(model, x));
+      const val = (x: any) =>
+        x && typeof x === 'object' && !Array.isArray(x) ? x.set : x;
+      if (typeof val(d.status) === 'string') parseStatus(model, val(d.status));
+      if (model === 'Grade' && typeof val(d.name) === 'string')
+        parseGrade(val(d.name));
+      if (model === 'TeacherSchool' && Array.isArray(val(d.subjects)))
+        val(d.subjects).forEach((x: unknown) => parseSubject(x));
+    };
+
+    // Email has ONE stored form (trimmed, lowercase). Applied to every write
+    // and to every equality lookup on these models, so login / reset / create
+    // duplicate-checks all see the same value no matter how it was typed.
+    // (AuthActivity is a historical log and is left as recorded.)
+    const EMAIL_MODELS = new Set([
+      'User',
+      'School',
+      'ContactSubmission',
+      'AcademyAccount',
+    ]);
+    const normalizeUserEmailWrite = (d: any): void => {
+      if (Array.isArray(d)) return d.forEach(normalizeUserEmailWrite);
+      if (d && typeof d.email === 'string') d.email = normalizeEmail(d.email);
+    };
+    const normalizeUserEmailWhere = (w: any): void => {
+      if (!w || typeof w !== 'object') return;
+      for (const k of ['AND', 'OR', 'NOT']) {
+        const v = w[k];
+        if (Array.isArray(v)) v.forEach(normalizeUserEmailWhere);
+        else normalizeUserEmailWhere(v);
+      }
+      const e = w.email;
+      if (typeof e === 'string') w.email = normalizeEmail(e);
+      else if (e && typeof e === 'object') {
+        if (typeof e.equals === 'string') e.equals = normalizeEmail(e.equals);
+        if (Array.isArray(e.in)) e.in = e.in.map(normalizeEmail);
+      }
+    };
+
     // Prisma v7.4.2 (with the adapter used here) does not expose `prisma.$use`.
     // Use Prisma Client extensions instead to enforce tenant scoping.
     const extended = this.$extends({
       query: {
         $allModels: {
           $allOperations: ({ model, operation, args, query }: any) => {
+            if (args && EMAIL_MODELS.has(model)) {
+              normalizeUserEmailWrite(args.data);
+              normalizeUserEmailWrite(args.create);
+              normalizeUserEmailWrite(args.update);
+              normalizeUserEmailWhere(args.where);
+            }
+            if (args) {
+              validateSectionIn(args.data);
+              validateSectionIn(args.create);
+              validateSectionIn(args.update);
+              validateModelFields(model, args.data);
+              validateModelFields(model, args.create);
+              validateModelFields(model, args.update);
+            }
             const where = args?.where;
             if (!where || typeof where !== 'object') return query(args);
 

@@ -23,11 +23,24 @@ export class SchoolAdminStatsController {
     return this.service.getLeaderboard(user);
   }
 
+  @Get('exam-analytics')
+  getExamAnalytics(@CurrentUser() user: { id: number }) {
+    return this.service.getExamAnalytics(user);
+  }
+
   @Get('leaderboard/assignments/:assignmentId/marks')
   getAssignmentMarks(
     @CurrentUser() user: { id: number },
     @Param('assignmentId') assignmentId: string,
   ) {
     return this.service.getAssignmentMarks(user, assignmentId);
+  }
+
+  @Get('assignments/:assignmentId/report-data')
+  getAssignmentReport(
+    @CurrentUser() user: { id: number },
+    @Param('assignmentId') assignmentId: string,
+  ) {
+    return this.service.getAssignmentReport(user, assignmentId);
   }
 }

@@ -37,6 +37,7 @@ describe('TeacherScheduleService', () => {
       holidaySchoolIds: [],
       offScheduleSchoolIds: [],
       holidays: {},
+      slots: {},
     });
   });
 
@@ -53,6 +54,25 @@ describe('TeacherScheduleService', () => {
     expect(result.workingSchoolIds).toEqual(['school-a']);
     expect(result.holidaySchoolIds).toEqual([]);
     expect(result.offScheduleSchoolIds).toEqual([]);
+  });
+
+  it('reports the half-day slot for a split-day teacher', async () => {
+    db.teacherWorkingDaysHistory.findMany.mockResolvedValue([
+      {
+        effectiveFrom: d('2026-07-01'),
+        workingDays: [1],
+        workingDaySlots: {
+          '1': { slot: 'MORNING', start: '08:00', end: '12:30' },
+        },
+      },
+    ]);
+    const result = await service.getWorkStatusForDate(
+      1,
+      ['school-a'],
+      d('2026-07-20'),
+    );
+    expect(result.workingSchoolIds).toEqual(['school-a']);
+    expect(result.slots['school-a'].slot).toBe('MORNING');
   });
 
   it('classifies a school as off-schedule when today is not in the weekly pattern', async () => {

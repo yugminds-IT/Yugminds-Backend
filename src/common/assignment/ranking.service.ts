@@ -34,6 +34,7 @@ export class RankingService {
     const assignments = await this.db.assignment.findMany({
       where: {
         ...(courseId ? { courseId } : {}),
+        assignmentType: { not: 'EXAM' }, // exams never feed course/daily scores
         submissions: { some: { studentId } },
       },
       select: {

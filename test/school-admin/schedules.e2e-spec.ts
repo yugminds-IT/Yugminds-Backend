@@ -63,13 +63,13 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Tuesday',
         })
         .expect(201);
       scheduleId = res.body.schedule.id;
       expect(scheduleId).toBeTruthy();
-      expect(res.body.schedule.subject).toBe('Science');
+      expect(res.body.schedule.subject).toBe('Coding');
       expect(res.body.schedule.day_of_week).toBe('Tuesday');
       expect(res.body.schedule.section).toBe(fixture.section);
     });
@@ -83,7 +83,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Math',
+          subject: 'Robotics',
           day_of_week: 'Tuesday',
         })
         .expect(400);
@@ -101,9 +101,9 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
       const res = await request(app.getHttpServer())
         .patch(`/school-admin/schedules/${scheduleId}`)
         .set(...auth)
-        .send({ subject: 'Advanced Science' })
+        .send({ subject: 'Python' })
         .expect(200);
-      expect(res.body.schedule.subject).toBe('Advanced Science');
+      expect(res.body.schedule.subject).toBe('Python');
     });
 
     it('deletes the schedule', async () => {
@@ -197,7 +197,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: 999999999,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Wednesday',
         });
       expect(res.status).toBe(400);
@@ -213,7 +213,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Saturday',
         });
       expect(res.status).toBe(400);
@@ -262,7 +262,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Wednesday',
         });
       expect(blocked.status).toBe(400);
@@ -286,7 +286,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Wednesday',
         });
       expect(allowed.status).toBe(201);
@@ -341,7 +341,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Saturday',
         });
       expect(res.status).toBe(400);
@@ -357,7 +357,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           teacher_id: fixture.teachers[1].id,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Saturday',
         });
       expect(res.status).toBe(400);
@@ -378,7 +378,7 @@ describe('school-admin schedules CRUD + sync-to-teachers', () => {
           period_id: extraPeriodId,
           grade: fixture.grade,
           section: fixture.section,
-          subject: 'Science',
+          subject: 'Coding',
           day_of_week: 'Saturday',
         });
       expect(res.status).toBe(201);

@@ -1,3 +1,5 @@
+import { Transform } from 'class-transformer';
+import { emailTransform } from '../../common/utils/email.util';
 import { IsEmail, IsEnum, IsString, Matches, MinLength } from 'class-validator';
 
 // Full role set — used internally by admin-only account creation flows.
@@ -18,6 +20,7 @@ export type PublicSignupRole =
   (typeof PublicSignupRole)[keyof typeof PublicSignupRole];
 
 export class SignupDto {
+  @Transform(emailTransform)
   @IsEmail()
   email: string;
 

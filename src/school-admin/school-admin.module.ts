@@ -5,9 +5,12 @@ import { PasswordResetRequestModule } from '../common/password-reset-request/pas
 import { SchoolAdminSchoolController } from './school/school.controller';
 import { SchoolAdminStatsController } from './stats/stats.controller';
 import { SchoolAdminSchoolService } from './school/school.service';
+import { SchoolPerformanceService } from './stats/performance.service';
 import { SchoolAdminStatsService } from './stats/stats.service';
 import { SchoolAdminExtraController } from './extra/school-admin-extra.controller';
 import { RealtimeModule } from '../common/realtime/realtime.module';
+import { AdminTeacherAttendanceService } from '../admin/teacher-attendance/teacher-attendance.service';
+import { AdminCalendarService } from '../admin/calendar/calendar.service';
 import { CommonModule } from '../common/common.module';
 
 @Module({
@@ -23,6 +26,12 @@ import { CommonModule } from '../common/common.module';
     SchoolAdminStatsController,
     SchoolAdminExtraController,
   ],
-  providers: [SchoolAdminSchoolService, SchoolAdminStatsService],
+  providers: [
+    SchoolAdminSchoolService,
+    SchoolAdminStatsService,
+    SchoolPerformanceService,
+    AdminTeacherAttendanceService,
+    AdminCalendarService,
+  ],
 })
 export class SchoolAdminModule {}

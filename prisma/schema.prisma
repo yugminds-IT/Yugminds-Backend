@@ -52,6 +52,7 @@ model User {
   notificationReplies      NotificationReply[]
   teacherLeaves             TeacherLeave[]
   assignmentSubmissions    AssignmentSubmission[]
+  assignmentAttemptStarts  AssignmentAttemptStart[] @relation("AttemptStartStudent")
   createdAssignments       Assignment[]                 @relation("TeacherAssignments")
   grantedRetakeEntries     RetakeGrant[]               @relation("TeacherRetakeGrants")
   studentRetakeEntries     RetakeGrant[]               @relation("StudentRetakeGrants")
@@ -212,6 +213,12 @@ model TeacherSchool {
   // admin attendance dashboard's "total working days" math; kept in sync
   // with workingDaysPerWeek (= workingDays.length) on every write.
   workingDays         Int[]    @default([1, 2, 3, 4, 5])
+  // Half-day windows per weekday: {"1":{"slot":"MORNING","start":"08:00","end":"12:30"}}.
+  // A day absent from the map is a FULL day. Lets one teacher split a day
+  // across two schools (see common/utils/day-slots.util.ts).
+  workingDaySlots     Json?
+  // Position in the admin's school list for this teacher (drag order in the Edit dialog).
+  displayOrder        Int      @default(0)
   // Calendar date range the teacher is actually assigned/present at this
   // school — distinct from workingDays (which is only day-of-week, no
   // bound) and from TeacherWorkingDaysHistory.effectiveFrom (which only
@@ -240,6 +247,7 @@ model TeacherWorkingDaysHistory {
   teacher         User     @relation(fields: [teacherId], references: [id], onDelete: Cascade)
   school          School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
   workingDays     Int[]    // 0=Sun..6=Sat — in effect from effectiveFrom until superseded
+  workingDaySlots Json?    // same shape as TeacherSchool.workingDaySlots
   effectiveFrom   DateTime // UTC-midnight-anchored date, inclusive
   createdByUserId Int?
   createdAt       DateTime @default(now())
@@ -395,13 +403,19 @@ model Assignment {
   schoolId  String?
   school    School?  @relation(fields: [schoolId], references: [id], onDelete: SetNull)
   subject   String?
-  assignmentType String @default("COURSE") // COURSE | DAILY
+  assignmentType String @default("COURSE") // COURSE | DAILY | EXAM
+  examType  String?   // ANNUAL | SEMESTER | ... (EXAM only)
+  startsAt  DateTime? // EXAM: window opens
+  endsAt    DateTime? // EXAM: window closes
+  durationMinutes Int? // EXAM: per-attempt time limit
   academicYear String?
   title     String
   description String? @db.Text
   instructions String? @db.Text
   attachments Json?   // array of { name, url }
   dueDate   DateTime?
+  closeDate DateTime? // DAILY/COURSE: with policy "allow", last day late submissions are accepted (null = never closes)
+  lateSubmissionPolicy String @default("allow") // allow | close (DAILY/COURSE, after due date)
   totalMarks Float?
   isPublished Boolean @default(false)
   publishScope String  @default("grade") // grade | section | selected_students
@@ -419,12 +433,26 @@ model Assignment {
   submissions AssignmentSubmission[]
   retakeGrants RetakeGrant[]
   retakeRequests RetakeRequest[]
+  attemptStarts AssignmentAttemptStart[]
   @@index([chapterId])
   @@index([courseId])
   @@index([gradeId])
   @@index([teacherId])
   @@index([schoolId])
   @@index([assignmentType])
+  @@index([assignmentType, schoolId])
+}
+
+model AssignmentAttemptStart {
+  id            String     @id @default(uuid())
+  assignmentId  String
+  assignment    Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  studentId     Int
+  student       User       @relation("AttemptStartStudent", fields: [studentId], references: [id], onDelete: Cascade)
+  attemptNumber Int
+  startedAt     DateTime   @default(now())
+  @@unique([assignmentId, studentId, attemptNumber])
+  @@index([studentId])
 }
 
 model AssignmentSubmission {
@@ -443,6 +471,7 @@ model AssignmentSubmission {
   score              Float?
   maxScore           Float?
   isRetake           Boolean    @default(false)
+  isLate             Boolean    @default(false)
   submittedAt        DateTime   @default(now())
   gradedAt           DateTime?
   @@unique([assignmentId, studentId, attemptNumber])

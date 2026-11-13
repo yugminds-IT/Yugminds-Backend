@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Role } from '@prisma/client';
@@ -33,6 +33,16 @@ export class AdminDashboardController {
   @Get('assignment-analytics')
   getAssignmentAnalytics() {
     return this.service.getAssignmentAnalytics();
+  }
+
+  @Get('exam-analytics')
+  getExamAnalytics(@Query('school_id') schoolId?: string) {
+    return this.service.getExamAnalytics(schoolId);
+  }
+
+  @Get('assignments/:assignmentId/report-data')
+  getAssignmentReport(@Param('assignmentId') assignmentId: string) {
+    return this.service.getAssignmentReport(assignmentId);
   }
 
   @Post('refresh-dashboard-views')

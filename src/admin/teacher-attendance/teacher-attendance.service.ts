@@ -8,7 +8,17 @@ import {
   getTodayIstDateOnly,
   getTodayIstDateStr,
 } from '../../common/utils/date.util';
-import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import {
+  resolveSlotsForDate,
+  resolveWorkingDaysForDate,
+} from '../../common/utils/working-days-history.util';
+import { slotWeight } from '../../common/utils/day-slots.util';
+import {
+  combineWeights,
+  presentCreditByDate,
+  weightedMetrics,
+  WeightMap,
+} from '../../common/utils/attendance-credit.util';
 
 @Injectable()
 export class AdminTeacherAttendanceService {
@@ -135,15 +145,43 @@ export class AdminTeacherAttendanceService {
     return result;
   }
 
+  /** Like intersectByHistory, but keeps each date's weight (1 full day, 0.5 half-day slot). */
+  private weightsByHistory(
+    workingSet: Set<string>,
+    history: Array<{
+      effectiveFrom: Date;
+      workingDays: number[];
+      workingDaySlots?: unknown;
+    }>,
+  ): WeightMap {
+    const result: WeightMap = new Map();
+    for (const dateStr of workingSet) {
+      const date = new Date(`${dateStr}T12:00:00.000Z`);
+      const dow = date.getUTCDay();
+      if (resolveWorkingDaysForDate(history, date).includes(dow))
+        result.set(
+          dateStr,
+          slotWeight(resolveSlotsForDate(history, date), dow),
+        );
+    }
+    return result;
+  }
+
   /** Fetches TeacherWorkingDaysHistory for one teacher+school, up to (and including) `uptoDate`. */
   private async getWorkingDaysHistory(
     teacherId: number,
     schoolId: string,
     uptoDate: Date,
-  ): Promise<Array<{ effectiveFrom: Date; workingDays: number[] }>> {
+  ): Promise<
+    Array<{
+      effectiveFrom: Date;
+      workingDays: number[];
+      workingDaySlots: unknown;
+    }>
+  > {
     const rows = await this.db.teacherWorkingDaysHistory.findMany({
       where: { teacherId, schoolId, effectiveFrom: { lte: uptoDate } },
-      select: { effectiveFrom: true, workingDays: true },
+      select: { effectiveFrom: true, workingDays: true, workingDaySlots: true },
       orderBy: { effectiveFrom: 'asc' },
     });
     return rows;
@@ -353,6 +391,22 @@ export class AdminTeacherAttendanceService {
       scheduledSchoolIdsByTeacher.get(s.teacherId)!.add(s.schoolId);
     }
 
+    // A split-day teacher (half-day slot today) is expected at every school
+    // they work at today, even before a timetable exists — so show one chip
+    // per school (AM / PM) instead of a single merged badge.
+    for (const u of filtered) {
+      const dow = String(todayDayOfWeek);
+      const splitToday = u.teacherSchools.some(
+        (ts) => (ts.workingDaySlots as Record<string, unknown> | null)?.[dow],
+      );
+      if (!splitToday) continue;
+      const set = scheduledSchoolIdsByTeacher.get(u.id) ?? new Set<string>();
+      for (const ts of u.teacherSchools) {
+        if (ts.workingDays.includes(todayDayOfWeek)) set.add(ts.schoolId);
+      }
+      scheduledSchoolIdsByTeacher.set(u.id, set);
+    }
+
     const onLeaveTeacherIds = new Set(leaves.map((l) => l.teacherId));
     let presentToday = 0;
     let absentToday = 0;
@@ -373,7 +427,13 @@ export class AdminTeacherAttendanceService {
     // so the existing merged `teacherTodayStatus` badge covers it unchanged.
     const teacherTodaySchoolStatuses: Record<
       string,
-      Array<{ school_id: string; school_name: string; status: string }>
+      Array<{
+        school_id: string;
+        school_name: string;
+        status: string;
+        /** Half-day window today (absent = full day) so a split-day teacher reads "AM · School A / PM · School B". */
+        slot: unknown;
+      }>
     > = {};
 
     const perSchoolStatus = (
@@ -440,6 +500,10 @@ export class AdminTeacherAttendanceService {
             school_id: ts.schoolId,
             school_name: ts.school?.name ?? 'School',
             status: perSchoolStatus(u, ts.schoolId, isOnLeave),
+            slot:
+              (ts.workingDaySlots as Record<string, unknown> | null)?.[
+                String(today.getUTCDay())
+              ] ?? null,
           }));
       }
     }
@@ -464,22 +528,7 @@ export class AdminTeacherAttendanceService {
     // Attendance" figure. Reuse the same month-to-date percentage that backs
     // the Attendance tab (computeAttendanceMetrics via monthly()) so the
     // dashboard's "Avg Attendance" card reflects a real average instead.
-    const { monthlyData: monthToDateData } = await this.monthly(
-      undefined,
-      schoolId,
-    );
-    const ratedMonthEntries = monthToDateData.filter(
-      (m) => m.total_working_days > 0,
-    );
-    const averageAttendanceRate =
-      ratedMonthEntries.length > 0
-        ? Math.round(
-            ratedMonthEntries.reduce(
-              (sum, m) => sum + m.attendance_percentage,
-              0,
-            ) / ratedMonthEntries.length,
-          )
-        : 0;
+    const averageAttendanceRate = await this.averageRate(schoolId);
 
     return {
       summary: {
@@ -505,6 +554,22 @@ export class AdminTeacherAttendanceService {
   }
 
   /**
+   * Month-to-date average attendance % across a school's teachers (no report on a past working day =
+   * absent). The one number every "teacher attendance" card should show — never derive it from stored
+   * Attendance rows alone, those miss the days nobody reported.
+   */
+  async averageRate(schoolId?: string): Promise<number> {
+    const { monthlyData } = await this.monthly(undefined, schoolId);
+    const rated = monthlyData.filter((m) => m.total_working_days > 0);
+    return rated.length > 0
+      ? Math.round(
+          rated.reduce((sum, m) => sum + m.attendance_percentage, 0) /
+            rated.length,
+        )
+      : 0;
+  }
+
+  /**
    * Get monthly attendance data (per teacher or aggregated) for a given month.
    */
   /**
@@ -517,7 +582,7 @@ export class AdminTeacherAttendanceService {
    * that date once it's calendar-known.
    */
   private computeAttendanceMetrics(
-    attendanceRecords: Array<{ status: string; date: Date }>,
+    attendanceRecords: Array<{ status: string; date: Date; schoolId?: string }>,
     leaveRecords: Array<{ startDate: Date; endDate: Date }>,
     start: Date,
     end: Date,
@@ -525,92 +590,44 @@ export class AdminTeacherAttendanceService {
     // Dates the teacher submitted any report on (YYYY-MM-DD). An Absent day
     // that has one means the report came in after the 8pm cutoff.
     reportedDates: Set<string> = new Set(),
-  ): {
-    present_days: number;
-    absent_days: number;
-    leave_days: number;
-    unreported_days: number;
-    late_report_days: number;
-    total_working_days: number;
-    attendance_percentage: number;
-  } {
-    const isWorkingDay = (d: string) => workingSet.has(d);
+    // Per-school weight maps (0.5 for half-day slots). Omitted = every
+    // working date weighs 1, the pre-slots behaviour.
+    weightsBySchool: Map<string, WeightMap> = new Map(),
+  ) {
+    const dayStr = (d: Date) => d.toISOString().split('T')[0];
+    const weights: WeightMap = weightsBySchool.size
+      ? combineWeights(weightsBySchool.values())
+      : new Map([...workingSet].map((d) => [d, 1]));
+    for (const d of [...weights.keys()])
+      if (!workingSet.has(d)) weights.delete(d);
 
-    const presentDayDates = new Set(
+    const explicitAbsent = new Set(
       attendanceRecords
-        .filter(
-          (a) =>
-            a.status === 'Present' &&
-            isWorkingDay(a.date.toISOString().split('T')[0]),
-        )
-        .map((a) => a.date.toISOString().split('T')[0]),
+        .filter((a) => a.status === 'Absent')
+        .map((a) => dayStr(a.date)),
     );
-    const absentDayDates = new Set(
-      attendanceRecords
-        .filter(
-          (a) =>
-            a.status === 'Absent' &&
-            isWorkingDay(a.date.toISOString().split('T')[0]),
-        )
-        .map((a) => a.date.toISOString().split('T')[0]),
-    );
-    const leaveDayDates = new Set<string>();
-    leaveRecords.forEach((l) => {
-      const overlapStart = l.startDate > start ? l.startDate : start;
-      const overlapEnd = l.endDate < end ? l.endDate : end;
-      const current = new Date(overlapStart);
-      while (current <= overlapEnd) {
-        const dateStr = current.toISOString().split('T')[0];
-        if (
-          isWorkingDay(dateStr) &&
-          !presentDayDates.has(dateStr) &&
-          !leaveDayDates.has(dateStr)
-        ) {
-          leaveDayDates.add(dateStr);
-        }
-        current.setUTCDate(current.getUTCDate() + 1);
-      }
-    });
-
-    for (const d of presentDayDates) absentDayDates.delete(d);
-    for (const d of leaveDayDates) absentDayDates.delete(d);
-
-    // Rule: no report = no attendance = Absent. Every PAST working day not
-    // covered by present/absent/leave is Absent — including days with no
-    // Attendance row (teachers without a timetable, a cron that never ran).
-    // Today stays Unreported until the 8pm cron settles it. Deriving this
-    // from the working-set complement keeps present+absent+leave+unreported
-    // always equal to total_working_days.
-    const todayStr = getTodayIstDateStr();
-    const unreportedDayDates = new Set<string>();
-    for (const d of workingSet) {
-      if (
-        presentDayDates.has(d) ||
-        absentDayDates.has(d) ||
-        leaveDayDates.has(d)
-      ) {
-        continue;
-      }
-      if (d < todayStr) absentDayDates.add(d);
-      else unreportedDayDates.add(d);
+    const leaveDates = new Set<string>();
+    for (const l of leaveRecords) {
+      const cur = new Date(l.startDate > start ? l.startDate : start);
+      const last = l.endDate < end ? l.endDate : end;
+      for (; cur <= last; cur.setUTCDate(cur.getUTCDate() + 1))
+        if (weights.has(dayStr(cur))) leaveDates.add(dayStr(cur));
     }
 
-    const totalWorkingDays = workingSet.size;
-    const presentDays = presentDayDates.size;
-
-    return {
-      present_days: presentDays,
-      absent_days: absentDayDates.size,
-      leave_days: leaveDayDates.size,
-      unreported_days: unreportedDayDates.size,
-      late_report_days: [...absentDayDates].filter((d) => reportedDates.has(d))
-        .length,
-      total_working_days: totalWorkingDays,
-      attendance_percentage:
-        totalWorkingDays > 0
-          ? Math.round((presentDays / totalWorkingDays) * 100)
-          : 0,
-    };
+    // Rule: no report = no attendance = Absent. Every PAST working day (or
+    // part of one) not covered by present/leave is Absent, even with no
+    // Attendance row; today stays Unreported until the 8pm cron settles it.
+    return weightedMetrics({
+      weights,
+      presentCredit: presentCreditByDate(
+        attendanceRecords as never,
+        weightsBySchool,
+      ),
+      explicitAbsent,
+      leaveDates,
+      reportedDates,
+      todayStr: getTodayIstDateStr(),
+    });
   }
 
   /**
@@ -748,11 +765,16 @@ export class AdminTeacherAttendanceService {
       // in effect for this teacher at that school on each specific date —
       // see intersectByHistory for why this must be per-day, not one static
       // array covering the whole month.
-      const workingSetBySchool = new Map(
+      const weightsBySchool = new Map(
         workingSetEntries.map(([sid, set]) => {
           const history = historyBySchool.get(sid) ?? [];
-          return [sid, this.intersectByHistory(set, history)] as const;
+          return [sid, this.weightsByHistory(set, history)] as const;
         }),
+      );
+      const workingSetBySchool = new Map(
+        [...weightsBySchool].map(
+          ([sid, w]) => [sid, new Set(w.keys())] as const,
+        ),
       );
 
       // Combined figure: a date counts if it's a working day (for this
@@ -772,6 +794,7 @@ export class AdminTeacherAttendanceService {
         end,
         combinedWorkingSet,
         reportedAll,
+        weightsBySchool,
       );
 
       // Per-school breakdown so "filter to check the working days for that
@@ -799,6 +822,7 @@ export class AdminTeacherAttendanceService {
             new Set(
               monthReports.filter((r) => r.schoolId === sid).map(reportedDay),
             ),
+            new Map([[sid, weightsBySchool.get(sid) ?? new Map()]]),
           );
           const ts = t.teacherSchools.find((x) => x.schoolId === sid);
           return {
@@ -807,6 +831,7 @@ export class AdminTeacherAttendanceService {
             working_days: ts?.workingDays?.length
               ? ts.workingDays
               : [1, 2, 3, 4, 5],
+            day_slots: ts?.workingDaySlots ?? null,
             ...metrics,
           };
         });

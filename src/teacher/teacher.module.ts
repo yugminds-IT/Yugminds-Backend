@@ -16,6 +16,7 @@ import { TeacherExtraController } from './extra/teacher-extra.controller';
 import { RealtimeModule } from '../common/realtime/realtime.module';
 import { AdminCalendarService } from '../admin/calendar/calendar.service';
 import { TeacherCalendarController } from './calendar/calendar.controller';
+import { SchoolPerformanceService } from '../school-admin/stats/performance.service';
 import { TeacherScheduleService } from './schedule/teacher-schedule.service';
 
 @Module({
@@ -37,6 +38,7 @@ import { TeacherScheduleService } from './schedule/teacher-schedule.service';
     TeacherLeavesService,
     AdminCalendarService,
     TeacherScheduleService,
+    SchoolPerformanceService,
   ],
 })
 export class TeacherModule {}

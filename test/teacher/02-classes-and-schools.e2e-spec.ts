@@ -51,7 +51,7 @@ describe('Teacher classes, periods, schedules, schools', () => {
       expect(school).toBeDefined();
       expect(school.assignment).toBeDefined();
       expect(school.assignment.subjects).toEqual(
-        expect.arrayContaining(['General']),
+        expect.arrayContaining(['Coding']),
       );
     },
   );

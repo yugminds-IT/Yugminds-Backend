@@ -3,7 +3,7 @@ import {
   BadRequestException,
   ForbiddenException,
 } from '@nestjs/common';
-import { normalizeSubject } from '../../common/report-subjects';
+import { parseSubject } from '../../common/utils/data-standards.util';
 import { DatabaseService } from '../../database/database.service';
 import { RealtimeGateway } from '../../common/realtime/realtime.gateway';
 import { Role } from '@prisma/client';
@@ -79,7 +79,7 @@ export class TeacherReportsService {
     if (!body.period_id) {
       throw new BadRequestException('period_id is required');
     }
-    const subject = normalizeSubject(body.subject);
+    const subject = parseSubject(body.subject); // exact, from the fixed list
     if (!subject) {
       throw new BadRequestException('Pick the subject you taught.');
     }
@@ -405,6 +405,7 @@ export class TeacherReportsService {
         student_count: r.studentCount,
         duration_hours: r.durationHours,
         notes: r.notes,
+        created_at: r.createdAt?.toISOString() ?? null,
       })),
       stats: {
         total,

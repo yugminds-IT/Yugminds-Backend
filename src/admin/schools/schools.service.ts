@@ -1,3 +1,5 @@
+import { parseGrade } from '../../common/utils/data-standards.util';
+import { parsePhone } from '../../common/utils/phone.util';
 import {
   Injectable,
   NotFoundException,
@@ -233,6 +235,10 @@ export class AdminSchoolsService {
   async create(body: Record<string, unknown>) {
     const name = String(body.name ?? '').trim();
     if (!name) throw new BadRequestException('School name is required');
+    // reject bad phones before any row is written
+    parsePhone(body.phone ?? body.contact_phone);
+    parsePhone(body.school_admin_phone);
+    AdminSchoolsService.gradeNamesFrom(body); // reject bad grades before any write
 
     const domain =
       body.domain && String(body.domain).trim().length > 0
@@ -353,6 +359,10 @@ export class AdminSchoolsService {
   async update(body: Record<string, unknown>) {
     const id = body.id != null ? String(body.id) : null;
     if (!id) throw new BadRequestException('School id is required');
+    // reject bad phones before any row is written
+    parsePhone(body.phone ?? body.contact_phone);
+    parsePhone(body.school_admin_phone);
+    AdminSchoolsService.gradeNamesFrom(body); // reject bad grades before any write
 
     const name = body.name != null ? String(body.name).trim() : undefined;
     const domain = body.domain != null ? String(body.domain).trim() : undefined;
@@ -409,13 +419,9 @@ export class AdminSchoolsService {
     // this safe to re-run with an existing school's unchanged grades (pure
     // no-op), so this is how an admin adds a new grade (and its sections) to
     // a school after creation, from the same "Edit School" form.
-    const rawGrades = body.grades_offered ?? body.gradesOffered;
-    if (Array.isArray(rawGrades) && rawGrades.length > 0) {
-      const wantedGradeNames = new Set(
-        (rawGrades as unknown[])
-          .map((g) => String(g).trim())
-          .filter((g) => g.length > 0),
-      );
+    const wanted = AdminSchoolsService.gradeNamesFrom(body);
+    if (wanted.length > 0) {
+      const wantedGradeNames = new Set(wanted);
       // A grade dropped from the list is actually removed — cascades its
       // Sections -> TeacherSectionAssignment/JoinCode via the schema's own
       // FK onDelete: Cascade. No dependent check, matching how every other
@@ -795,6 +801,15 @@ export class AdminSchoolsService {
     return `${base}${Date.now().toString(36).toUpperCase().slice(-4)}`;
   }
 
+  /** Grade names from the form, each exactly "Grade 1".."Grade 12" (400 otherwise). */
+  private static gradeNamesFrom(body: Record<string, unknown>): string[] {
+    const raw = body.grades_offered ?? body.gradesOffered;
+    if (!Array.isArray(raw)) return [];
+    return (raw as unknown[])
+      .map((g) => parseGrade(String(g)))
+      .filter((g): g is string => g !== null);
+  }
+
   /** Default grade names created for every new school */
   private static readonly DEFAULT_GRADE_NAMES = [
     'Grade 1',
@@ -816,12 +831,7 @@ export class AdminSchoolsService {
     body: Record<string, unknown>,
     schoolCode: string,
   ): Promise<void> {
-    const rawGrades = body.grades_offered ?? body.gradesOffered;
-    const fromForm = Array.isArray(rawGrades)
-      ? (rawGrades as unknown[])
-          .map((g) => String(g).trim())
-          .filter((g) => g.length > 0)
-      : [];
+    const fromForm = AdminSchoolsService.gradeNamesFrom(body);
     const gradeNames =
       fromForm.length > 0
         ? fromForm

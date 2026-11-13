@@ -83,15 +83,15 @@ export class TeacherDashboardService {
         },
         meta: {
           school_ids: [],
-          date: query.date ?? new Date().toISOString().split('T')[0],
+          date: query.date ?? getTodayIstDateStr(),
         },
       };
     }
 
-    const dateStr = query.date ?? new Date().toISOString().split('T')[0];
+    const dateStr = query.date ?? getTodayIstDateStr();
     const day =
       this.toDateOnly(dateStr) ??
-      this.toDateOnly(new Date().toISOString().split('T')[0])!;
+      this.toDateOnly(getTodayIstDateStr())!;
     const dayStart = new Date(day);
     dayStart.setUTCHours(0, 0, 0, 0);
     const dayEnd = new Date(day);
@@ -145,7 +145,7 @@ export class TeacherDashboardService {
               dayOfWeek,
               isActive: true,
             },
-            select: { periodId: true },
+            select: { periodId: true, schoolId: true },
           })
         : [];
     const todaysClasses = new Set(schedulesToday.map((s) => s.periodId)).size;
@@ -222,6 +222,10 @@ export class TeacherDashboardService {
         school_ids: schoolIds,
         date: dateStr,
         working_school_ids_today: workStatus.workingSchoolIds,
+        class_school_ids_today: [
+          ...new Set(schedulesToday.map((s) => s.schoolId)),
+        ],
+        day_slots_today: workStatus.slots,
         holiday_school_ids_today: workStatus.holidaySchoolIds,
         holidays_today: workStatus.holidays,
         off_schedule_school_ids_today: workStatus.offScheduleSchoolIds,

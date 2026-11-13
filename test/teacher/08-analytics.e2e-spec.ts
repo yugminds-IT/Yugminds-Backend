@@ -77,7 +77,7 @@ describe('Teacher analytics', () => {
         assignmentType: 'DAILY',
         isPublished: true,
         totalMarks: 10,
-        subject: 'Math',
+        subject: 'Robotics',
         questions: [
           {
             question_type: 'MCQ',

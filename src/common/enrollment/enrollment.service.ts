@@ -1,26 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
 import { DatabaseService } from '../../database/database.service';
-
-/**
- * Collapse "Grade 4" / "4" and "Section A" / "Sec A" / "A" to the same token.
- * CourseAccess stores school structure names (often "Section A") while
- * StudentSchool.section is frequently the bare letter.
- */
-function classLabel(value: string | null | undefined): string | null {
-  if (!value) return null;
-  const compact = value.toLowerCase().replace(/[\s._-]+/g, '');
-  const stripped = compact.replace(
-    /^(?:grade|class|standard|std|section|sec)+/,
-    '',
-  );
-  return stripped || null;
-}
-
-/** Trusted identifier → same class-label token used by shouldEnroll. */
-function sqlClassLabel(column: string): Prisma.Sql {
-  return Prisma.sql`regexp_replace(lower(regexp_replace(COALESCE(${Prisma.raw(column)}, ''), '[\\s._-]+', '', 'g')), '^(grade|class|standard|std|section|sec)+', '')`;
-}
 
 /**
  * A course's grant for one school: which grades, and (optionally) which
@@ -37,10 +16,6 @@ export interface CourseGradeGrant {
 export class EnrollmentService {
   constructor(private readonly db: DatabaseService) {}
 
-  private normalize(value: string | null): string | null {
-    return classLabel(value);
-  }
-
   /**
    * Whether a student in `studentGrade`/`studentSection` should be enrolled
    * given a course's per-grade grants for their school:
@@ -56,21 +31,17 @@ export class EnrollmentService {
   ): boolean {
     if (courseGrades.length === 0) return true;
 
-    const normStudentGrade = this.normalize(studentGrade);
-    if (!normStudentGrade) return false;
+    // Grades and sections are both stored in one standard form ("Grade 4",
+    // "Section A"): exact match.
+    if (!studentGrade) return false;
 
-    const matchedGrade = courseGrades.find(
-      (g) => this.normalize(g.gradeName) === normStudentGrade,
-    );
+    const matchedGrade = courseGrades.find((g) => g.gradeName === studentGrade);
     if (!matchedGrade) return false;
 
     if (matchedGrade.sectionNames.length === 0) return true; // grade-wide
 
-    const normStudentSection = this.normalize(studentSection);
-    if (!normStudentSection) return false;
-    return matchedGrade.sectionNames.some(
-      (s) => this.normalize(s) === normStudentSection,
-    );
+    if (!studentSection) return false;
+    return matchedGrade.sectionNames.includes(studentSection);
   }
 
   /** Maps a CourseAccess's grade junction rows to the grant shape shouldEnroll expects. */
@@ -327,7 +298,7 @@ export class EnrollmentService {
           HAVING
             COUNT(cag.id) = 0
             OR BOOL_OR(
-              ${sqlClassLabel('cag."gradeName"')} = ${sqlClassLabel('ss.grade')}
+              cag."gradeName" = ss.grade
               AND (
                 NOT EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas WHERE cas."courseAccessGradeId" = cag.id
@@ -335,7 +306,7 @@ export class EnrollmentService {
                 OR EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas
                   WHERE cas."courseAccessGradeId" = cag.id
-                    AND ${sqlClassLabel('cas."sectionName"')} = ${sqlClassLabel('ss.section')}
+                    AND cas."sectionName" = ss.section
                 )
               )
             )
@@ -354,7 +325,7 @@ export class EnrollmentService {
           HAVING
             COUNT(cag.id) = 0
             OR BOOL_OR(
-              ${sqlClassLabel('cag."gradeName"')} = ${sqlClassLabel('ss.grade')}
+              cag."gradeName" = ss.grade
               AND (
                 NOT EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas WHERE cas."courseAccessGradeId" = cag.id
@@ -362,7 +333,7 @@ export class EnrollmentService {
                 OR EXISTS (
                   SELECT 1 FROM "CourseAccessSection" cas
                   WHERE cas."courseAccessGradeId" = cag.id
-                    AND ${sqlClassLabel('cas."sectionName"')} = ${sqlClassLabel('ss.section')}
+                    AND cas."sectionName" = ss.section
                 )
               )
             )

@@ -6,12 +6,18 @@ import { Role } from '@prisma/client';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { AdminCalendarService } from '../../admin/calendar/calendar.service';
-import { resolveWorkingDaysForDate } from '../../common/utils/working-days-history.util';
+import {
+  resolveSlotsForDate,
+  resolveWorkingDaysForDate,
+} from '../../common/utils/working-days-history.util';
+import type { DaySlot, DaySlots } from '../../common/utils/day-slots.util';
 
 export interface TeacherScheduleDayDto {
   date: string;
   school_id: string;
   school_name: string;
+  /** Half-day window at this school that day; absent = full day. */
+  slot?: DaySlot;
 }
 
 /**
@@ -82,11 +88,20 @@ export class TeacherCalendarController {
   ): Promise<{ schedule: TeacherScheduleDayDto[]; unassignedDates: string[] }> {
     const history = await this.db.teacherWorkingDaysHistory.findMany({
       where: { teacherId },
-      select: { schoolId: true, workingDays: true, effectiveFrom: true },
+      select: {
+        schoolId: true,
+        workingDays: true,
+        workingDaySlots: true,
+        effectiveFrom: true,
+      },
     });
     const historyBySchool = new Map<
       string,
-      Array<{ effectiveFrom: Date; workingDays: number[] }>
+      Array<{
+        effectiveFrom: Date;
+        workingDays: number[];
+        workingDaySlots: unknown;
+      }>
     >();
     for (const h of history) {
       if (!historyBySchool.has(h.schoolId)) historyBySchool.set(h.schoolId, []);
@@ -116,10 +131,14 @@ export class TeacherCalendarController {
         if (entries.some((e) => e.effectiveFrom <= d)) assignedSomewhere = true;
         if (!resolveWorkingDaysForDate(entries, d).includes(dayOfWeek))
           continue;
+        const slot = (resolveSlotsForDate(entries, d) as DaySlots | null)?.[
+          String(dayOfWeek)
+        ];
         schedule.push({
           date: dateStr,
           school_id: schoolId,
           school_name: schoolNameById.get(schoolId) ?? '',
+          ...(slot && { slot }),
         });
       }
       if (!assignedSomewhere) unassignedDates.push(dateStr);

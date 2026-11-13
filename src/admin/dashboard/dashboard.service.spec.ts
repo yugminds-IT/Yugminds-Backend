@@ -1,12 +1,16 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AdminDashboardService } from './dashboard.service';
+import { AdminTeacherAttendanceService } from '../teacher-attendance/teacher-attendance.service';
 import { DatabaseService } from '../../database/database.service';
 import { MonitoringService } from '../../common/monitoring/monitoring.service';
 import { MonitoringHistoryService } from '../../common/monitoring/monitoring-history.service';
+import { ExamAnalyticsService } from '../../common/assignment/exam-analytics.service';
+import { AssignmentReportService } from '../../common/assignment/assignment-report.service';
 import { StudentRankingService } from '../../common/assignment/student-ranking.service';
 
 describe('AdminDashboardService', () => {
   let service: AdminDashboardService;
+  let monthlyData: Array<Record<string, unknown>>;
   let db: {
     tenant: { count: jest.Mock; findMany: jest.Mock };
     user: { count: jest.Mock; findMany: jest.Mock };
@@ -63,6 +67,7 @@ describe('AdminDashboardService', () => {
       }),
     };
 
+    monthlyData = [];
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AdminDashboardService,
@@ -70,9 +75,17 @@ describe('AdminDashboardService', () => {
         { provide: MonitoringService, useValue: monitoring },
         { provide: MonitoringHistoryService, useValue: { history: jest.fn() } },
         {
+          provide: AdminTeacherAttendanceService,
+          useValue: {
+            monthly: jest.fn(() => Promise.resolve({ monthlyData })),
+          },
+        },
+        {
           provide: StudentRankingService,
           useValue: { getSystemLeaderboard: jest.fn().mockResolvedValue([]) },
         },
+        { provide: ExamAnalyticsService, useValue: { compute: jest.fn() } },
+        { provide: AssignmentReportService, useValue: { get: jest.fn() } },
       ],
     }).compile();
 
@@ -118,32 +131,28 @@ describe('AdminDashboardService', () => {
   });
 
   describe('health numbers', () => {
-    const rec = (teacherId: number, status: string) => ({ teacherId, status });
-
-    it('leaves approved leave out of the attendance rate and counts Unreported against it', async () => {
-      db.attendance.findMany.mockResolvedValue([
-        rec(1, 'Present'),
-        rec(1, 'Present'),
-        rec(1, 'Leave-Approved'),
-        rec(1, 'Unreported'),
-      ]);
+    it("averages the teachers' weighted month-to-date rate (missed days count as absent)", async () => {
+      monthlyData = [
+        { teacher_id: '1', total_working_days: 10, attendance_percentage: 60 },
+        { teacher_id: '2', total_working_days: 10, attendance_percentage: 100 },
+        { teacher_id: '3', total_working_days: 0, attendance_percentage: 0 }, // no working days: not rated
+      ];
       const r = (await service.getAnalytics(undefined, undefined, true)) as {
         analytics: { avgAttendance: number };
       };
-      expect(r.analytics.avgAttendance).toBe(67); // 2 present of 3 counted days, leave ignored
+      expect(r.analytics.avgAttendance).toBe(80);
     });
 
-    it('does not mark a teacher with no attendance records as needing attention', async () => {
+    it('does not mark a teacher with no working days as needing attention', async () => {
       db.user.findMany.mockImplementation(
         (args: { where: { role?: string } }) =>
           Promise.resolve(
             args.where.role === 'teacher' ? [{ id: 1 }, { id: 2 }] : [],
           ),
       );
-      db.attendance.findMany.mockResolvedValue([
-        rec(1, 'Present'),
-        rec(1, 'Present'),
-      ]); // teacher 2 has none
+      monthlyData = [
+        { teacher_id: '1', total_working_days: 10, attendance_percentage: 95 },
+      ]; // teacher 2 has no row
       const r = (await service.getAnalytics(undefined, undefined, true)) as {
         teacherPerformance: {
           excellent: number;

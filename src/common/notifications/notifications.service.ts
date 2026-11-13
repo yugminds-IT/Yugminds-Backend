@@ -45,6 +45,7 @@ type PrefFlag =
  */
 const MODE_TO_PREF: Record<string, PrefFlag> = {
   assignment_due: 'assignmentReminders',
+  exam_scheduled: 'assignmentReminders',
   grade_posted: 'gradeNotifications',
   certificate: 'courseUpdates',
   system_alert: 'systemAlerts',

@@ -15,6 +15,11 @@ export class StudentDailyAssignmentsService {
   constructor(private readonly db: DatabaseService) {}
 
   async getVisibleDailyAssignments(studentId: number) {
+    return this.getVisibleAssignments(studentId, 'DAILY');
+  }
+
+  /** School-scoped assignments of one type (DAILY or EXAM) visible to the student. */
+  async getVisibleAssignments(studentId: number, type: 'DAILY' | 'EXAM') {
     const studentSchool = await this.db.studentSchool.findFirst({
       where: { studentId, isActive: true },
       select: { schoolId: true, grade: true, section: true },
@@ -45,7 +50,7 @@ export class StudentDailyAssignmentsService {
     const candidateAssignments = await this.db.assignment.findMany({
       where: {
         schoolId: studentSchool.schoolId,
-        assignmentType: 'DAILY',
+        assignmentType: type,
         isPublished: true,
       },
       include: { questions: true, grade: { select: { name: true } } },
@@ -109,7 +114,7 @@ export class StudentDailyAssignmentsService {
       gradeId: string | null;
     },
   ): Promise<boolean> {
-    if (a.assignmentType !== 'DAILY') return true;
+    if (a.assignmentType !== 'DAILY' && a.assignmentType !== 'EXAM') return true;
     if (!a.isPublished || !a.schoolId) return false;
     const ss = await this.db.studentSchool.findFirst({
       where: { studentId, schoolId: a.schoolId, isActive: true },

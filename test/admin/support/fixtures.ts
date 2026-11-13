@@ -142,7 +142,7 @@ export async function createQaFixture(
           {
             school_id: schoolId,
             grade_sections_assigned: [{ grade, sections: [sections[i]] }],
-            subjects: ['General'],
+            subjects: ['Coding'],
           },
         ],
       })
@@ -243,7 +243,7 @@ export async function createQaFixture(
         teacher_id: teachers[0].id,
         grade,
         section,
-        subject: 'General',
+        subject: 'Coding',
         day_of_week: 'Monday',
       })
       .expect(201);

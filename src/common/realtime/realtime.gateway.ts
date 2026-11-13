@@ -15,6 +15,7 @@ import { DatabaseService } from '../../database/database.service';
 import { tenantContext } from '../../tenants/tenant-context';
 import { Role } from '@prisma/client';
 import { getAllowedOrigins } from '../allowed-origins';
+import { AdminTeacherAttendanceService } from '../../admin/teacher-attendance/teacher-attendance.service';
 import { SessionsService } from '../../auth/sessions/sessions.service';
 
 type JwtPayload = {
@@ -61,6 +62,7 @@ export class RealtimeGateway
     private readonly config: ConfigService,
     private readonly db: DatabaseService,
     private readonly sessions: SessionsService,
+    private readonly teacherAttendance: AdminTeacherAttendanceService,
   ) {
     // A revoked device must stop receiving live data, not just fail its next API call.
     this.sessions.onRevoked((sids) => {
@@ -219,8 +221,6 @@ export class RealtimeGateway
           averageAttendance: 0,
         };
       }
-      const since = new Date();
-      since.setDate(since.getDate() - 30);
       const [
         totalStudents,
         totalTeachers,
@@ -228,7 +228,6 @@ export class RealtimeGateway
         pendingReports,
         pendingLeaves,
         pendingEmergencyLeaves,
-        attendanceAgg,
       ] = await Promise.all([
         this.db.studentSchool.count({ where: { schoolId, isActive: true } }),
         this.db.teacherSchool.count({ where: { schoolId } }),
@@ -251,24 +250,9 @@ export class RealtimeGateway
         >`SELECT COUNT(*)::bigint as count FROM "TeacherLeave" tl JOIN "User" u ON u.id = tl."teacherId" WHERE tl."schoolId" = ${schoolId} AND tl.status = 'pending' AND tl."leaveType" = 'Emergency'`.then(
           (rows) => Number(rows[0]?.count ?? 0),
         ),
-        this.db.attendance.groupBy({
-          by: ['status'],
-          where: { schoolId, date: { gte: since } },
-          _count: { _all: true },
-        }),
       ]);
-      let totalAttendance = 0;
-      let presentAttendance = 0;
-      for (const row of attendanceAgg ?? []) {
-        const c = row._count?._all ?? 0;
-        totalAttendance += c;
-        if (String(row.status ?? '').toLowerCase() === 'present')
-          presentAttendance += c;
-      }
       const averageAttendance =
-        totalAttendance > 0
-          ? Math.round((presentAttendance / totalAttendance) * 100)
-          : 0;
+        await this.teacherAttendance.averageRate(schoolId);
       return {
         totalStudents,
         totalTeachers,

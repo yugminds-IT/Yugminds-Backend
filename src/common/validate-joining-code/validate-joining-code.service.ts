@@ -1,3 +1,4 @@
+import { parsePhone } from '../../common/utils/phone.util';
 import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { AuthService, CreateUserOptions } from '../../auth/auth.service';
@@ -116,6 +117,14 @@ export class ValidateJoiningCodeService {
 
     const { full_name, email, password, parent_name, parent_phone } =
       studentData;
+    try {
+      parsePhone(parent_phone); // before the code's use is claimed
+    } catch (e) {
+      return {
+        success: false,
+        error: e instanceof Error ? e.message : 'Invalid phone',
+      };
+    }
     if (!email?.trim() || !password) {
       return { success: false, error: 'Email and password are required' };
     }

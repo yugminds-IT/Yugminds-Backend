@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { DatabaseService } from '../../database/database.service';
 import { StudentDailyAssignmentsService } from '../daily-assignments.service';
 import { computeCourseProgress } from '../../common/utils/course-progress.util';
+import { duePhase, examPhase } from '../../common/assignment/assignment-types';
 import { EnrollmentService } from '../../common/enrollment/enrollment.service';
 
 @Injectable()
@@ -21,20 +22,63 @@ export class StudentDashboardService {
     const { assignments } =
       await this.dailyAssignments.getVisibleDailyAssignments(studentId);
     const ids = assignments.map((a) => a.id);
-    const submitted =
+    const submittedIds = new Set<string>(
       ids.length > 0
-        ? await this.db.assignmentSubmission
-            .findMany({
+        ? (
+            await this.db.assignmentSubmission.findMany({
               where: { studentId, assignmentId: { in: ids } },
               select: { assignmentId: true },
               distinct: ['assignmentId'],
             })
-            .then((rows) => rows.length)
-        : 0;
+          ).map((r) => r.assignmentId)
+        : [],
+    );
+    const submitted = submittedIds.size;
+    // Closed and never submitted = missed, not something the student can still do.
+    const now = new Date();
+    const missed = (
+      assignments as {
+        id: string;
+        dueDate: Date | null;
+        closeDate: Date | null;
+        lateSubmissionPolicy: string;
+      }[]
+    ).filter(
+      (a) => !submittedIds.has(a.id) && duePhase(a, now) === 'closed',
+    ).length;
     return {
-      pending: Math.max(0, ids.length - submitted),
+      pending: Math.max(0, ids.length - submitted - missed),
       completed: submitted,
     };
+  }
+
+  /** Exams open now and not yet attempted, plus ones scheduled for later. */
+  private async examCounts(studentId: number) {
+    const { assignments } = await this.dailyAssignments.getVisibleAssignments(
+      studentId,
+      'EXAM',
+    );
+    const now = new Date();
+    const ids = assignments.map((a) => a.id);
+    const attempted = new Set(
+      ids.length
+        ? (
+            await this.db.assignmentSubmission.findMany({
+              where: { studentId, assignmentId: { in: ids } },
+              select: { assignmentId: true },
+              distinct: ['assignmentId'],
+            })
+          ).map((r) => r.assignmentId)
+        : [],
+    );
+    let open = 0;
+    let upcoming = 0;
+    for (const a of assignments) {
+      const phase = examPhase(a, now);
+      if (phase === 'open' && !attempted.has(a.id)) open++;
+      else if (phase === 'upcoming') upcoming++;
+    }
+    return { pendingExams: open, upcomingExams: upcoming };
   }
 
   async get(user: { id: number }) {
@@ -52,6 +96,7 @@ export class StudentDashboardService {
     });
 
     const daily = await this.dailyAssignmentCounts(user.id);
+    const exams = await this.examCounts(user.id);
 
     if (enrollments.length === 0) {
       const unreadNotifications = await this.db.notification.count({
@@ -62,6 +107,7 @@ export class StudentDashboardService {
           activeCourses: 0,
           completedCourses: 0,
           pendingAssignments: daily.pending,
+          ...exams,
           completedAssignments: daily.completed,
           unreadNotifications,
         },
@@ -154,23 +200,49 @@ export class StudentDashboardService {
           })
         : [];
 
-    const submissionCount =
+    const courseAssignments =
       assignmentIds.length > 0
-        ? await this.db.assignmentSubmission.count({
-            where: {
-              studentId: user.id,
-              assignmentId: { in: assignmentIds.map((a) => a.id) },
+        ? await this.db.assignment.findMany({
+            where: { id: { in: assignmentIds.map((a) => a.id) } },
+            select: {
+              id: true,
+              dueDate: true,
+              closeDate: true,
+              lateSubmissionPolicy: true,
+              assignmentType: true,
             },
           })
-        : 0;
+        : [];
+    const submittedCourseIds = new Set<string>(
+      courseAssignments.length > 0
+        ? (
+            await this.db.assignmentSubmission.findMany({
+              where: {
+                studentId: user.id,
+                assignmentId: { in: courseAssignments.map((a) => a.id) },
+              },
+              select: { assignmentId: true },
+              distinct: ['assignmentId'],
+            })
+          ).map((r) => r.assignmentId)
+        : [],
+    );
+    const submissionCount = submittedCourseIds.size;
+    // Closed and never submitted = missed, not something the student can still do.
+    const now = new Date();
+    const missedCourse = courseAssignments.filter(
+      (a) => !submittedCourseIds.has(a.id) && duePhase(a, now) === 'closed',
+    ).length;
 
     return {
       stats: {
         activeCourses,
         completedCourses,
         // Combine course (chapter-based) + daily (school homework) assignments.
+        ...exams,
         pendingAssignments:
-          Math.max(0, assignmentIds.length - submissionCount) + daily.pending,
+          Math.max(0, assignmentIds.length - submissionCount - missedCourse) +
+          daily.pending,
         completedAssignments: submissionCount + daily.completed,
         unreadNotifications,
       },

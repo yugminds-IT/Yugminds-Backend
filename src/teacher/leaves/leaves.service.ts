@@ -278,6 +278,31 @@ export class TeacherLeavesService {
       where,
       orderBy: { startDate: 'desc' },
     });
+    // Resolve who decided each request (ids are stored as strings).
+    const idOf = (v?: string | null) => (v ? parseInt(v, 10) : NaN);
+    const userIds = [
+      ...new Set(
+        leaves
+          .flatMap((l) => [l.approvedBy, l.schoolAdminBy, l.adminBy])
+          .map(idOf)
+          .filter((n) => Number.isFinite(n) && n > 0),
+      ),
+    ];
+    const users = userIds.length
+      ? await this.db.user.findMany({
+          where: { id: { in: userIds } },
+          select: { id: true, role: true, email: true, profile: { select: { fullName: true } } },
+        })
+      : [];
+    const who = (v?: string | null) => {
+      const u = users.find((x) => x.id === idOf(v));
+      return u
+        ? {
+            name: u.profile?.fullName?.trim() || u.email,
+            role: u.role === Role.admin ? 'Admin' : 'School admin',
+          }
+        : null;
+    };
     const norm = (s: string) =>
       s === 'pending'
         ? 'Pending'
@@ -299,6 +324,16 @@ export class TeacherLeavesService {
         status: norm(l.status),
         leave_type: l.leaveType,
         ...leaveStageFields(l),
+        admin_remarks: l.adminRemarks,
+        // Whoever last approved/rejected it, and when.
+        // (kept on cancelled leave too: approvedBy is only set once decided)
+        reviewer: l.status === 'pending' ? null : who(l.approvedBy),
+        reviewed_at:
+          l.status === 'pending' || !l.approvedBy
+            ? null
+            : l.updatedAt.toISOString(),
+        school_admin_by: who(l.schoolAdminBy)?.name ?? null,
+        admin_by: who(l.adminBy)?.name ?? null,
         substitute_required:
           (l as { substituteRequired?: boolean }).substituteRequired ?? false,
         created_at: l.createdAt.toISOString(),

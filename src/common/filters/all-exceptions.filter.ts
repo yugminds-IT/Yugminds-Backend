@@ -82,29 +82,34 @@ export class AllExceptionsFilter implements ExceptionFilter {
     // Includes method, url, status, user, and stack/message.
     // You can later replace console.* with a proper logger.
 
-    console.error(
-      '[API_ERROR]',
-      JSON.stringify(
-        {
-          method,
-          url,
-          status,
-          user: user
-            ? {
-                id: user.id,
-                email: user.email,
-                role: user.role,
-              }
-            : null,
-          message:
-            isHttp && exception.getResponse
-              ? exception.getResponse()
-              : ((exception as any)?.message ?? 'Unknown error'),
-        },
-        null,
-        2,
-      ),
-    );
+    // An expired/missing token is an expected, self-healing event (the client
+    // refreshes and retries) — log one short line, not an error dump.
+    if (status === 401) {
+      console.warn(`[AUTH] 401 ${method} ${url}`);
+    } else
+      console.error(
+        '[API_ERROR]',
+        JSON.stringify(
+          {
+            method,
+            url,
+            status,
+            user: user
+              ? {
+                  id: user.id,
+                  email: user.email,
+                  role: user.role,
+                }
+              : null,
+            message:
+              isHttp && exception.getResponse
+                ? exception.getResponse()
+                : ((exception as any)?.message ?? 'Unknown error'),
+          },
+          null,
+          2,
+        ),
+      );
 
     if (!response || typeof response.status !== 'function') {
       throw exception;
