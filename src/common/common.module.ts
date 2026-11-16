@@ -20,6 +20,7 @@ import { ExamAnalyticsService } from './assignment/exam-analytics.service';
 import { AssignmentReportService } from './assignment/assignment-report.service';
 import { RetakeRequestTeacherResolver } from './assignment/retake-request-teacher-resolver.service';
 import { CertificateService } from './certificates/certificate.service';
+import { CareersPublicController } from './careers/careers-public.controller';
 import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
 
 @Module({
@@ -29,6 +30,7 @@ import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
     ProfileController,
     NotificationsController,
     CommonExtraController,
+    CareersPublicController,
     CommunityPublicController,
     ValidateJoiningCodeController,
   ],
@@ -55,6 +57,7 @@ import { LeadAlertsService } from './lead-alerts/lead-alerts.service';
     AssignmentReportService,
     RetakeRequestTeacherResolver,
     CertificateService,
+    LeadAlertsService,
   ],
 })
 export class CommonModule {}

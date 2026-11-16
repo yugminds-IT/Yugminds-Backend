@@ -1,5 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as nodemailer from 'nodemailer';
+import {
+  firstName,
+  hrNewEmail,
+  hrWithdrawnEmail,
+  receivedEmail,
+  stageEmail,
+} from '../careers/careers-mail';
 
 /**
  * Emails the team the moment a website lead comes in: a project brief or a
@@ -42,6 +49,90 @@ export class LeadAlertsService {
     void this.sendConfirmation(brief).catch((e: unknown) =>
       this.log.warn(`Brief confirmation email failed: ${String(e)}`),
     );
+  }
+
+  /**
+   * A trainer application came in: tells HR, and sends the applicant a fixed
+   * "we got it" note with their reference. Plain text and fixed wording, no echo
+   * of what they typed (the address is unverified).
+   */
+  careerApplied(a: {
+    ref: string;
+    name: string;
+    email: string;
+    phone: string;
+    role: string;
+    city: string;
+  }): void {
+    const m = this.mailer();
+    if (!m) return;
+    const hr = process.env.LEAD_ALERT_EMAILS;
+    const jobs = [
+      hr
+        ? m.transport.sendMail({
+            from: `"YugMinds website" <${m.from}>`,
+            to: hr,
+            ...hrNewEmail(a),
+          })
+        : null,
+      m.transport.sendMail({
+        from: `"YugMinds Careers" <${m.from}>`,
+        to: a.email,
+        replyTo: hr?.split(',')[0]?.trim() || m.from,
+        ...receivedEmail({ ...a, first: firstName(a.name) }),
+      }),
+    ];
+    for (const j of jobs)
+      void j?.catch((e: unknown) =>
+        this.log.warn(`Career email failed: ${String(e)}`),
+      );
+  }
+
+  /** Tells HR an applicant closed their own application. */
+  careerWithdrawn(a: { ref: string; name: string; role: string }): void {
+    const m = this.mailer();
+    const hr = process.env.LEAD_ALERT_EMAILS;
+    if (!m || !hr) return;
+    void m.transport
+      .sendMail({
+        from: `"YugMinds website" <${m.from}>`,
+        to: hr,
+        ...hrWithdrawnEmail(a),
+      })
+      .catch((e: unknown) =>
+        this.log.warn(`Withdraw email failed: ${String(e)}`),
+      );
+  }
+
+  /**
+   * A reviewer moved an applicant to a new stage. Resolves true only when the
+   * mail was handed to SMTP, so the caller can log it truthfully.
+   */
+  async careerStage(a: {
+    stage: string;
+    name: string;
+    email: string;
+    role: string;
+    ref: string;
+    note?: string;
+  }): Promise<boolean> {
+    const m = this.mailer();
+    const mail = m
+      ? stageEmail(a.stage, { ...a, first: firstName(a.name) })
+      : null;
+    if (!m || !mail) return false;
+    try {
+      await m.transport.sendMail({
+        from: `"YugMinds Careers" <${m.from}>`,
+        to: a.email,
+        replyTo: process.env.LEAD_ALERT_EMAILS?.split(',')[0]?.trim() || m.from,
+        ...mail,
+      });
+      return true;
+    } catch (e) {
+      this.log.warn(`Career stage email failed: ${String(e)}`);
+      return false;
+    }
   }
 
   /** The shared SMTP connection, or null when mail isn't configured. */

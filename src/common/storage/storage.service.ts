@@ -32,8 +32,15 @@ export class StorageService {
         (this.config.get<string>('S3_FORCE_PATH_STYLE') ?? '').toLowerCase() ===
         'true',
       credentials: {
-        accessKeyId: this.config.get<string>('S3_ACCESS_KEY_ID') ?? '',
-        secretAccessKey: this.config.get<string>('S3_SECRET_ACCESS_KEY') ?? '',
+        // .env.example documents S3_ACCESS_KEY / S3_SECRET; the longer AWS-style names also work.
+        accessKeyId:
+          this.config.get<string>('S3_ACCESS_KEY_ID') ??
+          this.config.get<string>('S3_ACCESS_KEY') ??
+          '',
+        secretAccessKey:
+          this.config.get<string>('S3_SECRET_ACCESS_KEY') ??
+          this.config.get<string>('S3_SECRET') ??
+          '',
       },
     });
   }

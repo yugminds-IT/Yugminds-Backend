@@ -48,6 +48,8 @@ import { AuditInterceptor } from './audit/audit.interceptor.js';
 import { AdminCalendarController } from './calendar/calendar.controller.js';
 import { AdminCalendarService } from './calendar/calendar.service.js';
 import { AdminTeacherReportsService } from './teacher-reports/admin-teacher-reports.service.js';
+import { CareersAdminController } from './careers/careers-admin.controller.js';
+import { OpeningsAdminController } from './careers/openings-admin.controller.js';
 import { AdminLogosService } from './logos/admin-logos.service.js';
 
 @Module({
@@ -82,6 +84,8 @@ import { AdminLogosService } from './logos/admin-logos.service.js';
     DigestController,
     SavedViewsController,
     AdminCalendarController,
+    CareersAdminController,
+    OpeningsAdminController,
   ],
   providers: [
     AdminDashboardService,

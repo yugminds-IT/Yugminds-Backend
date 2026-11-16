@@ -1059,6 +1059,82 @@ model ContactSubmission {
   @@index([deletedAt])
 }
 
+// ============ Careers (trainer hiring) ============
+model JobOpening {
+  id          String   @id @default(uuid())
+  slug        String   @unique
+  title       String
+  location    String
+  jobType     String   @default("Full-time, Permanent")
+  payMin      Int?
+  payMax      Int?
+  team        String   @default("Teaching")
+  positions   Int      @default(1)
+  rejectCooldownDays   Int @default(90) // days before a rejected applicant may re-apply
+  withdrawCooldownDays Int @default(30) // same, after the applicant withdrew
+  description String   @db.Text
+  details     Json? // { teach: string[], seeking: string[] }
+  status      String   @default("open") // draft | open | closed
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  applications JobApplication[]
+}
+
+model JobApplication {
+  id          String   @id @default(uuid())
+  refCode     String   @unique // YM-T-0001
+  openingId   String
+  opening     JobOpening @relation(fields: [openingId], references: [id])
+  fullName    String
+  email       String
+  phone       String   // +91XXXXXXXXXX
+  city        String
+  willTravel  Boolean  @default(true)
+  qualification String
+  college     String?
+  gradYear    Int?
+  experienceYears Int  @default(0)
+  currentStatus String // fresher | student | working
+  skills      String[]
+  gradeBands  String[]
+  englishLevel Int     @default(3) // self-rating 1-5
+  hasTwoWheeler Boolean @default(false)
+  answers     Json     // { why, explain }
+  expectedSalary Int?
+  joinDate    String?
+  heardFrom   String?
+  videoUrl    String?
+  resumeKey   String?
+  resumeName  String?
+  stage       String   @default("new") // new|screening|interview|demo_class|offer|hired|rejected|withdrawn|on_hold
+  rating      Int?     // 1-5, set by reviewer
+  deletedAt   DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  events JobApplicationEvent[]
+
+  @@unique([openingId, email])
+  @@index([stage])
+  @@index([createdAt])
+  @@index([deletedAt])
+}
+
+model JobApplicationEvent {
+  id            String   @id @default(uuid())
+  applicationId String
+  application   JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  type          String   // submitted | stage_change | note | rating
+  fromStage     String?
+  toStage       String?
+  body          String?  @db.Text
+  actorId       Int?
+  createdAt     DateTime @default(now())
+
+  @@index([applicationId, createdAt])
+}
+
 // ============ Admin Audit Log ============
 // Records every admin-surface mutation (who did what, to which entity, from where).
 // Written by AuditInterceptor; queried by /admin/audit-logs.

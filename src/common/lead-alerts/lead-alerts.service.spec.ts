@@ -97,4 +97,20 @@ describe('LeadAlertsService', () => {
     expect(mail.text).not.toContain('evil.example');
     expect(mail.html).not.toContain('evil.example');
   });
+
+  it('sends a stage email and reports whether it went out', async () => {
+    const svc = new LeadAlertsService();
+    const a = {
+      stage: 'interview',
+      name: 'Ravi Kumar',
+      email: 'ravi@example.com',
+      role: 'Robotics Trainer',
+      ref: 'YM-T-ABCDE',
+    };
+    expect(await svc.careerStage(a)).toBe(true);
+    expect(sendMail.mock.calls[0][0].to).toBe('ravi@example.com');
+    expect(await svc.careerStage({ ...a, stage: 'withdrawn' })).toBe(false);
+    delete process.env.SMTP_PASS;
+    expect(await new LeadAlertsService().careerStage(a)).toBe(false);
+  });
 });
