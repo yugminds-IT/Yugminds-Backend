@@ -34,14 +34,27 @@ export class OpeningsAdminController {
         _count: { select: { applications: { where: { deletedAt: null } } } },
       },
     });
-    const hired = await this.db.jobApplication.groupBy({
-      by: ['openingId'],
-      where: { deletedAt: null, stage: 'hired' },
+    const g = await this.db.jobApplication.groupBy({
+      by: ['openingId', 'stage'],
+      where: { deletedAt: null },
       _count: { _all: true },
     });
-    const h = new Map(hired.map((g) => [g.openingId, g._count._all]));
+    const stages = new Map<string, Record<string, number>>();
+    for (const x of g)
+      stages.set(x.openingId, {
+        ...stages.get(x.openingId),
+        [x.stage]: x._count._all,
+      });
     return {
-      openings: rows.map((r) => ({ ...out(r), hired: h.get(r.id) ?? 0 })),
+      openings: rows.map((r) => {
+        const st = stages.get(r.id) ?? {};
+        return {
+          ...out(r),
+          hired: st.hired ?? 0,
+          newCount: st.new ?? 0,
+          stages: st,
+        };
+      }),
     };
   }
 

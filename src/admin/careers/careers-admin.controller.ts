@@ -32,6 +32,11 @@ const row = (a: any) => ({
   rating: a.rating,
   experience_years: a.experienceYears,
   qualification: a.qualification,
+  english_level: a.englishLevel,
+  has_two_wheeler: a.hasTwoWheeler,
+  will_travel: a.willTravel,
+  skills: a.skills,
+  updated_at: a.updatedAt?.toISOString(),
   created_at: a.createdAt.toISOString(),
 });
 
@@ -50,6 +55,8 @@ export class CareersAdminController {
     @Query('stage') stage?: string,
     @Query('search') search?: string,
     @Query('opening') opening?: string,
+    @Query('city') city?: string,
+    @Query('sort') sort?: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
   ) {
@@ -62,6 +69,7 @@ export class CareersAdminController {
       where.stage = stage;
     }
     if (opening) where.openingId = opening;
+    if (city) where.city = city;
     const q = search?.trim();
     if (q)
       where.OR = [
@@ -71,11 +79,11 @@ export class CareersAdminController {
         { refCode: { contains: q, mode: 'insensitive' } },
         { city: { contains: q, mode: 'insensitive' } },
       ];
-    const [rows, total, grouped] = await Promise.all([
+    const [rows, total, grouped, cityRows] = await Promise.all([
       this.db.jobApplication.findMany({
         where,
         include: { opening: { select: { title: true } } },
-        orderBy: { createdAt: 'desc' },
+        orderBy: { createdAt: sort === 'oldest' ? 'asc' : 'desc' },
         take,
         skip: (pg - 1) * take,
       }),
@@ -84,6 +92,12 @@ export class CareersAdminController {
         by: ['stage'],
         where: { deletedAt: null, ...(opening ? { openingId: opening } : {}) },
         _count: { stage: true },
+      }),
+      this.db.jobApplication.findMany({
+        where: { deletedAt: null, ...(opening ? { openingId: opening } : {}) },
+        select: { city: true },
+        distinct: ['city'],
+        orderBy: { city: 'asc' },
       }),
     ]);
     const counts: Record<string, number> = Object.fromEntries(
@@ -96,6 +110,7 @@ export class CareersAdminController {
       page: pg,
       limit: take,
       stage_counts: counts,
+      cities: cityRows.map((c) => c.city),
     };
   }
 
