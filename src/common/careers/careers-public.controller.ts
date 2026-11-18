@@ -45,6 +45,16 @@ export class CareersPublicController {
     return { openings: rows };
   }
 
+  /** One role for its shareable page. Drafts stay hidden; paused/closed render a notice. */
+  @Get('openings/:slug')
+  async opening(@Param('slug') slug: string) {
+    const o = await this.db.jobOpening.findFirst({
+      where: { slug, status: { in: ['open', 'paused', 'closed'] } },
+    });
+    if (!o) throw new NotFoundException('Opening not found');
+    return o;
+  }
+
   /**
    * Applicant status check. POST so the email never lands in URLs or logs; needs the
    * reference AND the email it was sent with, and answers the same way for any miss.
