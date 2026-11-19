@@ -19,6 +19,7 @@ import { DatabaseService } from '../../database/database.service';
 import { StorageService } from '../storage/storage.service';
 import { LeadAlertsService } from '../lead-alerts/lead-alerts.service';
 import { checkResume, parseApplication } from './careers.validate';
+import { resolveForm } from './careers.form';
 
 const REF_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const newRef = () =>
@@ -52,7 +53,7 @@ export class CareersPublicController {
       where: { slug, status: { in: ['open', 'paused', 'closed'] } },
     });
     if (!o) throw new NotFoundException('Opening not found');
-    return o;
+    return { ...o, form: resolveForm(o) };
   }
 
   /**
@@ -180,8 +181,9 @@ export class CareersPublicController {
     } catch {
       throw new BadRequestException('Invalid form data');
     }
-    const data = parseApplication(raw);
-    const ext = checkResume(file);
+    const form = resolveForm(opening);
+    const data = parseApplication(raw, form);
+    const ext = checkResume(file, form.resume);
 
     // One live application per person per role. After a rejection or withdrawal they may
     // apply again once the cooldown passes; that reuses the same record so history is kept.
@@ -214,21 +216,26 @@ export class CareersPublicController {
     }
 
     // Content type comes from the verified signature, never from what the browser claimed.
-    const type = {
-      pdf: 'application/pdf',
-      doc: 'application/msword',
-      docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-    }[ext];
-    const key = this.storage.buildKey('careers', `resume.${ext}`);
-    await this.storage.uploadBuffer(key, file!.buffer, type, {
-      contentDisposition: 'attachment',
-    });
+    let key: string | null = null;
+    if (ext && file) {
+      const type = {
+        pdf: 'application/pdf',
+        doc: 'application/msword',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      }[ext];
+      key = this.storage.buildKey('careers', `resume.${ext}`);
+      await this.storage.uploadBuffer(key, file.buffer, type, {
+        contentDisposition: 'attachment',
+      });
+    }
     const refCode = prev?.refCode ?? newRef();
     try {
       const fields = {
         ...data,
         resumeKey: key,
-        resumeName: `${data.fullName.replace(/[^\p{L}\p{N} ]/gu, '').trim() || 'resume'}.${ext}`,
+        resumeName: ext
+          ? `${data.fullName.replace(/[^\p{L}\p{N} ]/gu, '').trim() || 'resume'}.${ext}`
+          : null,
       };
       if (prev)
         await this.db.jobApplication.update({
@@ -260,7 +267,7 @@ export class CareersPublicController {
       if (prev?.resumeKey)
         await this.storage.deleteObject(prev.resumeKey).catch(() => undefined);
     } catch (e) {
-      await this.storage.deleteObject(key).catch(() => undefined);
+      if (key) await this.storage.deleteObject(key).catch(() => undefined);
       if ((e as { code?: string }).code === 'P2002')
         throw new ConflictException(
           'You have already applied for this role with this email',

@@ -18,6 +18,7 @@ import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { StorageService } from '../../common/storage/storage.service';
 import { LeadAlertsService } from '../../common/lead-alerts/lead-alerts.service';
+import { toResponses } from '../../common/careers/careers.form';
 import { STAGES } from '../../common/careers/careers.validate';
 
 const row = (a: any) => ({
@@ -110,7 +111,7 @@ export class CareersAdminController {
       page: pg,
       limit: take,
       stage_counts: counts,
-      cities: cityRows.map((c) => c.city),
+      cities: cityRows.map((c) => c.city).filter(Boolean),
     };
   }
 
@@ -134,7 +135,7 @@ export class CareersAdminController {
       grade_bands: a.gradeBands,
       english_level: a.englishLevel,
       has_two_wheeler: a.hasTwoWheeler,
-      answers: a.answers,
+      responses: toResponses(a.answers),
       expected_salary: a.expectedSalary,
       join_date: a.joinDate,
       heard_from: a.heardFrom,

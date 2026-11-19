@@ -1074,6 +1074,7 @@ model JobOpening {
   withdrawCooldownDays Int @default(30) // same, after the applicant withdrew
   description String   @db.Text
   details     Json? // { teach: string[], seeking: string[] }
+  formConfig  Json? // application form; null = Teaching preset
   status      String   @default("open") // draft | open | closed
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
@@ -1090,17 +1091,17 @@ model JobApplication {
   email       String
   phone       String   // +91XXXXXXXXXX
   city        String
-  willTravel  Boolean  @default(true)
-  qualification String
+  willTravel  Boolean?
+  qualification String @default("")
   college     String?
   gradYear    Int?
   experienceYears Int  @default(0)
-  currentStatus String // fresher | student | working
+  currentStatus String @default("") // fresher | student | working
   skills      String[]
   gradeBands  String[]
-  englishLevel Int     @default(3) // self-rating 1-5
-  hasTwoWheeler Boolean @default(false)
-  answers     Json     // { why, explain }
+  englishLevel Int?    // self-rating 1-5
+  hasTwoWheeler Boolean?
+  answers     Json     // { [questionId]: { q, v } }; old rows { why, explain }
   expectedSalary Int?
   joinDate    String?
   heardFrom   String?

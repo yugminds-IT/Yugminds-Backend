@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { parsePhone } from '../utils/phone.util';
+import { parseAnswers, parseFormConfig, type FormConfig } from './careers.form';
 
 export const STAGES = [
   'new',
@@ -12,17 +13,6 @@ export const STAGES = [
   'withdrawn',
   'on_hold',
 ] as const;
-export const SKILLS = [
-  'Scratch',
-  'Python',
-  'Arduino',
-  'Robotics kits',
-  'AI / ML basics',
-  'Web / HTML',
-];
-export const GRADE_BANDS = ['Grades 1-5', 'Grades 6-8', 'Grades 9-12'];
-export const CURRENT = ['fresher', 'student', 'working'];
-
 const fail = (m: string) => new BadRequestException(m);
 const str = (v: unknown, max: number, label: string, required = true) => {
   const s = String(v ?? '').trim();
@@ -46,60 +36,45 @@ const int = (
     throw fail(`${label} is invalid`);
   return n;
 };
-const pick = (v: unknown, allowed: string[], label: string) => {
-  if (!Array.isArray(v)) return [];
-  const out = [...new Set(v.map(String))];
-  if (out.some((x) => !allowed.includes(x)))
-    throw fail(`${label} has an unknown option`);
-  return out;
-};
 
-/** Cleans the untrusted public form; throws 400 with a readable message. */
-export function parseApplication(b: Record<string, unknown>) {
+/** Cleans the untrusted public form: fixed core fields here, role questions via the opening's form. */
+export function parseApplication(b: Record<string, unknown>, form: FormConfig) {
   const email = str(b.email, 200, 'Email').toLowerCase();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw fail('Email is invalid');
-  const phone = parsePhone(b.phone);
-  if (!phone) throw fail('Phone is required');
-  const currentStatus = str(b.currentStatus, 20, 'Current status');
-  if (!CURRENT.includes(currentStatus)) throw fail('Current status is invalid');
-  const videoUrl = str(b.videoUrl, 300, 'Video link', false);
-  if (videoUrl && !/^https?:\/\//i.test(videoUrl))
-    throw fail('Video link must start with http(s)://');
+  const mode = (k: 'phone' | 'city') => form.core?.[k]?.mode ?? 'required';
+  const phoneRaw = String(b.phone ?? '').trim();
+  const phone =
+    mode('phone') === 'off' || (mode('phone') === 'optional' && !phoneRaw)
+      ? ''
+      : parsePhone(b.phone);
+  if (phone == null || (!phone && mode('phone') === 'required'))
+    throw fail('Phone is required');
   if (b.consent !== true) throw fail('Please accept the consent to apply');
+  const { cols, answers } = parseAnswers(form, b.answers);
   return {
     fullName: str(b.fullName, 80, 'Name'),
     email,
     phone,
-    city: str(b.city, 80, 'City'),
-    willTravel: b.willTravel !== false,
-    qualification: str(b.qualification, 120, 'Qualification'),
-    college: str(b.college, 160, 'College', false) || null,
-    gradYear: int(b.gradYear, 1990, 2040, 'Graduation year'),
-    experienceYears: int(b.experienceYears, 0, 40, 'Experience') ?? 0,
-    currentStatus,
-    skills: pick(b.skills, SKILLS, 'Skills'),
-    gradeBands: pick(b.gradeBands, GRADE_BANDS, 'Grades'),
-    englishLevel: int(b.englishLevel, 1, 5, 'English level', true) as number,
-    hasTwoWheeler: b.hasTwoWheeler === true,
-    answers: {
-      why: str(b.why, 1000, 'Why do you want to be a trainer'),
-      explain: str(b.explain, 1000, 'Your explanation'),
-    },
-    expectedSalary: int(b.expectedSalary, 0, 1000000, 'Expected salary'),
-    joinDate: str(b.joinDate, 40, 'Joining date', false) || null,
-    heardFrom: str(b.heardFrom, 80, 'Heard from', false) || null,
-    videoUrl: videoUrl || null,
+    city:
+      mode('city') === 'off'
+        ? ''
+        : str(b.city, 80, 'City', mode('city') === 'required'),
+    ...cols,
+    answers,
   };
 }
 
 const MAX_RESUME = 5 * 1024 * 1024;
 /** Checks size and the file's real signature (PDF, DOC, DOCX), not just the name the browser sent. */
-export function checkResume(f?: {
-  buffer: Buffer;
-  size: number;
-  originalname: string;
-}) {
-  if (!f) throw fail('Please attach your resume (PDF or Word)');
+export function checkResume(
+  f?: { buffer: Buffer; size: number; originalname: string },
+  mode: FormConfig['resume'] = 'required',
+) {
+  if (!f || mode === 'off') {
+    if (mode === 'required')
+      throw fail('Please attach your resume (PDF or Word)');
+    return null;
+  }
   if (f.size > MAX_RESUME) throw fail('Resume must be 5 MB or smaller');
   const h = f.buffer.subarray(0, 4).toString('hex');
   const ext =
@@ -157,6 +132,8 @@ export function parseOpening(b: Record<string, unknown>, partial = false) {
       throw fail('Unknown status');
     o.status = s;
   }
+  if (b.formConfig !== undefined)
+    o.formConfig = b.formConfig === null ? null : parseFormConfig(b.formConfig);
   if (has('teach') || has('seeking'))
     o.details = {
       teach: lines(b.teach, 'What you will teach'),

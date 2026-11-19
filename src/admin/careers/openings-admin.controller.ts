@@ -14,6 +14,7 @@ import { RolesGuard } from '../../auth/roles/roles.guard';
 import { Roles } from '../../auth/decorators/roles.decorator';
 import { DatabaseService } from '../../database/database.service';
 import { parseOpening, slugify } from '../../common/careers/careers.validate';
+import { LIBRARY, PRESETS } from '../../common/careers/careers.form';
 
 const out = ({ _count, ...o }: any) => ({
   ...o,
@@ -25,6 +26,12 @@ const out = ({ _count, ...o }: any) => ({
 @Roles('admin')
 export class OpeningsAdminController {
   constructor(private readonly db: DatabaseService) {}
+
+  /** One source for the builder: standard questions and starting forms. */
+  @Get('form-meta')
+  formMeta() {
+    return { library: LIBRARY, presets: PRESETS };
+  }
 
   @Get()
   async list() {

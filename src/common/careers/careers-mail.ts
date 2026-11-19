@@ -281,11 +281,11 @@ export function hrNewEmail(a: {
   city: string;
   role: string;
 }): Mail {
-  const text = `${a.name}\n${a.phone}\n${a.email}\n${a.city}\n\nOpen it: ${ADMIN_URL}`;
+  const text = `${a.name}\n${a.phone || '-'}\n${a.email}\n${a.city || '-'}\n\nOpen it: ${ADMIN_URL}`;
   const html = shell({
     head: `New application: ${a.role}`,
     body:
-      `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px">${row('Name', esc(a.name))}${row('Phone', `<a href="tel:${esc(a.phone)}" style="color:#1d4ed8">${esc(a.phone)}</a>`)}${row('Email', `<a href="mailto:${esc(a.email)}" style="color:#1d4ed8">${esc(a.email)}</a>`)}${row('City', esc(a.city))}${row('Reference', esc(a.ref))}</table>` +
+      `<table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 0 20px">${row('Name', esc(a.name))}${row('Phone', a.phone ? `<a href="tel:${esc(a.phone)}" style="color:#1d4ed8">${esc(a.phone)}</a>` : '-')}${row('Email', `<a href="mailto:${esc(a.email)}" style="color:#1d4ed8">${esc(a.email)}</a>`)}${row('City', esc(a.city || '-'))}${row('Reference', esc(a.ref))}</table>` +
       `<p style="margin:0 0 22px">${btn(ADMIN_URL, 'Review in Admin')}</p>`,
     foot: 'Sent to the hiring team because someone applied on yugminds.org.',
   });
