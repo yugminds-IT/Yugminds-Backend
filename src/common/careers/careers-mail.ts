@@ -3,14 +3,7 @@
  * Fixed wording per stage: the only free text is the reviewer's optional note,
  * which is HTML-escaped. Pure functions so they can be tested and previewed.
  */
-const RAIL = [
-  'Applied',
-  'Screening',
-  'Interview',
-  'Demo class',
-  'Offer',
-  'Joined',
-];
+const RAIL = ['New', 'Screening', 'Interview', 'Demo class', 'Offer', 'Hired'];
 const AT: Record<string, number> = {
   screening: 1,
   interview: 2,
@@ -19,7 +12,17 @@ const AT: Record<string, number> = {
   hired: 5,
 };
 
-type Copy = { subject: string; head: string; intro: string; next: string[] };
+type Copy = {
+  subject: string;
+  head: string;
+  intro: string;
+  next: string[];
+  /** Replaces next[0] when the reviewer wrote a note, so the email never points at a note that is not there. */
+  withNote?: string;
+};
+
+/** Stages an applicant can be moved back out of: they already got a closing or pausing email. */
+export const REOPENABLE = ['rejected', 'on_hold', 'withdrawn'];
 const COPY: Record<string, (role: string) => Copy> = {
   screening: (role) => ({
     subject: 'Next step on your YugMinds application: a short call',
@@ -47,20 +50,23 @@ const COPY: Record<string, (role: string) => Copy> = {
     intro:
       'You are through the interview. Now teach us: a ten-minute topic of your choice, as if we were a class of Grade 6 students.',
     next: [
+      'We will confirm the date and place with you shortly.',
       'Pick a topic you know well, such as sensors, loops or a simple robot.',
       'Props, a laptop or a whiteboard are all fine. Keep it hands-on.',
       'We share feedback with you the same day.',
     ],
+    withNote: 'The date and place are in the note below.',
   }),
   offer: (role) => ({
     subject: 'An offer from YugMinds',
     head: 'We would like to offer you the role, {first}.',
     intro: `Congratulations. We would like you to join us as ${role}. Paid training on our curriculum and Robocoders kits comes first.`,
     next: [
-      'Read the note below and reply to this email to accept.',
+      'Reply to this email to accept.',
       'Keep your photo ID and education certificates ready.',
       'Questions about pay, timing or schools? Ask us in your reply.',
     ],
+    withNote: 'Read the note below and reply to this email to accept.',
   }),
   hired: (role) => ({
     subject: 'Welcome to YugMinds',
@@ -104,10 +110,14 @@ const esc = (v: string) =>
   );
 
 /** First name if it looks like a plain name, else "there" (the address is unverified). */
-export const firstName = (full: string) =>
-  /^[\p{L}][\p{L} .'-]{0,79}$/u.test(full.trim())
-    ? full.trim().split(/\s+/)[0]
-    : 'there';
+export const firstName = (full: string) => {
+  if (!/^[\p{L}][\p{L} .'-]{0,79}$/u.test(full.trim())) return 'there';
+  const w = full.trim().split(/\s+/)[0];
+  // "CHIKKUDU" typed in caps reads as shouting in an email.
+  return w.length > 1 && w === w.toUpperCase()
+    ? w[0] + w.slice(1).toLowerCase()
+    : w;
+};
 
 const FONT_HEAD = "'Chakra Petch','Trebuchet MS',Arial,sans-serif";
 const FONT_BODY = 'Arial,Helvetica,sans-serif';
@@ -188,13 +198,23 @@ const textFoot = (ref: string) =>
 
 export function stageEmail(
   stage: string,
-  a: { first: string; role: string; ref: string; note?: string },
+  a: {
+    first: string;
+    role: string;
+    ref: string;
+    note?: string;
+    /** They were rejected, on hold or withdrawn before this move. */
+    reopened?: boolean;
+  },
 ): Mail | null {
   const make = COPY[stage];
   if (!make) return null;
   const c = make(a.role);
+  if (a.reopened && AT[stage] !== undefined)
+    c.intro = `Please disregard our earlier message about ${a.role}. We have taken another look and reopened your application. ${c.intro}`;
   const head = c.head.replace('{first}', a.first);
   const note = a.note?.trim();
+  const next = note && c.withNote ? [c.withNote, ...c.next.slice(1)] : c.next;
   const calm = AT[stage] === undefined;
   const text = [
     head,
@@ -203,7 +223,7 @@ export function stageEmail(
     '',
     ...(note ? ['A note from our team:', note, ''] : []),
     'What to do next',
-    ...c.next.map((n, i) => `${i + 1}. ${n}`),
+    ...next.map((n, i) => `${i + 1}. ${n}`),
     '',
     textFoot(a.ref),
   ].join('\n');
@@ -215,7 +235,7 @@ export function stageEmail(
       para(c.intro) +
       noteBox(note) +
       heading('What to do next') +
-      bullets(c.next) +
+      bullets(next) +
       `<p style="margin:0 0 22px">${btn(trackUrl(a.ref), 'Track your application')}</p>` +
       `<p style="margin:0 0 20px">The YugMinds team</p>`,
     foot: applicantFoot(a.ref, a.role),

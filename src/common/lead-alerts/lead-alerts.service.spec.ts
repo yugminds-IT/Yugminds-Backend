@@ -107,10 +107,18 @@ describe('LeadAlertsService', () => {
       role: 'Robotics Trainer',
       ref: 'YM-T-ABCDE',
     };
-    expect(await svc.careerStage(a)).toBe(true);
+    expect(await svc.careerStage(a)).toEqual({ sent: true });
     expect(sendMail.mock.calls[0][0].to).toBe('ravi@example.com');
-    expect(await svc.careerStage({ ...a, stage: 'withdrawn' })).toBe(false);
+    expect(await svc.careerStage({ ...a, stage: 'withdrawn' })).toEqual({
+      sent: false,
+      reason: 'failed',
+    });
+    sendMail.mockRejectedValueOnce(new Error('smtp down'));
+    expect(await svc.careerStage(a)).toEqual({ sent: false, reason: 'failed' });
     delete process.env.SMTP_PASS;
-    expect(await new LeadAlertsService().careerStage(a)).toBe(false);
+    expect(await new LeadAlertsService().careerStage(a)).toEqual({
+      sent: false,
+      reason: 'not_configured',
+    });
   });
 });

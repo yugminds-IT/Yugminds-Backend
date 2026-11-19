@@ -105,7 +105,7 @@ export class LeadAlertsService {
   }
 
   /**
-   * A reviewer moved an applicant to a new stage. Resolves true only when the
+   * A reviewer moved an applicant to a new stage. Resolves sent=true only when the
    * mail was handed to SMTP, so the caller can log it truthfully.
    */
   async careerStage(a: {
@@ -115,12 +115,14 @@ export class LeadAlertsService {
     role: string;
     ref: string;
     note?: string;
-  }): Promise<boolean> {
+    reopened?: boolean;
+  }): Promise<{ sent: boolean; reason?: 'not_configured' | 'failed' }> {
     const m = this.mailer();
     const mail = m
       ? stageEmail(a.stage, { ...a, first: firstName(a.name) })
       : null;
-    if (!m || !mail) return false;
+    if (!m) return { sent: false, reason: 'not_configured' };
+    if (!mail) return { sent: false, reason: 'failed' };
     try {
       await m.transport.sendMail({
         from: `"YugMinds Careers" <${m.from}>`,
@@ -128,10 +130,10 @@ export class LeadAlertsService {
         replyTo: process.env.LEAD_ALERT_EMAILS?.split(',')[0]?.trim() || m.from,
         ...mail,
       });
-      return true;
+      return { sent: true };
     } catch (e) {
       this.log.warn(`Career stage email failed: ${String(e)}`);
-      return false;
+      return { sent: false, reason: 'failed' };
     }
   }
 

@@ -7,6 +7,7 @@ import {
   NotFoundException,
   Param,
   Patch,
+  Post,
   Query,
   Res,
   UseGuards,
@@ -20,6 +21,12 @@ import { StorageService } from '../../common/storage/storage.service';
 import { LeadAlertsService } from '../../common/lead-alerts/lead-alerts.service';
 import { toResponses } from '../../common/careers/careers.form';
 import { STAGES } from '../../common/careers/careers.validate';
+import {
+  firstName,
+  REOPENABLE,
+  stageEmail,
+  STAGE_EMAIL_STAGES,
+} from '../../common/careers/careers-mail';
 
 const row = (a: any) => ({
   id: a.id,
@@ -221,6 +228,8 @@ export class CareersAdminController {
     const message = body.message?.trim();
     if (message && message.length > 600)
       throw new BadRequestException('Message is too long');
+    if (data.stage === 'interview' && body.notify !== false && !message)
+      throw new BadRequestException('Add the date, time and place');
     await this.db.jobApplication.update({
       where: { id },
       data: {
@@ -228,31 +237,117 @@ export class CareersAdminController {
         ...(events.length ? { events: { create: events as any } } : {}),
       },
     });
-    let emailed = false;
-    if (data.stage && body.notify !== false) {
-      const op = await this.db.jobOpening.findUnique({
-        where: { id: a.openingId },
-        select: { title: true },
+    let sent = false;
+    let reason: string | undefined;
+    if (data.stage && body.notify !== false)
+      ({ sent, reason } = await this.sendStageEmail(
+        a,
+        String(data.stage),
+        message,
+        user.id,
+        a.stage,
+      ));
+    return { success: true, emailed: sent, reason };
+  }
+
+  /** Sends the stage email, then logs the outcome so a failure is visible and can be resent. */
+  private async sendStageEmail(
+    a: {
+      id: string;
+      openingId: string;
+      fullName: string;
+      email: string;
+      refCode: string;
+    },
+    stage: string,
+    message: string | undefined,
+    actorId: number,
+    prevStage: string,
+  ) {
+    const op = await this.db.jobOpening.findUnique({
+      where: { id: a.openingId },
+      select: { title: true },
+    });
+    const r = await this.mail.careerStage({
+      stage,
+      name: a.fullName,
+      email: a.email,
+      role: op?.title ?? 'the role',
+      ref: a.refCode,
+      note: message,
+      reopened: REOPENABLE.includes(prevStage),
+    });
+    if (r.reason !== 'not_configured')
+      await this.db.jobApplicationEvent.create({
+        data: {
+          applicationId: a.id,
+          type: r.sent ? 'email' : 'email_failed',
+          toStage: stage,
+          actorId,
+        },
       });
-      emailed = await this.mail.careerStage({
-        stage: String(data.stage),
-        name: a.fullName,
-        email: a.email,
-        role: op?.title ?? 'the role',
-        ref: a.refCode,
-        note: message,
-      });
-      if (emailed)
-        await this.db.jobApplicationEvent.create({
-          data: {
-            applicationId: id,
-            type: 'email',
-            toStage: String(data.stage),
-            actorId: user.id,
-          },
-        });
-    }
-    return { success: true, emailed };
+    return r;
+  }
+
+  /** What the applicant would receive, without sending or saving anything. */
+  @Post(':id/preview-email')
+  async preview(
+    @Param('id') id: string,
+    @Body() body: { stage?: string; message?: string },
+  ) {
+    const a = await this.db.jobApplication.findFirst({
+      where: { id, deletedAt: null },
+      include: { opening: { select: { title: true } } },
+    });
+    if (!a) throw new NotFoundException('Application not found');
+    const stage = String(body.stage ?? '');
+    if (!STAGE_EMAIL_STAGES.includes(stage))
+      throw new BadRequestException('No email is sent for this stage');
+    const message = body.message?.trim();
+    if (message && message.length > 600)
+      throw new BadRequestException('Message is too long');
+    const m = stageEmail(stage, {
+      first: firstName(a.fullName),
+      role: a.opening?.title ?? 'the role',
+      ref: a.refCode,
+      note: message,
+      reopened: stage !== a.stage && REOPENABLE.includes(a.stage),
+    })!;
+    return { subject: m.subject, html: m.html, to: a.email };
+  }
+
+  /** Resend the email for the stage the applicant is in now (e.g. after a failed send). */
+  @Post(':id/resend-email')
+  async resend(
+    @Param('id') id: string,
+    @Body() body: { message?: string },
+    @CurrentUser() user: { id: number },
+  ) {
+    const a = await this.db.jobApplication.findFirst({
+      where: { id, deletedAt: null },
+    });
+    if (!a) throw new NotFoundException('Application not found');
+    if (!STAGE_EMAIL_STAGES.includes(a.stage))
+      throw new BadRequestException('No email is sent for this stage');
+    const message = body.message?.trim();
+    if (message && message.length > 600)
+      throw new BadRequestException('Message is too long');
+    if (a.stage === 'interview' && !message)
+      throw new BadRequestException('Add the date, time and place');
+    // Keep the "reopened" wording if the move that brought them here came out of a closed stage.
+    const move = await this.db.jobApplicationEvent.findFirst({
+      where: { applicationId: id, type: 'stage_change', toStage: a.stage },
+      orderBy: { createdAt: 'desc' },
+      select: { fromStage: true },
+    });
+    const { sent, reason } = await this.sendStageEmail(
+      a,
+      a.stage,
+      message,
+      user.id,
+      move?.fromStage ?? '',
+    );
+    return { success: true, emailed: sent, reason };
   }
 
   @Delete(':id')

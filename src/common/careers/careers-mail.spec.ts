@@ -50,9 +50,40 @@ describe('stageEmail', () => {
     expect(stageEmail('on_hold', a)!.html).not.toContain('Demo class');
   });
 
+  it('says the application was reopened only when it was', () => {
+    for (const s of [
+      'screening',
+      'interview',
+      'demo_class',
+      'offer',
+      'hired',
+    ]) {
+      expect(stageEmail(s, { ...a, reopened: true })!.text).toContain(
+        'reopened your application',
+      );
+      expect(stageEmail(s, a)!.text).not.toContain('reopened');
+    }
+    for (const s of ['rejected', 'on_hold'])
+      expect(stageEmail(s, { ...a, reopened: true })!.text).not.toContain(
+        'reopened',
+      );
+  });
+
+  it('only points at the note when there is one', () => {
+    expect(stageEmail('offer', a)!.text).not.toContain('note below');
+    expect(stageEmail('offer', { ...a, note: 'Pay: 30k' })!.text).toContain(
+      'note below',
+    );
+    expect(stageEmail('demo_class', a)!.text).toContain('confirm the date');
+    expect(
+      stageEmail('demo_class', { ...a, note: 'Sat 10am' })!.text,
+    ).not.toContain('confirm the date');
+  });
+
   it('falls back to "there" for odd names', () => {
     expect(firstName('Ravi Kumar')).toBe('Ravi');
     expect(firstName('<img src=x>')).toBe('there');
+    expect(firstName('CHIKKUDU SHIVA')).toBe('Chikkudu');
   });
 });
 

@@ -1126,7 +1126,7 @@ model JobApplicationEvent {
   id            String   @id @default(uuid())
   applicationId String
   application   JobApplication @relation(fields: [applicationId], references: [id], onDelete: Cascade)
-  type          String   // submitted | stage_change | note | rating
+  type          String   // submitted | stage_change | note | rating | email | email_failed
   fromStage     String?
   toStage       String?
   body          String?  @db.Text
